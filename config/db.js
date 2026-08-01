@@ -10,7 +10,7 @@ const pool = new Pool({
 });
 
 pool.connect()
-    .then(() => console.log('Berhasil terhubung ke Database PostgreSQL'))
-    .catch(err => console.error('Koneksi database gagal', err.stack));
+    .then(() => console.log('Berhasil terhubung ke Database PostgreSQL (Modular)'))
+    .catch(err => console.error('Koneksi database modular gagal:', err.stack));
 
 module.exports = pool;

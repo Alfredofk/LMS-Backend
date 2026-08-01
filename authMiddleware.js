@@ -1,9 +1,6 @@
 const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'lms-secret-key-12345';
 
-/**
- * Middleware to verify JWT token from Authorization header.
- */
 const verifyToken = (req, res, next) => {
     try {
         const authHeader = req.headers.authorization;
@@ -22,9 +19,6 @@ const verifyToken = (req, res, next) => {
     }
 };
 
-/**
- * Middleware to authorize access based on allowed user roles.
- */
 const authorizeRoles = (...allowedRoles) => {
     return (req, res, next) => {
         if (!req.user || !req.user.role) {
