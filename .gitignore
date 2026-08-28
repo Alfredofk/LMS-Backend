@@ -1,4 +1,9 @@
 node_modules/
 .env
+storage/
+
+# Agent-facing docs and design notes — local only
 CLAUDE.md
-docs/agents/
+CONTEXT.md
+docs/
+.scratch/
