@@ -1,0 +1,534 @@
+// LMS spine schema.
+//
+// Scope is deliberate: identity, tenancy, membership, and the academic skeleton
+// the registration and teaching-assignment features hang on. Content, assessment,
+// grading, tracking, gamification and reporting arrive with their own features.
+//
+// Tenancy rule (ADR-0001): every model below carries `schoolId` EXCEPT
+// User, EmailVerificationToken, PasswordResetToken, PlatformAdmin,
+// SchoolRegistration and School. Those six are listed in src/shared/prisma.js as
+// exempt; adding a model here without `schoolId` and without adding it there
+// will make the tenant extension throw on first use, which is the intended
+// failure mode.
+//
+// Three uniqueness rules cannot be expressed in this DSL because they are
+// partial (filtered) indexes. They live in hand-written migration SQL - see
+// prisma/migrations/*/partial_indexes.sql. Do not "fix" their absence here with
+// plain @@unique: rejected and departed rows must be free to repeat.
+
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum SchoolType {
+    SD
+    SMP
+    SMA
+    SMK
+}
+
+/// No value is ever named WALI: Indonesian shortens both wali kelas (homeroom
+/// teacher) and wali murid (guardian) to "wali", and they are different people
+/// with different access. Homeroom teacher is not a role at all - it is
+/// Class.homeroomTeacherMembershipId, because a role cannot express WHICH class.
+enum SchoolRole {
+    PRINCIPAL
+    TEACHER
+    STUDENT
+    GUARDIAN
+}
+
+enum ApprovalStatus {
+    PENDING
+    ACTIVE
+    REJECTED
+}
+
+enum MembershipStatus {
+    PENDING
+    ACTIVE
+    REJECTED
+    LEFT
+}
+
+enum RegistrationStatus {
+    PENDING
+    APPROVED
+    REJECTED
+}
+
+enum AcademicYearStatus {
+    ACTIVE
+    CLOSED
+}
+
+enum SemesterStatus {
+    OPEN
+    FINALIZING
+    CLOSED
+}
+
+enum PromotionOutcome {
+    PROMOTED
+    RETAINED
+    GRADUATED
+}
+
+enum ApprovalAction {
+    SUBMIT
+    APPROVE
+    REJECT
+    REMOVE
+    LEAVE
+    OVERRIDE
+    REGENERATE_CODE
+}
+
+// ---------------------------------------------------------------------------
+// Identity - above tenancy, never filtered by school
+// ---------------------------------------------------------------------------
+
+/// A person's account. Belongs to no school: affiliation is SchoolMembership.
+/// This is the one table the tenant extension must never touch.
+model User {
+    id              String    @id @default(cuid())
+    email           String    @unique
+    passwordHash    String
+    fullName        String
+    emailVerifiedAt DateTime?
+    createdAt       DateTime  @default(now())
+    updatedAt       DateTime  @updatedAt
+    deletedAt       DateTime?
+
+    platformAdmin          PlatformAdmin?
+    memberships            SchoolMembership[]
+    emailVerificationToken EmailVerificationToken[]
+    passwordResetTokens    PasswordResetToken[]
+    schoolRegistrations    SchoolRegistration[]     @relation("RegistrationApplicant")
+
+    @@index([deletedAt])
+}
+
+/// Stored hashed and single-use. A leaked database hands over no live tokens.
+model EmailVerificationToken {
+    id        String    @id @default(cuid())
+    userId    String
+    tokenHash String    @unique
+    expiresAt DateTime
+    usedAt    DateTime?
+    createdAt DateTime  @default(now())
+
+    user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    @@index([userId])
+}
+
+model PasswordResetToken {
+    id        String    @id @default(cuid())
+    userId    String
+    tokenHash String    @unique
+    expiresAt DateTime
+    usedAt    DateTime?
+    createdAt DateTime  @default(now())
+
+    user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    @@index([userId])
+}
+
+/// The platform operator, above every school. Not a school role - no School has
+/// one. Seeded from env; no HTTP route creates one.
+model PlatformAdmin {
+    id        String   @id @default(cuid())
+    userId    String   @unique
+    createdAt DateTime @default(now())
+
+    user             User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+    reviewedRequests SchoolRegistration[] @relation("RegistrationReviewer")
+}
+
+// ---------------------------------------------------------------------------
+// School onboarding - predates or defines the tenant
+// ---------------------------------------------------------------------------
+
+/// A request to found a school, verified by hand by a platform admin.
+///
+/// ktpStoragePath is nulled and the file deleted the moment a decision is made,
+/// approve or reject (UU PDP 27/2022). Only ktpVerifiedAt and the reviewer
+/// survive as evidence the check happened.
+model SchoolRegistration {
+    id              String             @id @default(cuid())
+    applicantUserId String
+    npsn            String
+    schoolName      String
+    schoolType      SchoolType
+    city            String?
+    applicantPhone  String?
+    ktpStoragePath  String?
+    status          RegistrationStatus @default(PENDING)
+    ktpVerifiedAt   DateTime?
+    reviewedByAdminId String?
+    reviewedAt      DateTime?
+    rejectionReason String?
+    createdSchoolId String?            @unique
+    createdAt       DateTime           @default(now())
+    updatedAt       DateTime           @updatedAt
+
+    applicant     User           @relation("RegistrationApplicant", fields: [applicantUserId], references: [id])
+    reviewedBy    PlatformAdmin? @relation("RegistrationReviewer", fields: [reviewedByAdminId], references: [id])
+    createdSchool School?        @relation(fields: [createdSchoolId], references: [id])
+
+    @@index([status])
+    @@index([applicantUserId])
+}
+
+/// The tenancy boundary. Cannot be filtered by schoolId because it defines it.
+model School {
+    id            String     @id @default(cuid())
+    npsn          String     @unique
+    name          String
+    schoolType    SchoolType
+    /// 3 for most schools, 6 for SD, 4 for a four-year SMK. Drives the top grade.
+    durationYears Int
+    city          String?
+    /// Opaque, regenerable. Locates a school; grants nothing (ADR-0002).
+    schoolCode    String     @unique
+    createdAt     DateTime   @default(now())
+    updatedAt     DateTime   @updatedAt
+
+    registration   SchoolRegistration?
+    memberships    SchoolMembership[]
+    membershipRoles MembershipRole[]
+    studentProfiles StudentProfile[]
+    teacherProfiles TeacherProfile[]
+    guardianLinks  GuardianStudent[]
+    academicYears  AcademicYear[]
+    semesters      Semester[]
+    subjects       Subject[]
+    classes        Class[]
+    classMemberships ClassMembership[]
+    classSubjects  ClassSubject[]
+    notifications  Notification[]
+    approvalAudits ApprovalAudit[]
+}
+
+// ---------------------------------------------------------------------------
+// Membership - the tenant boundary for people
+// ---------------------------------------------------------------------------
+
+/// A User's affiliation with one School.
+///
+/// At most ONE row per user may be PENDING or ACTIVE. That is a partial unique
+/// index in migration SQL, not @@unique - REJECTED and LEFT rows must repeat, or
+/// nobody could ever be rejected twice or move schools.
+model SchoolMembership {
+    id          String           @id @default(cuid())
+    schoolId    String
+    userId      String
+    status      MembershipStatus @default(PENDING)
+    requestedAt DateTime         @default(now())
+    approvedAt  DateTime?
+    endedAt     DateTime?
+    createdAt   DateTime         @default(now())
+    updatedAt   DateTime         @updatedAt
+
+    school          School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    user            User              @relation(fields: [userId], references: [id])
+    roles           MembershipRole[]
+    studentProfile  StudentProfile?
+    teacherProfile  TeacherProfile?
+    guardianLinks   GuardianStudent[] @relation("GuardianMembership")
+    homeroomClasses Class[]           @relation("HomeroomTeacher")
+    taughtSubjects  ClassSubject[]    @relation("AssignedTeacher")
+    notifications   Notification[]
+
+    @@unique([schoolId, userId])
+    @@index([schoolId, status])
+    @@index([userId])
+}
+
+/// One role within a membership, approved on its own.
+///
+/// STUDENT is exclusive - it may not coexist with any other role. That rule is
+/// enforced in the approval service, not here: expressing "this enum value
+/// excludes all others for the same parent" is not something a schema can say.
+model MembershipRole {
+    id               String         @id @default(cuid())
+    schoolId         String
+    membershipId     String
+    role             SchoolRole
+    status           ApprovalStatus @default(PENDING)
+    approvedByUserId String?
+    approvedAt       DateTime?
+    rejectionReason  String?
+    createdAt        DateTime       @default(now())
+    updatedAt        DateTime       @updatedAt
+
+    school     School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    membership SchoolMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+    @@unique([membershipId, role])
+    @@index([schoolId, role, status])
+}
+
+/// NISN is unique PER SCHOOL, never globally (ADR-0004). The same child
+/// legitimately has a row at each school they have attended.
+model StudentProfile {
+    id           String    @id @default(cuid())
+    schoolId     String
+    membershipId String    @unique
+    nisn         String
+    birthDate    DateTime?
+    createdAt    DateTime  @default(now())
+    updatedAt    DateTime  @updatedAt
+
+    school           School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    membership       SchoolMembership  @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+    classMemberships ClassMembership[]
+    guardianLinks    GuardianStudent[]
+
+    @@unique([schoolId, nisn])
+    @@index([schoolId])
+}
+
+model TeacherProfile {
+    id           String   @id @default(cuid())
+    schoolId     String
+    membershipId String   @unique
+    nip          String?
+    nuptk        String?
+    createdAt    DateTime @default(now())
+    updatedAt    DateTime @updatedAt
+
+    school     School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    membership SchoolMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+    @@unique([schoolId, nip])
+    @@unique([schoolId, nuptk])
+    @@index([schoolId])
+}
+
+/// Guardian access derives from this link, not from holding the GUARDIAN role.
+/// A teacher whose own child attends the same school holds TEACHER + GUARDIAN on
+/// one membership and reaches their child through here.
+model GuardianStudent {
+    id                   String         @id @default(cuid())
+    schoolId             String
+    guardianMembershipId String
+    studentProfileId     String
+    relationship         String
+    status               ApprovalStatus @default(PENDING)
+    approvedByUserId     String?
+    approvedAt           DateTime?
+    endedAt              DateTime?
+    createdAt            DateTime       @default(now())
+    updatedAt            DateTime       @updatedAt
+
+    school            School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    guardianMembership SchoolMembership @relation("GuardianMembership", fields: [guardianMembershipId], references: [id], onDelete: Cascade)
+    studentProfile    StudentProfile   @relation(fields: [studentProfileId], references: [id], onDelete: Cascade)
+
+    @@unique([guardianMembershipId, studentProfileId])
+    @@index([schoolId, status])
+    @@index([studentProfileId])
+}
+
+// ---------------------------------------------------------------------------
+// Academic structure
+// ---------------------------------------------------------------------------
+
+model AcademicYear {
+    id        String             @id @default(cuid())
+    schoolId  String
+    /// Format "2026/2027", constrained so cross-school reporting can align.
+    label     String
+    startDate DateTime
+    endDate   DateTime
+    status    AcademicYearStatus @default(ACTIVE)
+    createdAt DateTime           @default(now())
+    updatedAt DateTime           @updatedAt
+
+    school    School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    semesters Semester[]
+    classes   Class[]
+
+    @@unique([schoolId, label])
+    @@index([schoolId, status])
+}
+
+model Semester {
+    id             String         @id @default(cuid())
+    schoolId       String
+    academicYearId String
+    /// 1 or 2.
+    ordinal        Int
+    startDate      DateTime
+    endDate        DateTime
+    status         SemesterStatus @default(OPEN)
+    /// Past this, only a principal override creates a ClassSubject.
+    classSubjectRegistrationDeadline DateTime?
+    closedByUserId String?
+    closedAt       DateTime?
+    createdAt      DateTime       @default(now())
+    updatedAt      DateTime       @updatedAt
+
+    school        School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    academicYear  AcademicYear   @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+    classSubjects ClassSubject[]
+
+    @@unique([academicYearId, ordinal])
+    @@index([schoolId, status])
+}
+
+/// Nullable tenant: schoolId NULL is the national catalog shared by every
+/// school; a schoolId means one school's local subject (muatan lokal).
+/// The tenant extension reads these as `schoolId IS NULL OR schoolId = current`.
+model Subject {
+    id        String   @id @default(cuid())
+    schoolId  String?
+    code      String
+    name      String
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    school        School?        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    classSubjects ClassSubject[]
+
+    @@unique([schoolId, code])
+    @@index([schoolId])
+}
+
+/// A cohort, never a course offering. Created by the principal, who names its
+/// homeroom teacher in the same action - a homeroom teacher cannot create the
+/// class they are about to be designated on.
+model Class {
+    id                          String   @id @default(cuid())
+    schoolId                    String
+    academicYearId              String
+    name                        String
+    gradeLevel                  Int
+    homeroomTeacherMembershipId String?
+    createdByUserId             String
+    createdAt                   DateTime @default(now())
+    updatedAt                   DateTime @updatedAt
+
+    school          School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    academicYear    AcademicYear      @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+    homeroomTeacher SchoolMembership? @relation("HomeroomTeacher", fields: [homeroomTeacherMembershipId], references: [id])
+    memberships     ClassMembership[]
+    classSubjects   ClassSubject[]
+
+    @@unique([schoolId, academicYearId, name])
+    @@index([schoolId, gradeLevel])
+    @@index([homeroomTeacherMembershipId])
+}
+
+/// A student's placement in a class. Created by placement or rollover, never by
+/// the student. Promotion writes a NEW row and never mutates the old one, so
+/// past report cards keep their class context forever.
+model ClassMembership {
+    id               String            @id @default(cuid())
+    schoolId         String
+    classId          String
+    studentProfileId String
+    startedAt        DateTime          @default(now())
+    endedAt          DateTime?
+    outcome          PromotionOutcome?
+    outcomeSetByUserId String?
+    outcomeSetAt     DateTime?
+    createdAt        DateTime          @default(now())
+    updatedAt        DateTime          @updatedAt
+
+    school         School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    class          Class          @relation(fields: [classId], references: [id], onDelete: Cascade)
+    studentProfile StudentProfile @relation(fields: [studentProfileId], references: [id], onDelete: Cascade)
+
+    @@index([schoolId, classId])
+    @@index([studentProfileId, endedAt])
+}
+
+/// One subject taught to one class in one semester by one teacher. The
+/// structural spine: content, sessions, assessments and grades will hang here.
+///
+/// Teachers self-assign; the principal approves. At most one PENDING-or-ACTIVE
+/// row per class+subject+semester, enforced by a partial unique index so a
+/// rejected request never permanently blocks the slot.
+model ClassSubject {
+    id                  String         @id @default(cuid())
+    schoolId            String
+    classId             String
+    subjectId           String
+    semesterId          String
+    teacherMembershipId String
+    status              ApprovalStatus @default(PENDING)
+    requestedAt         DateTime       @default(now())
+    decidedByUserId     String?
+    decidedAt           DateTime?
+    rejectionReason     String?
+    /// True when a principal created this after the registration deadline.
+    createdViaOverride  Boolean        @default(false)
+    createdAt           DateTime       @default(now())
+    updatedAt           DateTime       @updatedAt
+
+    school   School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    class    Class            @relation(fields: [classId], references: [id], onDelete: Cascade)
+    subject  Subject          @relation(fields: [subjectId], references: [id])
+    semester Semester         @relation(fields: [semesterId], references: [id], onDelete: Cascade)
+    teacher  SchoolMembership @relation("AssignedTeacher", fields: [teacherMembershipId], references: [id])
+
+    @@index([schoolId, status])
+    @@index([teacherMembershipId, status])
+    @@index([classId, semesterId])
+}
+
+// ---------------------------------------------------------------------------
+// Cross-cutting
+// ---------------------------------------------------------------------------
+
+/// In-app only, polled. Nothing here is ever emailed.
+model Notification {
+    id                    String    @id @default(cuid())
+    schoolId              String
+    recipientMembershipId String
+    type                  String
+    title                 String
+    body                  String
+    readAt                DateTime?
+    createdAt             DateTime  @default(now())
+
+    school    School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    recipient SchoolMembership @relation(fields: [recipientMembershipId], references: [id], onDelete: Cascade)
+
+    @@index([recipientMembershipId, readAt])
+}
+
+/// Append-only log of every approval decision (ADR-0003).
+///
+/// This one IS polymorphic, and that is deliberate: it records what happened
+/// rather than the state anything is read from, so it costs no referential
+/// integrity that matters. schoolId is null for school-registration decisions,
+/// which happen before any school exists.
+model ApprovalAudit {
+    id          String         @id @default(cuid())
+    schoolId    String?
+    subjectType String
+    subjectId   String
+    action      ApprovalAction
+    actorUserId String
+    reason      String?
+    createdAt   DateTime       @default(now())
+
+    school School? @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+    @@index([schoolId, createdAt])
+    @@index([subjectType, subjectId])
+}
