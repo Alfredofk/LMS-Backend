@@ -1,17 +1,15 @@
-'use strict';
+import nodemailer from 'nodemailer';
 
-const nodemailer = require('nodemailer');
+/*
+  Transactional email ONLY: account verification and password reset (ADR-0002).
 
-/**
- * Transactional email ONLY: account verification and password reset (ADR-0002).
- *
- * Notifications stay in-app and polled. Nothing about grades, attendance, reports
- * or guardian alerts is ever emailed - that was settled deliberately, and adding
- * it here would route minors' academic data through an external relay.
- *
- * With SMTP_HOST unset the transport logs to the console instead of sending, so
- * development and tests never need a real mail server.
- */
+  Notifications stay in-app and polled. Nothing about grades, attendance, reports
+  or guardian alerts is ever emailed - that was settled deliberately, and adding
+  it here would route minors' academic data through an external relay.
+
+  With SMTP_HOST unset the transport logs to the console instead of sending, so
+  development and tests never need a real mail server.
+*/
 
 let cachedTransport = null;
 
@@ -88,7 +86,7 @@ async function sendPasswordResetEmail({ to, fullName, token }) {
     });
 }
 
-module.exports = {
+export {
     isConfigured,
     send,
     sendVerificationEmail,

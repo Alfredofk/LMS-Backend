@@ -1,5 +1,3 @@
-'use strict';
-
 class AppError extends Error {
     constructor(status, code, message, details) {
         super(message);
@@ -32,7 +30,7 @@ const notFound = (message = 'Not found') =>
 const ok = (res, data, status = 200) =>
     res.status(status).json({ success: true, data, error: null });
 
-module.exports = {
+export {
     AppError,
     badRequest,
     unauthorized,

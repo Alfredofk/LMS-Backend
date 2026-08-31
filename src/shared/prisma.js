@@ -1,24 +1,22 @@
-'use strict';
+import { PrismaClient } from '@prisma/client';
+import { getSchoolId, isUnscoped } from './tenantContext.js';
 
-const { PrismaClient } = require('@prisma/client');
-const { getSchoolId, isUnscoped } = require('./tenantContext');
+/*
+  Multi-tenant isolation (ADR-0001).
 
-/**
- * Multi-tenant isolation (ADR-0001).
- *
- * Every tenant-owned table carries `schoolId`, and this extension injects it into
- * every read and every write. Isolation is structural: forgetting a filter is not
- * possible by default, and stepping outside it requires runUnscoped() with a reason.
- *
- * The data here includes minors' academic records. A missed filter is a disclosure,
- * not a bug, which is why this fails closed - a tenant-owned query with no ambient
- * school throws rather than returning every school's rows.
- */
+  Every tenant-owned table carries `schoolId`, and this extension injects it into
+  every read and every write. Isolation is structural: forgetting a filter is not
+  possible by default, and stepping outside it requires runUnscoped() with a reason.
 
-/**
- * Identity lives above tenancy, and these three define or predate the tenant, so
- * none of them can be filtered by it.
- */
+  The data here includes minors' academic records. A missed filter is a disclosure,
+  not a bug, which is why this fails closed - a tenant-owned query with no ambient
+  school throws rather than returning every school's rows.
+*/
+
+/*
+  Identity lives above tenancy, and these three define or predate the tenant, so
+  none of them can be filtered by it.
+*/
 const UNSCOPED_MODELS = new Set([
     'User',
     'EmailVerificationToken',
@@ -28,11 +26,11 @@ const UNSCOPED_MODELS = new Set([
     'School',
 ]);
 
-/**
- * Subject is nullable-tenant: rows with schoolId = null are the national catalog
- * shared by every school, rows with a schoolId are that school's local subjects.
- * Reads must see both; writes create a local subject.
- */
+/*
+  Subject is nullable-tenant: rows with schoolId = null are the national catalog
+  shared by every school, rows with a schoolId are that school's local subjects.
+  Reads must see both; writes create a local subject.
+*/
 const CATALOG_MODELS = new Set(['Subject']);
 
 const WHERE_OPS = new Set([
@@ -48,7 +46,7 @@ const WHERE_OPS = new Set([
     'deleteMany',
 ]);
 
-/** Rewritten to their findFirst equivalents so the filter is always legal. */
+// Rewritten to their findFirst equivalents so the filter is always legal.
 const UNIQUE_READ_OPS = new Map([
     ['findUnique', 'findFirst'],
     ['findUniqueOrThrow', 'findFirstOrThrow'],
@@ -74,7 +72,7 @@ function stampCreateData(data, schoolId) {
 
 function buildClient() {
     const base = new PrismaClient({
-        log: process.env.NODE_ENV === 'development' ? ['warn', 'error'] : ['error'],
+        log: ['error'],
     });
 
     return base.$extends({
@@ -141,7 +139,7 @@ function buildClient() {
 
 const prisma = buildClient();
 
-module.exports = {
+export {
     prisma,
     UNSCOPED_MODELS,
     CATALOG_MODELS,

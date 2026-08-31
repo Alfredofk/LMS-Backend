@@ -1,18 +1,16 @@
-'use strict';
+/*
+  National curriculum facts, not school preferences.
 
-/**
- * National curriculum facts, not school preferences.
- *
- * These are hardcoded deliberately. A school able to edit its own grade range or
- * phase boundaries could only misconfigure itself, and cross-school reporting
- * depends on this spine being identical everywhere.
- *
- * "School type" is the Indonesian `jenjang`. It is NOT called a "level" anywhere
- * in this codebase, because that word is already taken by grade level.
- *
- * Phase boundaries are Kurikulum Merdeka's: A=1-2, B=3-4, C=5-6, D=7-9, E=10, F=11-12.
- * Academic streaming (IPA/IPS) is deliberately absent - Kurikulum Merdeka abolished it.
- */
+  These are hardcoded deliberately. A school able to edit its own grade range or
+  phase boundaries could only misconfigure itself, and cross-school reporting
+  depends on this spine being identical everywhere.
+
+  "School type" is the Indonesian `jenjang`. It is NOT called a "level" anywhere
+  in this codebase, because that word is already taken by grade level.
+
+  Phase boundaries are Kurikulum Merdeka's: A=1-2, B=3-4, C=5-6, D=7-9, E=10, F=11-12.
+  Academic streaming (IPA/IPS) is deliberately absent - Kurikulum Merdeka abolished it.
+*/
 
 const SCHOOL_TYPES = {
     SD: { minGrade: 1, maxGrade: 6, defaultDurationYears: 6 },
@@ -52,7 +50,7 @@ function specFor(schoolType) {
     return spec;
 }
 
-/** The highest grade this school teaches. A four-year SMK runs to 13. */
+// The highest grade this school teaches. A four-year SMK runs to 13.
 function maxGradeFor(schoolType, durationYears) {
     const spec = specFor(schoolType);
     if (schoolType === 'SMK' && durationYears === 4) return 13;
@@ -69,22 +67,22 @@ function isValidGrade(schoolType, gradeLevel, durationYears) {
     return Number.isInteger(gradeLevel) && gradeLevel >= min && gradeLevel <= max;
 }
 
-/** Phase is derived from the grade, never stored as a school setting. */
+// Phase is derived from the grade, never stored as a school setting.
 function phaseFor(gradeLevel) {
     const phase = PHASE_BY_GRADE[gradeLevel];
     if (!phase) throw new Error(`No phase defined for grade level ${gradeLevel}`);
     return phase;
 }
 
-/** True when finishing this grade means graduating rather than advancing. */
+// True when finishing this grade means graduating rather than advancing.
 function isFinalGrade(schoolType, gradeLevel, durationYears) {
     return gradeLevel === maxGradeFor(schoolType, durationYears);
 }
 
-/**
- * Where a student lands next year, given their promotion outcome.
- * Null means they leave the school: they either graduated or ran out of grades.
- */
+/*
+  Where a student lands next year, given their promotion outcome.
+  Null means they leave the school: they either graduated or ran out of grades.
+*/
 function nextGradeLevel(schoolType, gradeLevel, outcome, durationYears) {
     switch (outcome) {
         case 'PROMOTED':
@@ -107,9 +105,11 @@ function isValidDurationYears(schoolType, durationYears) {
     return allowed.includes(durationYears);
 }
 
-module.exports = {
+const SCHOOL_TYPE_NAMES = Object.keys(SCHOOL_TYPES);
+
+export {
     SCHOOL_TYPES,
-    SCHOOL_TYPE_NAMES: Object.keys(SCHOOL_TYPES),
+    SCHOOL_TYPE_NAMES,
     isSchoolType,
     gradeRangeFor,
     maxGradeFor,
