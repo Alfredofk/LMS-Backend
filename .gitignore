@@ -7,3 +7,6 @@ CLAUDE.md
 CONTEXT.md
 docs/
 .scratch/
+
+# Runtime logs
+src/log/
