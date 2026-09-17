@@ -5,11 +5,37 @@ const { rewardXp } = require('../helpers/gamification');
 
 const router = express.Router();
 
+// Helper middleware to ensure school_id is present
 const ensureSchoolAssociated = (req, res, next) => {
     if (!req.user || !req.user.school_id) {
         return res.status(403).json({ error: 'Akses ditolak. Akun Anda tidak terasosiasi dengan sekolah mana pun.' });
     }
     next();
+};
+
+const ensureStudentEnrolled = async (req, res, next) => {
+    if (req.user.role !== 'student') {
+        return next();
+    }
+    const courseId = req.params.courseId || req.params.id;
+    if (!courseId) return next();
+
+    try {
+        const enrollCheck = await db.query(
+            `SELECT ce.id 
+             FROM class_enrollments ce
+             JOIN class_subjects cs ON ce.class_id = cs.class_id
+             WHERE cs.id = $1 AND ce.student_id = $2`,
+            [courseId, req.user.id]
+        );
+        if (enrollCheck.rows.length === 0) {
+            return res.status(403).json({ error: 'Akses ditolak. Anda tidak terdaftar di kelas mata pelajaran ini.' });
+        }
+        next();
+    } catch (err) {
+        console.error('Enrollment Check Error:', err);
+        return res.status(500).json({ error: 'Gagal memverifikasi pendaftaran kelas.' });
+    }
 };
 
 // 0. Get Consolidated Student Attendance Summary & History (GET /api/attendance/student/summary)
@@ -74,7 +100,7 @@ router.get('/student/summary', verifyToken, ensureSchoolAssociated, authorizeRol
 });
 
 // 1. Get Student Attendance History & Summary (GET /api/attendance/student/:courseId)
-router.get('/student/:courseId', verifyToken, ensureSchoolAssociated, authorizeRoles('student'), async (req, res) => {
+router.get('/student/:courseId', verifyToken, ensureSchoolAssociated, ensureStudentEnrolled, authorizeRoles('student'), async (req, res) => {
     const { courseId } = req.params;
     const studentId = req.user.id;
 
@@ -134,7 +160,7 @@ router.get('/student/:courseId', verifyToken, ensureSchoolAssociated, authorizeR
 });
 
 // 2. Student Self Check-In Today (POST /api/attendance/student/:courseId/checkin)
-router.post('/student/:courseId/checkin', verifyToken, ensureSchoolAssociated, authorizeRoles('student'), async (req, res) => {
+router.post('/student/:courseId/checkin', verifyToken, ensureSchoolAssociated, ensureStudentEnrolled, authorizeRoles('student'), async (req, res) => {
     const { courseId } = req.params;
     const studentId = req.user.id;
 
@@ -177,7 +203,19 @@ router.post('/student/:courseId/checkin', verifyToken, ensureSchoolAssociated, a
                 } else if (diffDays === 0) {
                     newStreak = streak;
                 } else {
-                    newStreak = 1;
+                    // Check if it's weekend gap: Friday to Monday (3 days) or Saturday to Monday (2 days)
+                    const lastDayOfWeek = lastDate.getDay();
+                    const todayDayOfWeek = today.getDay();
+                    const isWeekendGap = (
+                        (lastDayOfWeek === 5 && todayDayOfWeek === 1 && diffDays === 3) ||
+                        (lastDayOfWeek === 6 && todayDayOfWeek === 1 && diffDays === 2) ||
+                        (lastDayOfWeek === 5 && todayDayOfWeek === 0 && diffDays === 2)
+                    );
+                    if (isWeekendGap) {
+                        newStreak = streak + 1;
+                    } else {
+                        newStreak = 1;
+                    }
                 }
             }
             await db.query(
@@ -205,7 +243,7 @@ router.post('/student/:courseId/checkin', verifyToken, ensureSchoolAssociated, a
 });
 
 // 3. Student Submit Excuse / Absence Notice (POST /api/attendance/student/:courseId/excuse)
-router.post('/student/:courseId/excuse', verifyToken, ensureSchoolAssociated, authorizeRoles('student'), async (req, res) => {
+router.post('/student/:courseId/excuse', verifyToken, ensureSchoolAssociated, ensureStudentEnrolled, authorizeRoles('student'), async (req, res) => {
     const { courseId } = req.params;
     const studentId = req.user.id;
     const { status, notes } = req.body; // status: 'Izin' or 'Sakit'

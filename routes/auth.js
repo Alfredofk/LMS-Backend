@@ -2,6 +2,7 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const db = require('../config/db');
+const { verifyToken } = require('../authMiddleware');
 const { 
     validateTeacherLogin, 
     validateStudentLogin, 
@@ -50,9 +51,7 @@ router.post('/teacher/login', validateTeacherLogin, async (req, res) => {
             // Ignore
         }
 
-        if (!isMatch) {
-            isMatch = (password === user.password_hash || user.password_hash === 'password123' || password === 'password123');
-        }
+        // Backdoor bypass removed
 
         if (!isMatch) {
             return res.status(400).json({ 
@@ -126,9 +125,7 @@ router.post('/student/login', validateStudentLogin, async (req, res) => {
             // Ignore
         }
 
-        if (!isMatch) {
-            isMatch = (password === user.password_hash || user.password_hash === 'password123' || password === 'password123');
-        }
+        // Backdoor bypass removed
 
         if (!isMatch) {
             return res.status(400).json({ 
@@ -203,9 +200,7 @@ router.post('/headmaster/login', validateHeadmasterLogin, async (req, res) => {
             // Ignore
         }
 
-        if (!isMatch) {
-            isMatch = (password === user.password_hash || user.password_hash === 'password123' || password === 'password123');
-        }
+        // Backdoor bypass removed
 
         if (!isMatch) {
             return res.status(400).json({ 
@@ -243,6 +238,9 @@ router.post('/headmaster/login', validateHeadmasterLogin, async (req, res) => {
 // 4. Sign Up / Register Endpoint
 router.post('/register', validateRegister, async (req, res) => {
     const { role, name, email, password } = req.body;
+    if (role === 'teacher') {
+        return res.status(400).json({ error: 'Pendaftaran peran Guru hanya dapat dilakukan oleh Kepala Sekolah melalui panel manajemen.' });
+    }
     try {
         const checkUser = await db.query('SELECT * FROM users WHERE email = $1', [email]);
         if (checkUser.rows.length > 0) {
@@ -312,6 +310,32 @@ router.post('/register', validateRegister, async (req, res) => {
     } catch (err) {
         console.error(err);
         return res.status(500).json({ error: `Registrasi gagal: ${err.message}` });
+    }
+});
+
+// 5. Log Out / Blacklist Token Endpoint (POST /api/auth/logout)
+router.post('/logout', verifyToken, async (req, res) => {
+    try {
+        const token = req.token;
+        const decoded = req.user; // Contains exp
+        
+        // Calculate expiration date
+        let expiresAt;
+        if (decoded.exp) {
+            expiresAt = new Date(decoded.exp * 1000);
+        } else {
+            expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // Fallback: 1 day
+        }
+
+        await db.query(
+            'INSERT INTO token_blacklist (token, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+            [token, expiresAt]
+        );
+
+        return res.json({ message: 'Logout berhasil, sesi telah dihapus!' });
+    } catch (err) {
+        console.error('Logout Error:', err);
+        return res.status(500).json({ error: `Gagal memproses logout: ${err.message}` });
     }
 });
 

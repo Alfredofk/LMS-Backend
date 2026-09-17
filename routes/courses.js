@@ -14,6 +14,58 @@ const ensureSchoolAssociated = (req, res, next) => {
     next();
 };
 
+const ensureStudentEnrolled = async (req, res, next) => {
+    if (req.user.role !== 'student') {
+        return next();
+    }
+    const courseId = req.params.courseId || req.params.id;
+    if (!courseId) return next();
+
+    try {
+        const enrollCheck = await db.query(
+            `SELECT ce.id 
+             FROM class_enrollments ce
+             JOIN class_subjects cs ON ce.class_id = cs.class_id
+             WHERE cs.id = $1 AND ce.student_id = $2`,
+            [courseId, req.user.id]
+        );
+        if (enrollCheck.rows.length === 0) {
+            return res.status(403).json({ error: 'Akses ditolak. Anda tidak terdaftar di kelas mata pelajaran ini.' });
+        }
+        next();
+    } catch (err) {
+        console.error('Enrollment Check Error:', err);
+        return res.status(500).json({ error: 'Gagal memverifikasi pendaftaran kelas.' });
+    }
+};
+
+const ensureStudentEnrolledInAssessment = async (req, res, next) => {
+    if (req.user.role !== 'student') {
+        return next();
+    }
+    const assessmentId = req.params.id;
+    if (!assessmentId) return next();
+
+    try {
+        const enrollCheck = await db.query(
+            `SELECT ce.id 
+             FROM class_enrollments ce
+             JOIN class_subjects cs ON ce.class_id = cs.class_id
+             JOIN sessions s ON cs.id = s.class_subject_id
+             JOIN assessments a ON s.id = a.session_id
+             WHERE a.id = $1 AND ce.student_id = $2`,
+            [assessmentId, req.user.id]
+        );
+        if (enrollCheck.rows.length === 0) {
+            return res.status(403).json({ error: 'Akses ditolak. Anda tidak terdaftar di kelas untuk penugasan ini.' });
+        }
+        next();
+    } catch (err) {
+        console.error('Assessment Enrolment Check Error:', err);
+        return res.status(500).json({ error: 'Gagal memverifikasi pendaftaran kelas untuk penugasan.' });
+    }
+};
+
 // 1. Create Course (POST /api/courses)
 router.post('/courses', verifyToken, ensureSchoolAssociated, authorizeRoles('teacher', 'headmaster'), validateCourse, async (req, res) => {
     const { code, name, description, grade_level, teacher_id } = req.body;
@@ -105,7 +157,7 @@ router.get('/courses', verifyToken, ensureSchoolAssociated, async (req, res) => 
 });
 
 // 3. Get Course Detail (GET /api/courses/:id)
-router.get('/courses/:id', verifyToken, ensureSchoolAssociated, async (req, res) => {
+router.get('/courses/:id', verifyToken, ensureSchoolAssociated, ensureStudentEnrolled, async (req, res) => {
     const { id } = req.params;
     const school_id = req.user.school_id;
 
@@ -208,7 +260,7 @@ router.delete('/courses/:id', verifyToken, ensureSchoolAssociated, authorizeRole
 });
 
 // 6. Get Course Students (GET /api/courses/:courseId/students)
-router.get('/courses/:courseId/students', verifyToken, ensureSchoolAssociated, async (req, res) => {
+router.get('/courses/:courseId/students', verifyToken, ensureSchoolAssociated, ensureStudentEnrolled, async (req, res) => {
     const { courseId } = req.params;
     const school_id = req.user.school_id;
 
@@ -241,7 +293,7 @@ router.get('/courses/:courseId/students', verifyToken, ensureSchoolAssociated, a
 });
 
 // 7. Get Course Assignments (GET /api/courses/:courseId/assignments)
-router.get('/courses/:courseId/assignments', verifyToken, ensureSchoolAssociated, async (req, res) => {
+router.get('/courses/:courseId/assignments', verifyToken, ensureSchoolAssociated, ensureStudentEnrolled, async (req, res) => {
     const { courseId } = req.params;
     const school_id = req.user.school_id;
 
@@ -389,7 +441,7 @@ router.post('/courses/:courseId/assignments', verifyToken, ensureSchoolAssociate
 });
 
 // 9. Get Course Materials (GET /api/courses/:courseId/materials)
-router.get('/courses/:courseId/materials', verifyToken, ensureSchoolAssociated, async (req, res) => {
+router.get('/courses/:courseId/materials', verifyToken, ensureSchoolAssociated, ensureStudentEnrolled, async (req, res) => {
     const { courseId } = req.params;
     const school_id = req.user.school_id;
 
@@ -525,7 +577,7 @@ router.delete('/materials/:id', verifyToken, authorizeRoles('teacher'), async (r
 });
 
 // 13. Get Course Members (GET /api/courses/:courseId/members)
-router.get('/courses/:courseId/members', verifyToken, ensureSchoolAssociated, async (req, res) => {
+router.get('/courses/:courseId/members', verifyToken, ensureSchoolAssociated, ensureStudentEnrolled, async (req, res) => {
     const { courseId } = req.params;
     const school_id = req.user.school_id;
 
@@ -576,7 +628,7 @@ router.get('/courses/:courseId/members', verifyToken, ensureSchoolAssociated, as
 });
 
 // 14. Get Assignment Details & Student Submission (GET /api/assignments/:id)
-router.get('/assignments/:id', verifyToken, ensureSchoolAssociated, async (req, res) => {
+router.get('/assignments/:id', verifyToken, ensureSchoolAssociated, ensureStudentEnrolledInAssessment, async (req, res) => {
     const { id } = req.params;
     const school_id = req.user.school_id;
     const userId = req.user.id;
@@ -636,10 +688,25 @@ router.get('/assignments/:id', verifyToken, ensureSchoolAssociated, async (req, 
 });
 
 // 15. Submit Assignment (POST /api/assignments/:id/submit)
-router.post('/assignments/:id/submit', verifyToken, ensureSchoolAssociated, authorizeRoles('student'), async (req, res) => {
+router.post('/assignments/:id/submit', verifyToken, ensureSchoolAssociated, ensureStudentEnrolledInAssessment, authorizeRoles('student'), async (req, res) => {
     const { id } = req.params;
     const studentId = req.user.id;
     const { fileName } = req.body;
+
+    if (!fileName || typeof fileName !== 'string' || fileName.trim().length === 0) {
+        return res.status(400).json({ error: 'Nama file pengumpulan tugas wajib diisi.' });
+    }
+
+    // Path traversal check
+    if (fileName.includes('..') || fileName.includes('/') || fileName.includes('\\')) {
+        return res.status(400).json({ error: 'Nama file tidak valid (tidak boleh mengandung path directory).' });
+    }
+
+    // Extension check: PDF, DOCX, DOC, XLS, XLSX, ZIP, RAR, PNG, JPG, JPEG
+    const allowedExtensions = /\.(pdf|docx|doc|xls|xlsx|zip|rar|png|jpg|jpeg)$/i;
+    if (!allowedExtensions.test(fileName)) {
+        return res.status(400).json({ error: 'Format file tidak didukung. Ekstensi file yang diperbolehkan: PDF, Word, Excel, ZIP, RAR, atau Gambar.' });
+    }
 
     try {
         const asmRes = await db.query('SELECT * FROM assessments WHERE id = $1', [id]);
@@ -677,7 +744,7 @@ router.post('/assignments/:id/submit', verifyToken, ensureSchoolAssociated, auth
 });
 
 // 16. Cancel Assignment Submission (DELETE /api/assignments/:id/cancel)
-router.delete('/assignments/:id/cancel', verifyToken, ensureSchoolAssociated, authorizeRoles('student'), async (req, res) => {
+router.delete('/assignments/:id/cancel', verifyToken, ensureSchoolAssociated, ensureStudentEnrolledInAssessment, authorizeRoles('student'), async (req, res) => {
     const { id } = req.params;
     const studentId = req.user.id;
 

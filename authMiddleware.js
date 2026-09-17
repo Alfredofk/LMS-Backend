@@ -1,7 +1,8 @@
 const jwt = require('jsonwebtoken');
+const db = require('./config/db');
 const JWT_SECRET = process.env.JWT_SECRET || 'lms-secret-key-12345';
 
-const verifyToken = (req, res, next) => {
+const verifyToken = async (req, res, next) => {
     try {
         const authHeader = req.headers.authorization;
         if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -9,9 +10,17 @@ const verifyToken = (req, res, next) => {
         }
 
         const token = authHeader.split(' ')[1];
+        
+        // Check if token is blacklisted
+        const blacklistCheck = await db.query('SELECT id FROM token_blacklist WHERE token = $1', [token]);
+        if (blacklistCheck.rows.length > 0) {
+            return res.status(401).json({ error: 'Sesi Anda telah berakhir. Silakan login kembali.' });
+        }
+
         const decoded = jwt.verify(token, JWT_SECRET);
         
         req.user = decoded; // Decoded payload contains { id, username, role, schoolCode, etc. }
+        req.token = token;  // Keep reference to raw token for logout blacklist insertion
         next();
     } catch (err) {
         console.error('JWT Verification Error:', err.message);

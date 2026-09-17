@@ -56,7 +56,7 @@ const validateRegister = [
     body('role')
         .trim()
         .notEmpty().withMessage('Role wajib diisi.')
-        .isIn(['student', 'teacher', 'headmaster']).withMessage('Role tidak valid.'),
+        .isIn(['student', 'headmaster']).withMessage('Role tidak valid.'),
     body('name')
         .trim()
         .notEmpty().withMessage('Nama wajib diisi.')

@@ -21,6 +21,15 @@ const runMigrations = async () => {
             SELECT setval('assessment_submissions_id_seq', COALESCE((SELECT MAX(id)+1 FROM assessment_submissions), 1), false);
             SELECT setval('attendances_id_seq', COALESCE((SELECT MAX(id)+1 FROM attendances), 1), false);
         `);
+
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS token_blacklist (
+                id SERIAL PRIMARY KEY,
+                token TEXT NOT NULL UNIQUE,
+                expires_at TIMESTAMP NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
         console.log('Sinkronisasi sequence autoincrement database sukses.');
     } catch (err) {
         console.error('Sinkronisasi sequence gagal:', err);

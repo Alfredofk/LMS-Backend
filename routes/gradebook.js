@@ -115,6 +115,18 @@ router.post('/:courseId/save', verifyToken, ensureSchoolAssociated, authorizeRol
 
         if (weights && typeof weights === 'object') {
             for (const [assignmentId, weight] of Object.entries(weights)) {
+                // Verify assignmentId belongs to courseId
+                const asmCheck = await db.query(
+                    `SELECT a.id 
+                     FROM assessments a
+                     JOIN sessions s ON a.session_id = s.id
+                     WHERE a.id = $1 AND s.class_subject_id = $2`,
+                    [parseInt(assignmentId, 10), courseId]
+                );
+                if (asmCheck.rows.length === 0) {
+                    return res.status(400).json({ error: 'Data penugasan tidak valid atau tidak sesuai dengan kelas Anda.' });
+                }
+
                 await db.query(
                     'UPDATE assessments SET weight = $1 WHERE id = $2',
                     [parseInt(weight, 10) || 0, parseInt(assignmentId, 10)]
@@ -126,6 +138,30 @@ router.post('/:courseId/save', verifyToken, ensureSchoolAssociated, authorizeRol
             for (const gradeItem of grades) {
                 const { studentId, assignmentId, grade } = gradeItem;
                 const parsedGrade = (grade === '' || grade === null || grade === undefined) ? null : parseInt(grade, 10);
+
+                // Verify assignmentId belongs to courseId
+                const asmCheck = await db.query(
+                    `SELECT a.id 
+                     FROM assessments a
+                     JOIN sessions s ON a.session_id = s.id
+                     WHERE a.id = $1 AND s.class_subject_id = $2`,
+                    [parseInt(assignmentId, 10), courseId]
+                );
+                if (asmCheck.rows.length === 0) {
+                    return res.status(400).json({ error: 'Data penugasan tidak valid atau tidak sesuai dengan kelas Anda.' });
+                }
+
+                // Verify studentId is enrolled in courseId
+                const studentEnrollCheck = await db.query(
+                    `SELECT ce.id 
+                     FROM class_enrollments ce
+                     JOIN class_subjects cs ON ce.class_id = cs.class_id
+                     WHERE cs.id = $1 AND ce.student_id = $2`,
+                    [courseId, studentId]
+                );
+                if (studentEnrollCheck.rows.length === 0) {
+                    return res.status(400).json({ error: 'Siswa tidak terdaftar di kelas mata pelajaran ini.' });
+                }
 
                 const checkSub = await db.query(
                     'SELECT id FROM assessment_submissions WHERE student_id = $1 AND assessment_id = $2',
