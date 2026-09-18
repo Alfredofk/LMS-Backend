@@ -51,8 +51,15 @@ function signAccessToken({ userId, membershipId, schoolId, schoolName, roles }) 
     );
 }
 
+/*
+  The jti is not decoration. Without it the payload is just { sub, iat, exp },
+  so two refresh tokens minted for the same user inside the same second are
+  byte-identical - identical signature, identical hash - and the unique index on
+  RefreshToken.tokenHash rejects the second one. Signing in on a phone and a
+  laptop at the same moment is enough to hit it.
+*/
 function signRefreshToken({ userId }) {
-    return jwt.sign({ sub: userId }, secret('JWT_REFRESH_SECRET'), {
+    return jwt.sign({ sub: userId, jti: crypto.randomUUID() }, secret('JWT_REFRESH_SECRET'), {
         expiresIn: process.env.JWT_REFRESH_TTL ?? '7d',
     });
 }

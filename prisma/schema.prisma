@@ -113,6 +113,7 @@ model User {
     memberships            SchoolMembership[]
     emailVerificationToken EmailVerificationToken[]
     passwordResetTokens    PasswordResetToken[]
+    refreshTokens          RefreshToken[]
     schoolRegistrations    SchoolRegistration[]     @relation("RegistrationApplicant")
 
     @@index([deletedAt])
@@ -143,6 +144,29 @@ model PasswordResetToken {
     user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
     @@index([userId])
+}
+
+/// A live session. Stored hashed like the two above, and rotated on every
+/// refresh: the old row is revoked and points at the one that replaced it.
+///
+/// This table is the whole reason logout means anything. A stateless refresh
+/// JWT cannot be taken back, so a stolen one would stay valid for its full TTL
+/// no matter what the user did. Presenting an already-revoked row is the
+/// signature of a leaked token - the chain for that user is then cut entirely.
+model RefreshToken {
+    id                String    @id @default(cuid())
+    userId            String
+    tokenHash         String    @unique
+    expiresAt         DateTime
+    revokedAt         DateTime?
+    /// The row that superseded this one. A rotation chain, for forensics.
+    replacedByTokenId String?
+    createdAt         DateTime  @default(now())
+
+    user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    @@index([userId])
+    @@index([userId, revokedAt])
 }
 
 /// The platform operator, above every school. Not a school role - no School has

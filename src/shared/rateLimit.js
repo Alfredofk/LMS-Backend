@@ -99,6 +99,25 @@ const loginLimiter = build({
 });
 
 /*
+  Endpoints that SEND an email: resend-verification and forgot-password.
+
+  The thing being rationed is our mail relay, not our database. Without this,
+  anyone could point forgot-password at one address and have us deliver a
+  hundred emails to a person who never asked - so the budget belongs to the
+  target address, which is what byIpAndEmail keys on.
+
+  Successful requests count here, unlike everywhere else in this file. They have
+  to: forgot-password answers 200 whether or not the address exists, so "failed"
+  is not a category this endpoint can report without leaking who has an account.
+*/
+const emailDispatchLimiter = build({
+    windowMs: 60 * 60 * 1000,
+    limit: 5,
+    keyGenerator: byIpAndEmail,
+    message: 'Too many emails requested for this address. Try again later.',
+});
+
+/*
   School Code lookup and the join request that follows - one flow, one limiter.
 
   Both happen after login, so both key on the user, and separating "lookup" from
@@ -133,13 +152,22 @@ const registrationLimiter = build({
 });
 
 /*
-  Two ceilings, one limiter.
+  Two ceilings, one limiter - and, for three endpoints, the only one.
 
   A signed-in user will never approach 1000 requests in fifteen minutes through
   normal use. Anonymous traffic is a different animal: only /auth/* and the code
-  lookup reach here unauthenticated, and this is the only thing standing in
-  front of account creation - the bulk-account threat named above. Forty
-  students signing in one morning is well under a hundred anonymous requests.
+  lookup reach here unauthenticated.
+
+  Register and the two link-click endpoints carry no limiter of their own and
+  lean on this ceiling alone. That is deliberate. Guessing a token is not a
+  threat worth a limiter - the values are 256 bits of crypto.randomBytes
+  (auth.js) - and the only way to be handed a real link is through an email that
+  emailDispatchLimiter has already rationed. Register is rationed by the address
+  itself: one email can be registered exactly once, and the second attempt is a
+  409 raised before any mail is sent (auth.service.js). What is left in all
+  three cases is a flood of HTTP requests, which is precisely what this limiter
+  is for. Forty students signing in one morning is well under a hundred
+  anonymous requests.
 */
 const generalLimiter = build({
     windowMs: 15 * 60 * 1000,
@@ -150,6 +178,7 @@ const generalLimiter = build({
 
 export {
     loginLimiter,
+    emailDispatchLimiter,
     joinSchoolLimiter,
     registrationLimiter,
     generalLimiter,

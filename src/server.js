@@ -7,7 +7,10 @@ import helmet from 'helmet';
 import cors from 'cors';
 
 import { AppError, notFound, ok } from './shared/errors.js';
+import authRoutes from './modules/auth/auth.routes.js';
+import usersRoutes from './modules/users/users.routes.js';
 import { generalLimiter } from './shared/rateLimit.js';
+import { verifyTransport } from './shared/mailer.js';
 import { createLogger } from './lib/helpers.js';
 
 const log = createLogger('Server');
@@ -36,18 +39,33 @@ app.get('/health', (_req, res) =>
 );
 
 /*
-  Module routes mount here as they are built: auth · users · school · academics
+  Module routes. Still to come: school · academics.
+
+  The /api prefix is not a free choice - mailer.js:63,76 already writes
+  /api/auth/verify-email and /api/auth/reset-password into the emails we send,
+  so moving it breaks every link already in somebody's inbox.
 
   Where the per-route limiters go (./shared/rateLimit.js):
-    POST /auth/login                     loginLimiter
-    school code lookup + join request    joinSchoolLimiter
-    POST /school-registrations           registrationLimiter
+    POST /api/auth/login                 loginLimiter         (mounted)
+    resend-verification + forgot         emailDispatchLimiter (mounted)
+    school code lookup + join request    joinSchoolLimiter    (ticket 05)
+    POST /api/school-registrations       registrationLimiter  (ticket 04)
 
-  The last two key on req.auth.userId, so they MUST be mounted after
-  authenticate. Mounted before it, req.auth is still empty when the key is
-  computed, the key silently falls back to the IP, and a whole school shares one
-  budget again - with no error to tell you.
+  joinSchoolLimiter and registrationLimiter key on req.auth.userId, so they MUST
+  be mounted after requireAuth. Mounted before it, req.auth is still empty when
+  the key is computed, the key silently falls back to the IP, and a whole school
+  shares one budget again - with no error to tell you.
+
+  The auth routes above are the exception, and deliberately so: they run before
+  anyone has a token, so their limiters key on the address or the network.
+
+  Register and the two link-click endpoints are on no list at all, on purpose.
+  They used to carry a signupLimiter and a tokenClaimLimiter; both were removed
+  because neither was guarding a real threat, so generalLimiter above is their
+  whole ceiling now. The reasoning sits with generalLimiter itself.
 */
+app.use('/api/auth', authRoutes);
+app.use('/api/users', usersRoutes);
 
 // Catch 404
 app.use((_req, _res, next) => next(notFound('Route not found')));
@@ -100,6 +118,13 @@ app.use((error, _req, res, _next) => {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
     app.listen(port, () => {
         log.success(`Listening on PORT: ${port}`);
+
+        /*
+          Fire and forget: the answer is a log line, not a gate. Mail failing is
+          never a reason to refuse to serve - resend-verification is the remedy
+          and it needs this process up (auth.service.js:44-51).
+        */
+        void verifyTransport();
     });
 }
 

@@ -21,6 +21,7 @@ const UNSCOPED_MODELS = new Set([
     'User',
     'EmailVerificationToken',
     'PasswordResetToken',
+    'RefreshToken',
     'PlatformAdmin',
     'SchoolRegistration',
     'School',
