@@ -75,7 +75,7 @@ async function verifyTransport() {
     }
 }
 
-const baseUrl = () => process.env.APP_BASE_URL ?? 'http://localhost:3000';
+const webUrl = () => process.env.WEB_BASE_URL ?? 'http://localhost:5173';
 
 /*
   MAIL_FROM falls back to the authenticated account rather than to a made-up
@@ -151,7 +151,7 @@ async function send({ to, subject, text, html }) {
 }
 
 async function sendVerificationEmail({ to, fullName, token }) {
-    const link = `${baseUrl()}/api/auth/verify-email?token=${encodeURIComponent(token)}`;
+    const link = `${webUrl()}/api/auth/verify-email?token=${encodeURIComponent(token)}`;
     const caveat =
         'The link expires in 24 hours. If you did not create this account, ignore this email.';
 
@@ -175,7 +175,7 @@ async function sendVerificationEmail({ to, fullName, token }) {
 }
 
 async function sendPasswordResetEmail({ to, fullName, token }) {
-    const link = `${baseUrl()}/api/auth/reset-password?token=${encodeURIComponent(token)}`;
+    const link = `${webUrl()}/api/auth/reset-password?token=${encodeURIComponent(token)}`;
     const caveat =
         'The link expires in 1 hour. If you did not request this, ignore this email ' +
         'and your password stays unchanged.';

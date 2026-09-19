@@ -10,6 +10,7 @@ import {
     refreshBody,
     resetPasswordBody,
     tokenQuery,
+    googleBody,
 } from './auth.schema.js';
 
 /*
@@ -45,6 +46,11 @@ router.post(
 );
 
 router.post('/login', loginLimiter, validate({ body: loginBody }), controller.login);
+
+// No limiter of its own: an ID token has to carry Google's signature for this
+// app's client id, so there is nothing here to guess. generalLimiter is the
+// ceiling, as it is for the link-click paths.
+router.post('/google', validate({ body: googleBody }), controller.googleSignIn);
 
 // Rotation is its own ceiling: a refresh token is good exactly once, so
 // replaying one cannot be repeated for profit and needs no separate limiter.

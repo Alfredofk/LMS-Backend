@@ -12,6 +12,7 @@ import {
     verifyRefreshToken,
 } from '../../shared/auth.js';
 import { sendVerificationEmail, sendPasswordResetEmail } from '../../shared/mailer.js';
+import { googleVerifier } from '../../shared/google.js';
 import { AppError, badRequest, conflict, unauthorized } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
 
@@ -259,7 +260,9 @@ async function resendVerification(email) {
 
 async function login({ email, password }) {
     const user = await prisma.user.findUnique({ where: { email } });
-    const usable = user && !user.deletedAt;
+    // No passwordHash means an account made through Google that has not set a
+    // password yet. It fails exactly like an unknown address, dummy hash and all.
+    const usable = user && !user.deletedAt && user.passwordHash;
 
     const matches = await verifyPassword(password, usable ? user.passwordHash : await dummyHash);
 
@@ -352,6 +355,106 @@ async function logout(rawToken) {
 }
 
 // ---------------------------------------------------------------------------
+// Google sign-in (ADR-0005)
+// ---------------------------------------------------------------------------
+
+const googleRejected = () => unauthorized('Google sign-in failed');
+
+// Google's name when it sends one, else the part of the address before the @.
+const googleFullName = (name, email) => (name?.trim() || email.split('@')[0]).slice(0, 120);
+
+/*
+  Which User a verified Google identity signs in as.
+
+  The link is googleSub, never the email: a Google account can change its
+  address, and its sub never changes. The email is only consulted the first
+  time, to find the account this Google identity should attach to.
+
+  Three outcomes the first time:
+    - no account for the address  -> one is created, already verified
+    - a verified account          -> linked, its password untouched
+    - an UNVERIFIED account       -> linked, and its password discarded
+
+  The last is the one that matters. Anyone can register an address they do not
+  own; it just stays unverified. If the real owner later arrives through Google,
+  that account becomes verified - and without this, the stranger's password
+  would now open it. So the password goes, every refresh token issued against
+  it goes, and any verification link still sitting in the inbox is retired.
+  The owner sets a password of their own through forgot-password.
+
+  Two first sign-ins racing each other both miss the lookups; the unique index
+  on email catches the second create and server.js turns P2002 into a 409.
+*/
+async function resolveGoogleUser({ sub, email, name }) {
+    const linked = await prisma.user.findUnique({ where: { googleSub: sub } });
+    if (linked) {
+        if (linked.deletedAt) throw googleRejected();
+        return linked;
+    }
+
+    const existing = await prisma.user.findUnique({ where: { email } });
+
+    if (!existing) {
+        const user = await prisma.user.create({
+            data: {
+                email,
+                fullName: googleFullName(name, email),
+                googleSub: sub,
+                emailVerifiedAt: new Date(),
+            },
+        });
+        log.success(`Registered ${user.email} through Google`);
+        return user;
+    }
+
+    if (existing.deletedAt) throw googleRejected();
+
+    if (existing.googleSub) {
+        throw conflict('That email is already linked to a different Google account');
+    }
+
+    if (existing.emailVerifiedAt) {
+        const user = await prisma.user.update({
+            where: { id: existing.id },
+            data: { googleSub: sub },
+        });
+        log.success(`Linked Google to ${user.email}`);
+        return user;
+    }
+
+    const now = new Date();
+    const [user] = await prisma.$transaction([
+        prisma.user.update({
+            where: { id: existing.id },
+            data: { googleSub: sub, emailVerifiedAt: now, passwordHash: null },
+        }),
+        revokeAllRefreshTokens(existing.id),
+        prisma.emailVerificationToken.updateMany({
+            where: { userId: existing.id, usedAt: null },
+            data: { usedAt: now },
+        }),
+    ]);
+    log.warn(`Linked Google to unverified ${user.email} - its password was discarded`);
+    return user;
+}
+
+/*
+  The Google equivalent of login(), answering in exactly the same shape.
+
+  An address Google itself has not verified proves nothing about who owns it,
+  so it is refused rather than trusted.
+*/
+async function googleSignIn({ idToken }) {
+    const google = await googleVerifier.verify(idToken);
+    if (!google.emailVerified) throw googleRejected();
+
+    const user = await resolveGoogleUser(google);
+
+    const { token } = await issueRefreshToken(user.id);
+    return authResponse(user, token);
+}
+
+// ---------------------------------------------------------------------------
 // Password reset
 // ---------------------------------------------------------------------------
 
@@ -439,6 +542,7 @@ export {
     login,
     refreshAuth,
     logout,
+    googleSignIn,
     forgotPassword,
     checkResetToken,
     resetPassword,

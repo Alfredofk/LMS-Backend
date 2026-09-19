@@ -1,7 +1,7 @@
 import { prisma } from '../../shared/prisma.js';
 import { runUnscoped } from '../../shared/tenantContext.js';
 import { hashPassword, verifyPassword } from '../../shared/auth.js';
-import { notFound, unauthorized } from '../../shared/errors.js';
+import { AppError, notFound, unauthorized } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
 import {
     publicUser,
@@ -91,6 +91,16 @@ async function updateMe(userId, { fullName }) {
 */
 async function changePassword(userId, { currentPassword, newPassword }) {
     const user = await loadUser(userId);
+
+    // An account made through Google has nothing to compare against yet. Its
+    // first password comes from forgot-password, which proves the inbox instead.
+    if (!user.passwordHash) {
+        throw new AppError(
+            400,
+            'PASSWORD_NOT_SET',
+            'This account has no password yet. Use forgot-password to create one.'
+        );
+    }
 
     const matches = await verifyPassword(currentPassword, user.passwordHash);
     if (!matches) throw unauthorized('Current password is incorrect');

@@ -44,6 +44,10 @@ async function login(req, res) {
     return ok(res, await service.login(req.validated.body));
 }
 
+async function googleSignIn(req, res) {
+    return ok(res, await service.googleSignIn(req.validated.body));
+}
+
 async function refresh(req, res) {
     return ok(res, await service.refreshAuth(req.validated.body.refreshToken));
 }
@@ -75,6 +79,7 @@ export {
     verifyEmail,
     resendVerification,
     login,
+    googleSignIn,
     refresh,
     logout,
     forgotPassword,

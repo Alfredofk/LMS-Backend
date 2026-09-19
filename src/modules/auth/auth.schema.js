@@ -74,6 +74,12 @@ const resetPasswordBody = z.object({
     password,
 });
 
+// The `credential` Google Identity Services hands the browser. Its shape is
+// Google's to check (shared/google.js), not ours.
+const googleBody = z.object({
+    idToken: z.string().min(1, 'Missing Google ID token'),
+});
+
 export {
     MIN_PASSWORD,
     MAX_PASSWORD_BYTES,
@@ -86,4 +92,5 @@ export {
     emailOnlyBody,
     refreshBody,
     resetPasswordBody,
+    googleBody,
 };

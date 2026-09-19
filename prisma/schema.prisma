@@ -102,7 +102,10 @@ enum ApprovalAction {
 model User {
     id              String    @id @default(cuid())
     email           String    @unique
-    passwordHash    String
+    /// Null for an account created through Google until forgot-password sets one.
+    passwordHash    String?
+    /// Google's stable account id (the ID token's `sub`), never its email (ADR-0005).
+    googleSub       String?   @unique
     fullName        String
     emailVerifiedAt DateTime?
     createdAt       DateTime  @default(now())
