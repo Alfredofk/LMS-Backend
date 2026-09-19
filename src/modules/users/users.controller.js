@@ -16,7 +16,9 @@ async function updateMe(req, res) {
 }
 
 async function changePassword(req, res) {
-    const auth = await service.changePassword(req.auth.userId, req.validated.body);
+    const auth = await service.changePassword(req.auth.userId, req.validated.body, {
+        rememberMe: req.auth.rememberMe,
+    });
     return ok(res, {
         ...auth,
         message: 'Password changed. You are signed out on every other device.',

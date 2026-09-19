@@ -111,12 +111,13 @@ async function buildAuthClaims(userId) {
 // ---------------------------------------------------------------------------
 
 /*
-  The row's expiry is read back out of the JWT rather than recomputed from
-  JWT_REFRESH_TTL. One source of truth: change the env value and the table
-  follows, with no chance of a row outliving the token it stands for.
+  The row's expiry is read back out of the JWT rather than recomputed from the
+  remember-me lifetimes in shared/auth.js. One source of truth: change a lifetime
+  there and the table follows, with no chance of a row outliving the token it
+  stands for.
 */
-async function issueRefreshToken(userId) {
-    const token = signRefreshToken({ userId });
+async function issueRefreshToken(userId, { rememberMe = false } = {}) {
+    const token = signRefreshToken({ userId, rememberMe });
     const { exp } = verifyRefreshToken(token);
 
     const row = await prisma.refreshToken.create({
@@ -138,11 +139,12 @@ const revokeAllRefreshTokens = (userId) =>
         data: { revokedAt: new Date() },
     });
 
-async function authResponse(user, refreshToken) {
+// rememberMe must be the same choice the refreshToken beside it was signed with.
+async function authResponse(user, refreshToken, { rememberMe = false } = {}) {
     const claims = await buildAuthClaims(user.id);
 
     return {
-        accessToken: signAccessToken({ userId: user.id, ...claims }),
+        accessToken: signAccessToken({ userId: user.id, ...claims, rememberMe }),
         refreshToken,
         user: publicUser(user),
         membership: claims.membershipId
@@ -258,7 +260,7 @@ async function resendVerification(email) {
 // Login, refresh, logout
 // ---------------------------------------------------------------------------
 
-async function login({ email, password }) {
+async function login({ email, password, rememberMe }) {
     const user = await prisma.user.findUnique({ where: { email } });
     // No passwordHash means an account made through Google that has not set a
     // password yet. It fails exactly like an unknown address, dummy hash and all.
@@ -282,8 +284,8 @@ async function login({ email, password }) {
         );
     }
 
-    const { token } = await issueRefreshToken(user.id);
-    return authResponse(user, token);
+    const { token } = await issueRefreshToken(user.id, { rememberMe });
+    return authResponse(user, token, { rememberMe });
 }
 
 /*
@@ -297,15 +299,22 @@ async function login({ email, password }) {
 
   "Session" is not the word for this anywhere in the codebase: CONTEXT.md gives it
   to one meeting of a ClassSubject. A sign-in belongs to a device.
+
+  The remember-me choice is inherited from the token presented - read from its
+  signed payload, never from the request - and the new token gets that choice's
+  full lifetime again. A token minted before `rem` existed carries none, and is
+  treated as not remembered.
 */
 async function refreshAuth(rawToken) {
     const rejected = unauthorized('Invalid or expired refresh token');
 
+    let payload;
     try {
-        verifyRefreshToken(rawToken);
+        payload = verifyRefreshToken(rawToken);
     } catch {
         throw rejected;
     }
+    const rememberMe = payload.rem === true;
 
     const row = await prisma.refreshToken.findUnique({
         where: { tokenHash: hashToken(rawToken) },
@@ -324,7 +333,7 @@ async function refreshAuth(rawToken) {
     const user = await prisma.user.findUnique({ where: { id: row.userId } });
     if (!user || user.deletedAt || !user.emailVerifiedAt) throw rejected;
 
-    const issued = await issueRefreshToken(user.id);
+    const issued = await issueRefreshToken(user.id, { rememberMe });
     await prisma.refreshToken.update({
         where: { id: row.id },
         data: { revokedAt: new Date(), replacedByTokenId: issued.id },
@@ -332,7 +341,7 @@ async function refreshAuth(rawToken) {
 
     // Claims are rebuilt here, not carried over. This is the moment an approval
     // granted since the last login actually reaches the user's token.
-    return authResponse(user, issued.token);
+    return authResponse(user, issued.token, { rememberMe });
 }
 
 /*
@@ -444,14 +453,14 @@ async function resolveGoogleUser({ sub, email, name }) {
   An address Google itself has not verified proves nothing about who owns it,
   so it is refused rather than trusted.
 */
-async function googleSignIn({ idToken }) {
+async function googleSignIn({ idToken, rememberMe }) {
     const google = await googleVerifier.verify(idToken);
     if (!google.emailVerified) throw googleRejected();
 
     const user = await resolveGoogleUser(google);
 
-    const { token } = await issueRefreshToken(user.id);
-    return authResponse(user, token);
+    const { token } = await issueRefreshToken(user.id, { rememberMe });
+    return authResponse(user, token, { rememberMe });
 }
 
 // ---------------------------------------------------------------------------

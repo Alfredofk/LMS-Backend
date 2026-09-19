@@ -41,9 +41,10 @@ app.get('/health', (_req, res) =>
 /*
   Module routes. Still to come: school · academics.
 
-  The /api prefix is not a free choice - mailer.js:63,76 already writes
-  /api/auth/verify-email and /api/auth/reset-password into the emails we send,
-  so moving it breaks every link already in somebody's inbox.
+  The /api prefix is not a free choice - the web app's dev server proxies
+  exactly /api to this process (LMS-Frontend vite.config.js), and its
+  authService.js builds every call on it. Emails no longer link here: mailer.js
+  points them at the web app's own pages, which then call these routes.
 
   Where the per-route limiters go (./shared/rateLimit.js):
     POST /api/auth/login                 loginLimiter         (mounted)

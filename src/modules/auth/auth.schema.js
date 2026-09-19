@@ -49,18 +49,25 @@ const fullName = z
     .min(2, 'Full name is too short')
     .max(120, 'Full name is too long');
 
-// The link in the email carries it as a query string (mailer.js:63).
+// The web page the email links to reads the token from its own URL and passes
+// it on as a query string.
 const tokenQuery = z.object({
     token: z.string().min(1, 'Missing token'),
 });
 
 const registerBody = z.object({ email, password, fullName });
 
+// "Remember me". A boolean and nothing else: how long each choice lasts is the
+// server's rule (shared/auth.js), so there is no number here to tamper with.
+// Left out, it means no.
+const rememberMe = z.boolean().default(false);
+
 const loginBody = z.object({
     email,
     // Never validated for shape on login: an old password that predates a rule
     // change must still be able to authenticate and then be changed.
     password: z.string().min(1, 'Password is required'),
+    rememberMe,
 });
 
 const emailOnlyBody = z.object({ email });
@@ -78,6 +85,7 @@ const resetPasswordBody = z.object({
 // Google's to check (shared/google.js), not ours.
 const googleBody = z.object({
     idToken: z.string().min(1, 'Missing Google ID token'),
+    rememberMe,
 });
 
 export {

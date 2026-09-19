@@ -88,8 +88,11 @@ async function updateMe(userId, { fullName }) {
   The access token already in flight is untouched and lives out its remaining
   minutes - the accepted cost of a stateless access token, and why the tenant
   guards in guards.js read status from the database rather than from claims.
+
+  The new sign-in keeps this device's remember-me choice, taken from the access
+  token (`rem`) because that is all this request carries.
 */
-async function changePassword(userId, { currentPassword, newPassword }) {
+async function changePassword(userId, { currentPassword, newPassword }, { rememberMe = false } = {}) {
     const user = await loadUser(userId);
 
     // An account made through Google has nothing to compare against yet. Its
@@ -111,11 +114,11 @@ async function changePassword(userId, { currentPassword, newPassword }) {
     });
 
     await revokeAllRefreshTokens(userId);
-    const { token } = await issueRefreshToken(userId);
+    const { token } = await issueRefreshToken(userId, { rememberMe });
 
     log.success(`Password changed for ${user.email}`);
 
-    return authResponse(updated, token);
+    return authResponse(updated, token, { rememberMe });
 }
 
 export { loadMembership, getMe, updateMe, changePassword };

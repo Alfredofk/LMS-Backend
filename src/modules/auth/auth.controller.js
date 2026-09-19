@@ -24,7 +24,8 @@ async function register(req, res) {
     );
 }
 
-// GET, because this is the link mailer.js:63 puts in the email.
+// GET, called by the web app's /verify-email page - the page the email links to.
+// Opening that page is the verification; nothing else is asked of the user.
 async function verifyEmail(req, res) {
     const { alreadyVerified } = await service.verifyEmail(req.validated.query.token);
     return ok(res, {
@@ -62,7 +63,8 @@ async function forgotPassword(req, res) {
     return ok(res, SILENT_REPLY);
 }
 
-// GET, from mailer.js:76. Tells the client whether to render the form.
+// GET, called by the web app's /reset-password page before it shows the form.
+// Tells the client whether the form is worth rendering; changes nothing.
 async function checkResetToken(req, res) {
     return ok(res, await service.checkResetToken(req.validated.query.token));
 }

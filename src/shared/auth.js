@@ -16,6 +16,16 @@ import { runInSchool } from './tenantContext.js';
 
 const BCRYPT_ROUNDS = 12;
 
+/*
+  How long one sign-in lives, chosen by "remember me" at login and never by the
+  client afterwards. The choice rides inside the signed refresh token as `rem`,
+  so it survives every rotation and cannot be edited without breaking the
+  signature. Each rotation mints a fresh token with the full lifetime again, so
+  these are periods of inactivity, not absolute caps.
+*/
+const REFRESH_TTL_REMEMBERED = '14d';
+const REFRESH_TTL_DEFAULT = '1d';
+
 function secret(name) {
     const value = process.env[name];
     if (!value) {
@@ -36,7 +46,7 @@ const verifyPassword = (plain, hash) => bcrypt.compare(plain, hash);
 const generateToken = () => crypto.randomBytes(32).toString('hex');
 const hashToken = (token) => crypto.createHash('sha256').update(token).digest('hex');
 
-function signAccessToken({ userId, membershipId, schoolId, schoolName, roles }) {
+function signAccessToken({ userId, membershipId, schoolId, schoolName, roles, rememberMe }) {
     return jwt.sign(
         {
             sub: userId,
@@ -45,6 +55,9 @@ function signAccessToken({ userId, membershipId, schoolId, schoolName, roles }) 
             // Carried so the logger can name the school's folder without a lookup.
             schoolName: schoolName ?? null,
             roles: roles ?? [],
+            // Read by change-password, which re-issues this device's refresh token
+            // holding only the access token, and must keep the device's choice.
+            rem: rememberMe === true,
         },
         secret('JWT_ACCESS_SECRET'),
         { expiresIn: process.env.JWT_ACCESS_TTL ?? '15m' }
@@ -58,9 +71,10 @@ function signAccessToken({ userId, membershipId, schoolId, schoolName, roles }) 
   RefreshToken.tokenHash rejects the second one. Signing in on a phone and a
   laptop at the same moment is enough to hit it.
 */
-function signRefreshToken({ userId }) {
-    return jwt.sign({ sub: userId, jti: crypto.randomUUID() }, secret('JWT_REFRESH_SECRET'), {
-        expiresIn: process.env.JWT_REFRESH_TTL ?? '7d',
+function signRefreshToken({ userId, rememberMe }) {
+    const rem = rememberMe === true;
+    return jwt.sign({ sub: userId, jti: crypto.randomUUID(), rem }, secret('JWT_REFRESH_SECRET'), {
+        expiresIn: rem ? REFRESH_TTL_REMEMBERED : REFRESH_TTL_DEFAULT,
     });
 }
 
@@ -104,6 +118,7 @@ function requireAuth(req, res, next) {
         schoolId: payload.schoolId ?? null,
         schoolName: payload.schoolName ?? null,
         roles: payload.roles ?? [],
+        rememberMe: payload.rem === true,
     };
 
     // No school scope means no school folder either - those logs go to server/.
@@ -133,6 +148,8 @@ function requireActiveMembership(req, _res, next) {
 
 export {
     BCRYPT_ROUNDS,
+    REFRESH_TTL_REMEMBERED,
+    REFRESH_TTL_DEFAULT,
     hashPassword,
     verifyPassword,
     generateToken,

@@ -29,8 +29,10 @@ import {
   email emailDispatchLimiter already counted, and an address can be registered
   exactly once.
 
-  The two GET paths are not free choices of shape. mailer.js already writes
-  these exact URLs into the emails we send, query string and all.
+  The emails link to the web app's /verify-email and /reset-password pages
+  (mailer.js), not here. Those pages call the two GETs below with the token as a
+  query string, and the frontend's authService.js is written against exactly
+  that shape - change it there too, or not at all.
 */
 const router = Router();
 
