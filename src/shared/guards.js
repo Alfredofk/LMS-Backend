@@ -96,6 +96,32 @@ function requireResource(check, { param = 'id', message } = {}) {
     };
 }
 
+/*
+  The platform operator, above every school. Mount after requireAuth.
+
+  Read from the PlatformAdmin table on every request rather than from a token
+  claim: the role is granted only by the seed, and a claim would outlive its
+  removal by up to one access-token lifetime. PlatformAdmin is an unscoped model,
+  so this lookup works with or without a school in context.
+*/
+async function requirePlatformAdmin(req, _res, next) {
+    const userId = req.auth?.userId;
+    if (!userId) return next(forbidden());
+
+    try {
+        const admin = await prisma.platformAdmin.findUnique({
+            where: { userId },
+            select: { id: true },
+        });
+        if (!admin) return next(forbidden('Platform admin only'));
+
+        req.platformAdminId = admin.id;
+        return next();
+    } catch (error) {
+        return next(error);
+    }
+}
+
 export {
     hasActiveRole,
     isPrincipal,
@@ -104,4 +130,5 @@ export {
     isTeacherOfClassSubject,
     isGuardianOf,
     requireResource,
+    requirePlatformAdmin,
 };

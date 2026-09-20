@@ -198,6 +198,9 @@ model SchoolRegistration {
     npsn            String
     schoolName      String
     schoolType      SchoolType
+    /// Carried to School.durationYears on approval. Only an SMK may choose (3 or 4);
+    /// every other type takes its default from shared/schoolType.js.
+    durationYears   Int?
     city            String?
     applicantPhone  String?
     ktpStoragePath  String?
