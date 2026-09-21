@@ -91,6 +91,12 @@ enum ApprovalAction {
     LEAVE
     OVERRIDE
     REGENERATE_CODE
+    /// A platform admin withdrawing, or restoring, a whole school's access.
+    /// Its own value rather than REMOVE, which means removing one member from a
+    /// school - a reader of the audit log should not need subjectType to tell
+    /// a school being switched off from a teacher being let go.
+    DEACTIVATE
+    REACTIVATE
 }
 
 // ---------------------------------------------------------------------------
@@ -179,8 +185,9 @@ model PlatformAdmin {
     userId    String   @unique
     createdAt DateTime @default(now())
 
-    user             User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
-    reviewedRequests SchoolRegistration[] @relation("RegistrationReviewer")
+    user              User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+    reviewedRequests  SchoolRegistration[] @relation("RegistrationReviewer")
+    deactivatedSchools School[]            @relation("SchoolDeactivatedBy")
 }
 
 // ---------------------------------------------------------------------------
@@ -232,15 +239,33 @@ model School {
     city          String?
     /// Opaque, regenerable. Locates a school; grants nothing (ADR-0002).
     schoolCode    String     @unique
+    /*
+      Access withdrawn by a platform admin, with the data left where it is.
+
+      Deactivation is never a delete: School has thirteen cascading relations, so
+      removing the row would take the academic history with it - including the
+      ApprovalAudit rows that record the decision. A year of somebody's grades is
+      not one button's to erase.
+
+      While this is set: buildAuthClaims() issues no school claims, so every
+      member's token carries no school and no tenant-owned row is reachable; the
+      School Code stops resolving. Nothing about the memberships themselves
+      changes - that is leaving, which is ADR-0004 and ticket 06.
+    */
+    deactivatedAt        DateTime?
+    deactivationReason   String?
+    deactivatedByAdminId String?
     createdAt     DateTime   @default(now())
     updatedAt     DateTime   @updatedAt
 
+    deactivatedBy  PlatformAdmin?      @relation("SchoolDeactivatedBy", fields: [deactivatedByAdminId], references: [id])
     registration   SchoolRegistration?
     memberships    SchoolMembership[]
     membershipRoles MembershipRole[]
     studentProfiles StudentProfile[]
     teacherProfiles TeacherProfile[]
     guardianLinks  GuardianStudent[]
+    joinRequests   JoinRequestDetail[]
     academicYears  AcademicYear[]
     semesters      Semester[]
     subjects       Subject[]
@@ -249,6 +274,8 @@ model School {
     classSubjects  ClassSubject[]
     notifications  Notification[]
     approvalAudits ApprovalAudit[]
+
+    @@index([deactivatedAt])
 }
 
 // ---------------------------------------------------------------------------
@@ -276,12 +303,23 @@ model SchoolMembership {
     roles           MembershipRole[]
     studentProfile  StudentProfile?
     teacherProfile  TeacherProfile?
+    joinRequest     JoinRequestDetail?
     guardianLinks   GuardianStudent[] @relation("GuardianMembership")
     homeroomClasses Class[]           @relation("HomeroomTeacher")
     taughtSubjects  ClassSubject[]    @relation("AssignedTeacher")
     notifications   Notification[]
 
-    @@unique([schoolId, userId])
+    /*
+      No @@unique([schoolId, userId]). Dropped on 2026-09-20 (owner), because a
+      TOTAL constraint here contradicts decision #51: a rejected applicant may
+      re-apply after a cooldown, and assertMembershipRetryAllowed() counts their
+      REJECTED rows against a cap of three - a count that can never pass one if
+      only one row per (school, user) may exist. Leaving and later rejoining the
+      same school (ticket 06) needs the repeats too.
+
+      The real rule is the partial index in partial-indexes.sql: one
+      PENDING-or-ACTIVE membership per user, across every school.
+    */
     @@index([schoolId, status])
     @@index([userId])
 }
@@ -370,6 +408,39 @@ model GuardianStudent {
     @@unique([guardianMembershipId, studentProfileId])
     @@index([schoolId, status])
     @@index([studentProfileId])
+}
+
+/// What a join applicant typed, parked until approval turns it into a real
+/// profile. StudentProfile and TeacherProfile are only created once a human
+/// releases the role, so until then the payload has nowhere else to live - the
+/// same gap SchoolRegistration.durationYears fills for school founding.
+///
+/// Deliberately NOT the profile tables themselves: StudentProfile is unique on
+/// (schoolId, nisn), so a stranger filing a request would reserve a real child's
+/// NISN - and rejected rows are never deleted, so the reservation would be
+/// permanent.
+///
+/// No class is named here. The applicant asks for a gradeLevel; the homeroom
+/// teacher chooses the class at approval, which is why a leaked School Code
+/// exposes no class list (ADR-0002, ticket 05).
+model JoinRequestDetail {
+    id           String    @id @default(cuid())
+    schoolId     String
+    membershipId String    @unique
+    /// STUDENT
+    nisn         String?
+    birthDate    DateTime?
+    gradeLevel   Int?
+    /// TEACHER - at least one of the two, checked by the zod schema.
+    nip          String?
+    nuptk        String?
+    createdAt    DateTime  @default(now())
+    updatedAt    DateTime  @updatedAt
+
+    school     School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    membership SchoolMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+    @@index([schoolId, gradeLevel])
 }
 
 // ---------------------------------------------------------------------------
