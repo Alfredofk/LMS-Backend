@@ -12,6 +12,9 @@ import usersRoutes from './modules/users/users.routes.js';
 import schoolRegistrationRoutes, {
     adminRouter as adminSchoolRegistrationRoutes,
 } from './modules/school/school.routes.js';
+import membershipRoutes, {
+    reviewRouter as membershipReviewRoutes,
+} from './modules/membership/membership.routes.js';
 import { generalLimiter } from './shared/rateLimit.js';
 import { verifyTransport } from './shared/mailer.js';
 import { createLogger } from './lib/helpers.js';
@@ -42,7 +45,7 @@ app.get('/health', (_req, res) =>
 );
 
 /*
-  Module routes. Still to come: school membership (join) · academics.
+  Module routes. Still to come: academics (ticket 07).
 
   The /api prefix is not a free choice - the web app's dev server proxies
   exactly /api to this process (LMS-Frontend vite.config.js), and its
@@ -52,7 +55,7 @@ app.get('/health', (_req, res) =>
   Where the per-route limiters go (./shared/rateLimit.js):
     POST /api/auth/login                 loginLimiter         (mounted)
     resend-verification + forgot         emailDispatchLimiter (mounted)
-    school code lookup + join request    joinSchoolLimiter    (ticket 05)
+    lookup + join request                joinSchoolLimiter    (mounted)
     POST /api/school-registrations       registrationLimiter  (mounted)
 
   joinSchoolLimiter and registrationLimiter key on req.auth.userId, so they MUST
@@ -72,6 +75,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/school-registrations', schoolRegistrationRoutes);
 app.use('/api/admin/school-registrations', adminSchoolRegistrationRoutes);
+app.use('/api/memberships', membershipRoutes);
+app.use('/api/membership-requests', membershipReviewRoutes);
 
 // Catch 404
 app.use((_req, _res, next) => next(notFound('Route not found')));

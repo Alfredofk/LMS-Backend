@@ -25,32 +25,49 @@ const log = createLogger('Users');
   Unscoped for the same reason buildAuthClaims is: a PENDING user's token carries
   no schoolId, so there is no ambient school for the extension to filter by.
 */
+const membershipSelect = {
+    id: true,
+    status: true,
+    requestedAt: true,
+    approvedAt: true,
+    school: { select: { id: true, name: true, schoolType: true } },
+    roles: {
+        select: { role: true, status: true, rejectionReason: true },
+        orderBy: { role: 'asc' },
+    },
+};
+
 async function loadMembership(userId) {
     return runUnscoped('reading a user own membership status', async () => {
         const membership = await prisma.schoolMembership.findFirst({
             where: { userId, status: { in: ['PENDING', 'ACTIVE'] } },
-            select: {
-                id: true,
-                status: true,
-                requestedAt: true,
-                approvedAt: true,
-                school: { select: { id: true, name: true, schoolType: true } },
-                roles: {
-                    select: { role: true, status: true, rejectionReason: true },
-                    orderBy: { role: 'asc' },
-                },
-            },
+            select: membershipSelect,
         });
 
-        if (!membership) return null;
+        /*
+          A rejected applicant has no pending or active row, and ticket 05 requires
+          the reason they were turned down to be visible to them. So when there is
+          nothing live, the most recent REJECTED row is shown instead - the status
+          field is what tells the two apart, and a REJECTED membership grants
+          nothing anywhere (buildAuthClaims only reads ACTIVE).
+        */
+        const decided =
+            membership ??
+            (await prisma.schoolMembership.findFirst({
+                where: { userId, status: 'REJECTED' },
+                orderBy: { updatedAt: 'desc' },
+                select: membershipSelect,
+            }));
+
+        if (!decided) return null;
 
         return {
-            id: membership.id,
-            status: membership.status,
-            requestedAt: membership.requestedAt,
-            approvedAt: membership.approvedAt,
-            school: membership.school,
-            roles: membership.roles,
+            id: decided.id,
+            status: decided.status,
+            requestedAt: decided.requestedAt,
+            approvedAt: decided.approvedAt,
+            school: decided.school,
+            roles: decided.roles,
         };
     });
 }
