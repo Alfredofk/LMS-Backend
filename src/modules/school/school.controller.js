@@ -30,8 +30,14 @@ async function listMine(req, res) {
 
 const reviewer = (req) => ({ adminId: req.platformAdminId, adminUserId: req.auth.userId });
 
+/*
+  The service already answers in the shape the screen wants - registrations, the
+  filtered total, and the unfiltered per-status counts the tab badges are made of -
+  so it is spread rather than wrapped. `registrations` keeps its name, which is
+  what the existing frontend reads.
+*/
 async function list(req, res) {
-    return ok(res, { registrations: await service.listRegistrations(req.validated.query) });
+    return ok(res, await service.listRegistrations(req.validated.query));
 }
 
 async function get(req, res) {
@@ -66,4 +72,32 @@ async function reject(req, res) {
     return ok(res, { registration, message: 'Rejected.' });
 }
 
-export { submit, listMine, list, get, ktp, approve, reject };
+/*
+  Withdrawing an approved school's access, and giving it back. Both answer with
+  the registration, like approve and reject, because that is the row the admin
+  screen is holding - and `registration.school.deactivatedAt` is how it can tell
+  which way this went.
+*/
+async function deactivate(req, res) {
+    const registration = await service.deactivateSchool(req.validated.params.id, {
+        ...reviewer(req),
+        reason: req.validated.body.reason,
+    });
+    return ok(res, {
+        registration,
+        message: 'Deactivated. Every member has lost access; nothing was deleted.',
+    });
+}
+
+async function reactivate(req, res) {
+    const registration = await service.reactivateSchool(req.validated.params.id, {
+        ...reviewer(req),
+        reason: req.validated.body.reason,
+    });
+    return ok(res, {
+        registration,
+        message: 'Reactivated. Members have to sign in again.',
+    });
+}
+
+export { submit, listMine, list, get, ktp, approve, reject, deactivate, reactivate };

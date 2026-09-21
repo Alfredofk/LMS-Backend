@@ -80,7 +80,20 @@ async function buildAuthClaims(userId) {
         'resolving a membership before any school scope exists',
         async () => {
             const membership = await prisma.schoolMembership.findFirst({
-                where: { userId, status: 'ACTIVE', endedAt: null },
+                /*
+                  A deactivated school issues no claims, which is the whole
+                  mechanism behind withdrawing its access (ticket 14): without a
+                  schoolId in the token there is no ambient scope, so every
+                  tenant-owned query throws and requireActiveMembership answers
+                  403. The membership row itself is untouched - the school coming
+                  back should find its people still in it.
+                */
+                where: {
+                    userId,
+                    status: 'ACTIVE',
+                    endedAt: null,
+                    school: { deactivatedAt: null },
+                },
                 select: {
                     id: true,
                     schoolId: true,

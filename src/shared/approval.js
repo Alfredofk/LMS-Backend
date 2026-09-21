@@ -52,11 +52,18 @@ function assertDecidable(currentStatus, subjectType) {
 /*
   A rejection without a reason is invisible to the person rejected - they cannot
   tell whether to correct something and re-apply, or stop asking.
+
+  DEACTIVATE joins it for the same reason, one step larger: a school whose access
+  is withdrawn has a Principal who will ask why, and "no reason given" is not an
+  answer anybody can act on. Only the wording differs, because a school being
+  switched off has not been rejected.
 */
 function assertRejectionReason(action, reason) {
-    if (action !== 'REJECT') return;
+    if (action !== 'REJECT' && action !== 'DEACTIVATE') return;
     if (!reason || reason.trim().length < 3) {
-        throw badRequest('A rejection reason is required');
+        throw badRequest(
+            action === 'DEACTIVATE' ? 'A reason is required' : 'A rejection reason is required'
+        );
     }
 }
 

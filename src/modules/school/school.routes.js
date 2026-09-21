@@ -6,7 +6,14 @@ import { registrationLimiter } from '../../shared/rateLimit.js';
 import { singleFile } from '../../shared/upload.js';
 import { validate } from '../../shared/validate.js';
 import * as controller from './school.controller.js';
-import { registrationBody, idParams, listQuery, rejectBody } from './school.schema.js';
+import {
+    registrationBody,
+    idParams,
+    listQuery,
+    rejectBody,
+    deactivateBody,
+    reactivateBody,
+} from './school.schema.js';
 
 /*
   Two routers, because two different people use them.
@@ -49,6 +56,22 @@ adminRouter.post(
     '/:id/reject',
     validate({ params: idParams, body: rejectBody }),
     controller.reject
+);
+/*
+  Keyed on the registration, not the school, because that is the row the admin
+  screen is holding - and because a school founded any other way has no
+  registration to reach it through. If schools ever arrive by another route, this
+  needs a sibling at /api/admin/schools/:id.
+*/
+adminRouter.post(
+    '/:id/deactivate',
+    validate({ params: idParams, body: deactivateBody }),
+    controller.deactivate
+);
+adminRouter.post(
+    '/:id/reactivate',
+    validate({ params: idParams, body: reactivateBody }),
+    controller.reactivate
 );
 
 export default router;
