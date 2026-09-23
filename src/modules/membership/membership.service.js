@@ -77,10 +77,14 @@ const normalizeName = (value) =>
   What an applicant is allowed to learn from a School Code: the school's public
   identity, and nothing more. No roster, no class, no member count - and no id
   either, so the only way to name a school to this API is to hold its code.
+
+  durationYears is part of that identity: it is what tells a three-year SMK from
+  a four-year one, and so whether grade 13 is a choice the form should offer.
 */
 const publicSchoolView = (school) => ({
     name: school.name,
     schoolType: school.schoolType,
+    durationYears: school.durationYears,
     city: school.city,
 });
 
@@ -359,6 +363,203 @@ async function requestJoin(userId, body) {
 }
 
 // ---------------------------------------------------------------------------
+// Member - adding a role to a membership already held
+// ---------------------------------------------------------------------------
+
+/*
+  A role added to an ACTIVE membership (owner, 2026-09-22): the Principal who
+  also teaches, the teacher whose child has just enrolled, the guardian who is
+  hired. The membership stays ACTIVE throughout; only the new role waits.
+
+  It is released the way the same role would be on a fresh join request - the
+  queue filters on PENDING roles, not on the membership's status, so a Principal
+  sees a new TEACHER and the child's homeroom teacher sees a new GUARDIAN with no
+  change to the reviewer side. The one exception is the Principal's own TEACHER:
+  there is nobody above them inside the school to release it, so it is ACTIVE at
+  once, and the audit shows the same person submitting and approving.
+
+  The caller's token opened the school scope, so nothing here needs a wrapper.
+*/
+async function addRoles(auth, body) {
+    const membership = await prisma.schoolMembership.findFirst({
+        where: { id: auth.membershipId, status: 'ACTIVE' },
+        select: {
+            id: true,
+            roles: { select: { id: true, role: true, status: true } },
+            joinRequest: { select: { id: true } },
+            teacherProfile: { select: { id: true } },
+        },
+    });
+    if (!membership) throw notFound('Membership not found');
+
+    const held = membership.roles.filter((role) => role.status !== 'REJECTED');
+    const requested = [...new Set(body.roles)];
+
+    for (const role of requested) {
+        const existing = held.find((entry) => entry.role === role);
+        if (existing) {
+            throw conflict(
+                existing.status === 'PENDING'
+                    ? `Your ${role} role is already waiting for approval`
+                    : `You already hold the ${role} role`
+            );
+        }
+    }
+
+    // STUDENT stays exclusive: a student can add nothing, and nothing can be added to one.
+    assertRoleCombinationAllowed([...held.map((role) => role.role), ...requested]);
+
+    const principal = held.some((role) => role.role === 'PRINCIPAL' && role.status === 'ACTIVE');
+    const child = requested.includes('GUARDIAN') ? await resolveChild(body.guardian) : null;
+    const now = new Date();
+
+    // A child this member was linked to before and turned down for comes back
+    // PENDING; @@unique([guardianMembershipId, studentProfileId]) forbids a second row.
+    const priorLink = child
+        ? await prisma.guardianStudent.findFirst({
+              where: { guardianMembershipId: membership.id, studentProfileId: child.studentProfileId },
+              select: { id: true, status: true },
+          })
+        : null;
+    if (priorLink && priorLink.status !== 'REJECTED') {
+        throw conflict('You are already linked to that student');
+    }
+
+    try {
+        await prisma.$transaction(async (tx) => {
+            // The same row lock decideRequest takes, so a reviewer deciding an
+            // older role on this membership and this request take turns.
+            await tx.schoolMembership.updateMany({
+                where: { id: membership.id },
+                data: { updatedAt: now },
+            });
+
+            for (const role of requested) {
+                const selfGranted = role === 'TEACHER' && principal;
+                const data = selfGranted
+                    ? {
+                          status: 'ACTIVE',
+                          approvedByUserId: auth.userId,
+                          approvedAt: now,
+                          rejectionReason: null,
+                      }
+                    : { status: 'PENDING', approvedByUserId: null, approvedAt: null, rejectionReason: null };
+
+                /*
+                  @@unique([membershipId, role]): a role turned down earlier keeps its
+                  row, so asking again moves that row back rather than adding one.
+                */
+                const rejected = membership.roles.find(
+                    (entry) => entry.role === role && entry.status === 'REJECTED'
+                );
+                let roleId;
+                if (rejected) {
+                    const claimed = await tx.membershipRole.updateMany({
+                        where: { id: rejected.id, status: 'REJECTED' },
+                        data,
+                    });
+                    if (claimed.count === 0) throw conflict(`Your ${role} role changed meanwhile`);
+                    roleId = rejected.id;
+                } else {
+                    const created = await tx.membershipRole.create({
+                        data: { membershipId: membership.id, role, ...data },
+                    });
+                    roleId = created.id;
+                }
+
+                await recordAudit({
+                    schoolId: auth.schoolId,
+                    subjectType: ROLE_SUBJECT,
+                    subjectId: roleId,
+                    action: 'SUBMIT',
+                    actorUserId: auth.userId,
+                    client: tx,
+                });
+
+                if (selfGranted) {
+                    const teacher = {
+                        nip: body.teacher.nip ?? null,
+                        nuptk: body.teacher.nuptk ?? null,
+                    };
+                    if (membership.teacherProfile) {
+                        await tx.teacherProfile.updateMany({
+                            where: { id: membership.teacherProfile.id },
+                            data: teacher,
+                        });
+                    } else {
+                        await tx.teacherProfile.create({
+                            data: { membershipId: membership.id, ...teacher },
+                        });
+                    }
+
+                    await recordAudit({
+                        schoolId: auth.schoolId,
+                        subjectType: ROLE_SUBJECT,
+                        subjectId: roleId,
+                        action: 'APPROVE',
+                        actorUserId: auth.userId,
+                        client: tx,
+                    });
+                }
+            }
+
+            // A TEACHER that waits parks its identifiers where decideRequest reads them.
+            if (requested.includes('TEACHER') && !principal) {
+                const teacher = {
+                    nip: body.teacher.nip ?? null,
+                    nuptk: body.teacher.nuptk ?? null,
+                };
+                if (membership.joinRequest) {
+                    await tx.joinRequestDetail.updateMany({
+                        where: { id: membership.joinRequest.id },
+                        data: teacher,
+                    });
+                } else {
+                    await tx.joinRequestDetail.create({
+                        data: { membershipId: membership.id, ...teacher },
+                    });
+                }
+            }
+
+            if (child) {
+                const link = { relationship: body.guardian.relationship };
+                if (priorLink) {
+                    await tx.guardianStudent.updateMany({
+                        where: { id: priorLink.id, status: 'REJECTED' },
+                        data: {
+                            ...link,
+                            status: 'PENDING',
+                            approvedByUserId: null,
+                            approvedAt: null,
+                            endedAt: null,
+                        },
+                    });
+                } else {
+                    await tx.guardianStudent.create({
+                        data: {
+                            guardianMembershipId: membership.id,
+                            studentProfileId: child.studentProfileId,
+                            ...link,
+                        },
+                    });
+                }
+            }
+        });
+    } catch (error) {
+        throw translateUniqueViolation(error);
+    }
+
+    log.info(`Role(s) added at ${auth.schoolName}: ${requested.join(' + ')}`);
+
+    const roles = await prisma.membershipRole.findMany({
+        where: { membershipId: membership.id },
+        select: { role: true, status: true, rejectionReason: true },
+        orderBy: { role: 'asc' },
+    });
+    return { id: membership.id, status: 'ACTIVE', roles };
+}
+
+// ---------------------------------------------------------------------------
 // Reviewer
 // ---------------------------------------------------------------------------
 
@@ -390,6 +591,7 @@ async function reviewerScope(membershipId) {
     }
 
     return {
+        membershipId,
         principal,
         classes,
         grades: [...new Set(classes.map((entry) => entry.gradeLevel))],
@@ -406,8 +608,15 @@ async function reviewerScope(membershipId) {
   A grade with no class yet has no releaser, and that is honest rather than
   broken: until a Principal creates the class (ticket 07) there is nobody holding
   that roster.
+
+  Nobody releases their own role. Before roles could be added to an ACTIVE
+  membership this could not come up; now a homeroom teacher asking to be the
+  guardian of a child in their own class would otherwise approve themselves.
+  The Principal's own TEACHER is the one sanctioned exception, and it never
+  reaches this queue (addRoles makes it ACTIVE directly).
 */
 function releasableRoles(scope, membership) {
+    if (membership.id === scope.membershipId) return [];
     const detail = membership.joinRequest;
     const mine = (link) =>
         link.status === 'PENDING' && scope.studentProfileIds.includes(link.studentProfileId);
@@ -464,8 +673,9 @@ async function listRequests(auth, { status }) {
     const or = visibleRequestFilter(scope, status);
     if (or.length === 0) return [];
 
+    // A reviewer's own pending role is not in their queue (see releasableRoles).
     const memberships = await prisma.schoolMembership.findMany({
-        where: { OR: or },
+        where: { OR: or, id: { not: auth.membershipId } },
         include: requestInclude,
         orderBy: { requestedAt: 'asc' },
     });
@@ -790,6 +1000,7 @@ export {
     normalizeName,
     lookupSchool,
     requestJoin,
+    addRoles,
     listRequests,
     getRequest,
     approveRequest,

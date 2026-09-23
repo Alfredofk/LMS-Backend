@@ -68,12 +68,14 @@ const teacherPayload = z
   school take student requests before it has created any class at all.
 
   The grade itself is checked against the school's type in the service, where the
-  school is known - grade 7 is not a thing at an SD (shared/schoolType.js).
+  school is known - grade 7 is not a thing at an SD (shared/schoolType.js). The
+  ceiling here is 13, not 12, because a four-year SMK runs to 13; anything tighter
+  belongs to isValidGrade, which knows the school.
 */
 const studentPayload = z.strictObject({
     nisn,
     birthDate: z.coerce.date(),
-    gradeLevel: z.coerce.number().int().min(1).max(12),
+    gradeLevel: z.coerce.number().int().min(1).max(13),
 });
 
 /*
@@ -95,17 +97,9 @@ const guardianPayload = z.strictObject({
   shared/approval.js assertRoleCombinationAllowed(), because the approval service
   has to enforce it a second time when a role is released.
 */
-const requestBody = z
-    .object({
-        schoolCode,
-        roles: z.array(z.enum(REQUESTABLE_ROLES)).min(1, 'Pick at least one role').max(3),
-        teacher: teacherPayload.optional(),
-        student: studentPayload.optional(),
-        guardian: guardianPayload.optional(),
-    })
-    .superRefine((value, ctx) => {
+function requirePayloadPerRole(payloads) {
+    return (value, ctx) => {
         const requested = new Set(value.roles);
-        const payloads = { TEACHER: 'teacher', STUDENT: 'student', GUARDIAN: 'guardian' };
 
         for (const [role, key] of Object.entries(payloads)) {
             if (requested.has(role) && value[key] === undefined) {
@@ -123,7 +117,38 @@ const requestBody = z
                 });
             }
         }
-    });
+    };
+}
+
+const requestBody = z
+    .object({
+        schoolCode,
+        roles: z.array(z.enum(REQUESTABLE_ROLES)).min(1, 'Pick at least one role').max(3),
+        teacher: teacherPayload.optional(),
+        student: studentPayload.optional(),
+        guardian: guardianPayload.optional(),
+    })
+    .superRefine(
+        requirePayloadPerRole({ TEACHER: 'teacher', STUDENT: 'student', GUARDIAN: 'guardian' })
+    );
+
+/*
+  Adding a role to a membership that is already ACTIVE (owner, 2026-09-22): a
+  Principal who also teaches, a teacher whose child has just enrolled.
+
+  STUDENT is not on offer. It cannot join any other role, and a member who holds
+  none but wants to become a student is somebody who should have joined as one.
+  No schoolCode either - the school is the one the caller's token already names.
+*/
+const ADDABLE_ROLES = ['TEACHER', 'GUARDIAN'];
+
+const addRolesBody = z
+    .strictObject({
+        roles: z.array(z.enum(ADDABLE_ROLES)).min(1, 'Pick at least one role').max(2),
+        teacher: teacherPayload.optional(),
+        guardian: guardianPayload.optional(),
+    })
+    .superRefine(requirePayloadPerRole({ TEACHER: 'teacher', GUARDIAN: 'guardian' }));
 
 const idParams = z.object({ id: z.string().min(1) });
 
@@ -155,6 +180,7 @@ export {
     REQUESTABLE_ROLES,
     lookupBody,
     requestBody,
+    addRolesBody,
     idParams,
     listQuery,
     approveBody,

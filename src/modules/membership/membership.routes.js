@@ -7,6 +7,7 @@ import * as controller from './membership.controller.js';
 import {
     lookupBody,
     requestBody,
+    addRolesBody,
     idParams,
     listQuery,
     approveBody,
@@ -38,6 +39,18 @@ router.use(requireAuth);
 
 router.post('/lookup', joinSchoolLimiter, validate({ body: lookupBody }), controller.lookup);
 router.post('/requests', joinSchoolLimiter, validate({ body: requestBody }), controller.request);
+/*
+  The one route here whose caller DOES hold a membership: adding a role to it.
+  It shares joinSchoolLimiter because a GUARDIAN claim is the same NISN-and-name
+  guess the join request makes, and must cost the same.
+*/
+router.post(
+    '/me/roles',
+    requireActiveMembership,
+    joinSchoolLimiter,
+    validate({ body: addRolesBody }),
+    controller.addRoles
+);
 
 const reviewRouter = Router();
 

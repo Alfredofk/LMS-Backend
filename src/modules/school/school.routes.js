@@ -1,6 +1,6 @@
 import { Router } from 'express';
 
-import { requireAuth } from '../../shared/auth.js';
+import { requireAuth, requireActiveMembership, requireRole } from '../../shared/auth.js';
 import { requirePlatformAdmin } from '../../shared/guards.js';
 import { registrationLimiter } from '../../shared/rateLimit.js';
 import { singleFile } from '../../shared/upload.js';
@@ -74,5 +74,17 @@ adminRouter.post(
     controller.reactivate
 );
 
+/*
+  A third router, for the school's own people, mounted at /api/school. The
+  school is the one the token names - there is no id in the path to get wrong,
+  and none to guess. requireRole is the coarse filter; the service re-reads the
+  Principal role from the database.
+*/
+const memberRouter = Router();
+
+memberRouter.use(requireAuth, requireActiveMembership, requireRole('PRINCIPAL'));
+
+memberRouter.post('/code/rotate', controller.rotateCode);
+
 export default router;
-export { adminRouter };
+export { adminRouter, memberRouter };

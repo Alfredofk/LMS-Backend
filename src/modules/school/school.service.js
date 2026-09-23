@@ -11,7 +11,8 @@ import {
     assertRejectionReason,
     recordAudit,
 } from '../../shared/approval.js';
-import { AppError, conflict, notFound } from '../../shared/errors.js';
+import { isPrincipal } from '../../shared/guards.js';
+import { AppError, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
 
 const log = createLogger('School');
@@ -680,6 +681,54 @@ async function reactivateSchool(id, { adminUserId, reason }) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Principal - the School Code
+// ---------------------------------------------------------------------------
+
+/*
+  School Code rotation (ticket 06). The mitigation that makes ADR-0002's join-code
+  model defensible: once a code has spread beyond the people it was meant for,
+  the Principal replaces it.
+
+  - The old code stops resolving at once: resolveSchool() looks the code up by
+    unique value, and nothing else remembers it.
+  - Requests already PENDING are untouched. They name the school by id; the code
+    only located it, and they are past that.
+  - A deactivated school cannot rotate. Its members' tokens stop carrying the
+    school at the next refresh, and one still in flight is refused here, since a
+    code that resolves nowhere has nothing worth replacing.
+
+  Principal checked against the database rather than the token's roles, the way
+  guards.js reads status - a role withdrawn minutes ago must not still work.
+*/
+async function rotateSchoolCode(auth) {
+    if (!(await isPrincipal(auth.membershipId))) throw forbidden('Only the Principal can do this');
+
+    const schoolCode = await generateSchoolCode();
+
+    const school = await prisma.$transaction(async (tx) => {
+        const claimed = await tx.school.updateMany({
+            where: { id: auth.schoolId, deactivatedAt: null },
+            data: { schoolCode },
+        });
+        if (claimed.count === 0) throw notFound('School not found');
+
+        await recordAudit({
+            schoolId: auth.schoolId,
+            subjectType: SCHOOL_SUBJECT,
+            subjectId: auth.schoolId,
+            action: 'REGENERATE_CODE',
+            actorUserId: auth.userId,
+            client: tx,
+        });
+
+        return tx.school.findUnique({ where: { id: auth.schoolId }, ...createdSchoolSelect });
+    });
+
+    log.info(`School Code regenerated for ${school.name}`);
+    return schoolView(school);
+}
+
 export {
     CODE_ALPHABET,
     CODE_LENGTH,
@@ -692,4 +741,5 @@ export {
     rejectRegistration,
     deactivateSchool,
     reactivateSchool,
+    rotateSchoolCode,
 };

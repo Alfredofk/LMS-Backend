@@ -25,6 +25,22 @@ async function request(req, res) {
     );
 }
 
+// ---- member -----------------------------------------------------------------
+
+async function addRoles(req, res) {
+    const membership = await service.addRoles(req.auth, req.validated.body);
+    return ok(
+        res,
+        {
+            membership,
+            message:
+                'Role request recorded. A role that is already active takes effect ' +
+                'the next time your session refreshes.',
+        },
+        201
+    );
+}
+
 // ---- reviewer ---------------------------------------------------------------
 
 async function list(req, res) {
@@ -64,4 +80,4 @@ async function bulkApprove(req, res) {
     });
 }
 
-export { lookup, request, list, get, approve, reject, bulkApprove };
+export { lookup, request, addRoles, list, get, approve, reject, bulkApprove };

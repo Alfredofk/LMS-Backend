@@ -100,4 +100,14 @@ async function reactivate(req, res) {
     });
 }
 
-export { submit, listMine, list, get, ktp, approve, reject, deactivate, reactivate };
+// ---- principal --------------------------------------------------------------
+
+async function rotateCode(req, res) {
+    const school = await service.rotateSchoolCode(req.auth);
+    return ok(res, {
+        school,
+        message: 'New School Code issued. The old one no longer works; pending requests are unaffected.',
+    });
+}
+
+export { submit, listMine, list, get, ktp, approve, reject, deactivate, reactivate, rotateCode };

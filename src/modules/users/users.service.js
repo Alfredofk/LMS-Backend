@@ -30,12 +30,46 @@ const membershipSelect = {
     status: true,
     requestedAt: true,
     approvedAt: true,
-    school: { select: { id: true, name: true, schoolType: true } },
+    school: {
+        select: {
+            id: true,
+            name: true,
+            schoolType: true,
+            durationYears: true,
+            deactivatedAt: true,
+            deactivationReason: true,
+        },
+    },
     roles: {
         select: { role: true, status: true, rejectionReason: true },
         orderBy: { role: 'asc' },
     },
+    // The member's own identifiers - a teacher reading back their NIP, a student
+    // their NISN. Their own row only, so nothing about anybody else comes along.
+    teacherProfile: { select: { nip: true, nuptk: true } },
+    studentProfile: { select: { nisn: true, birthDate: true } },
 };
+
+/*
+  A deactivated school has to say so here: buildAuthClaims() already hands this
+  member a token with no school, and without deactivatedAt they would see an
+  ACTIVE membership that opens nothing, with no hint why (ticket 14).
+
+  Every member learns THAT it happened; only the Principal learns WHY. The
+  reason is written by a platform admin to the person who runs the school, the
+  same audience schoolView in school.service.js shows it to (owner, 2026-09-22).
+*/
+function schoolForMember(school, roles) {
+    const principal = roles.some((role) => role.role === 'PRINCIPAL' && role.status === 'ACTIVE');
+    return {
+        id: school.id,
+        name: school.name,
+        schoolType: school.schoolType,
+        durationYears: school.durationYears,
+        deactivatedAt: school.deactivatedAt,
+        deactivationReason: principal ? school.deactivationReason : null,
+    };
+}
 
 async function loadMembership(userId) {
     return runUnscoped('reading a user own membership status', async () => {
@@ -66,8 +100,10 @@ async function loadMembership(userId) {
             status: decided.status,
             requestedAt: decided.requestedAt,
             approvedAt: decided.approvedAt,
-            school: decided.school,
+            school: schoolForMember(decided.school, decided.roles),
             roles: decided.roles,
+            teacher: decided.teacherProfile,
+            student: decided.studentProfile,
         };
     });
 }

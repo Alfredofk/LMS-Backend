@@ -11,6 +11,7 @@ import authRoutes from './modules/auth/auth.routes.js';
 import usersRoutes from './modules/users/users.routes.js';
 import schoolRegistrationRoutes, {
     adminRouter as adminSchoolRegistrationRoutes,
+    memberRouter as schoolRoutes,
 } from './modules/school/school.routes.js';
 import membershipRoutes, {
     reviewRouter as membershipReviewRoutes,
@@ -75,6 +76,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/school-registrations', schoolRegistrationRoutes);
 app.use('/api/admin/school-registrations', adminSchoolRegistrationRoutes);
+app.use('/api/school', schoolRoutes);
 app.use('/api/memberships', membershipRoutes);
 app.use('/api/membership-requests', membershipReviewRoutes);
 
