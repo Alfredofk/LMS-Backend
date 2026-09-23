@@ -1,30 +1,24 @@
 import { z } from 'zod';
 
-/*
-  Zod v4: string formats live at the top level, so it is z.email() and not
-  z.string().email() (validate.js:4-6).
-*/
+// Zod v4: string formats live at the top level, so it is z.email() and not
+// z.string().email() (validate.js:4-6).
 
-/*
-  bcrypt hashes at most 72 BYTES and silently discards the rest - a 100-character
-  passphrase would authenticate on its first 72 bytes alone, and nothing anywhere
-  would report it. The cap is on bytes rather than characters because a password
-  written in Indonesian may well carry multi-byte characters.
-*/
+// bcrypt hashes at most 72 BYTES and silently discards the rest - a 100-character
+// passphrase would authenticate on its first 72 bytes alone, and nothing anywhere
+// would report it. The cap is on bytes rather than characters because a password
+// written in Indonesian may well carry multi-byte characters.
 const MIN_PASSWORD = 8;
 const MAX_PASSWORD_BYTES = 72;
 
-/*
-  All four character classes are required, not three of four. The rule is the
-  owner's, and it is the one a thesis can state in a sentence.
-
-  A symbol is anything that is not a letter, not a digit and not whitespace.
-  Excluding whitespace is the point: otherwise a trailing space - invisible, and
-  usually a typo rather than a choice - would satisfy the rule on its own.
-
-  Zod runs every string check and collects all of them, so a password missing
-  three of the classes is told all three at once instead of one per round-trip.
-*/
+// All four character classes are required, not three of four. The rule is the
+// owner's, and it is the one a thesis can state in a sentence.
+//
+// A symbol is anything that is not a letter, not a digit and not whitespace.
+// Excluding whitespace is the point: otherwise a trailing space - invisible, and
+// usually a typo rather than a choice - would satisfy the rule on its own.
+//
+// Zod runs every string check and collects all of them, so a password missing
+// three of the classes is told all three at once instead of one per round-trip.
 const password = z
     .string()
     .min(MIN_PASSWORD, `Password must be at least ${MIN_PASSWORD} characters`)

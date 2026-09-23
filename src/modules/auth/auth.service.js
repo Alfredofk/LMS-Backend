@@ -21,15 +21,13 @@ const log = createLogger('Auth');
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // matches the wording in mailer.js
 const RESET_TTL_MS = 60 * 60 * 1000;
 
-/*
-  A bcrypt hash of a value nobody will ever type, compared against when the email
-  is unknown.
-
-  Without it, a login for a non-existent account returns in microseconds while a
-  wrong password costs a deliberate ~300ms of bcrypt - and that gap alone tells
-  an attacker which addresses hold accounts. Created as a promise at import time
-  and awaited only on the failing path, so nothing blocks at startup.
-*/
+// A bcrypt hash of a value nobody will ever type, compared against when the email
+// is unknown.
+//
+// Without it, a login for a non-existent account returns in microseconds while a
+// wrong password costs a deliberate ~300ms of bcrypt - and that gap alone tells
+// an attacker which addresses hold accounts. Created as a promise at import time
+// and awaited only on the failing path, so nothing blocks at startup.
 const dummyHash = hashPassword(crypto.randomBytes(32).toString('hex'));
 
 const expiresIn = (ms) => new Date(Date.now() + ms);
@@ -42,14 +40,12 @@ const publicUser = (user) => ({
     createdAt: user.createdAt,
 });
 
-/*
-  Mail failure never fails the request that triggered it.
-
-  The account, the token and the reset request are already committed; refusing
-  the whole call because an SMTP relay was briefly unreachable would strand the
-  user with an account they cannot reach and no way to ask again. Both paths that
-  send mail have a resend, which is the actual remedy.
-*/
+// Mail failure never fails the request that triggered it.
+//
+// The account, the token and the reset request are already committed; refusing
+// the whole call because an SMTP relay was briefly unreachable would strand the
+// user with an account they cannot reach and no way to ask again. Both paths that
+// send mail have a resend, which is the actual remedy.
 async function deliver(context, send) {
     try {
         await send();
@@ -62,32 +58,28 @@ async function deliver(context, send) {
 // Claims
 // ---------------------------------------------------------------------------
 
-/*
-  The join between authentication and tenancy (ADR-0001), and the one place in
-  this module that must step outside the tenant scope.
-
-  SchoolMembership and MembershipRole are tenant-owned, but this runs at login -
-  before any school is known, which is precisely what the lookup is trying to
-  find out. Scoped, the extension would throw (prisma.js:88). The same carve-out
-  seed.js:129 makes, for the same reason.
-
-  Only an ACTIVE membership with ACTIVE roles produces claims. A PENDING member
-  gets a token carrying no school at all, so every tenant-owned query they could
-  reach throws rather than returning rows.
-*/
+// The join between authentication and tenancy (ADR-0001), and the one place in
+// this module that must step outside the tenant scope.
+//
+// SchoolMembership and MembershipRole are tenant-owned, but this runs at login -
+// before any school is known, which is precisely what the lookup is trying to
+// find out. Scoped, the extension would throw (prisma.js:88). The same carve-out
+// seed.js:129 makes, for the same reason.
+//
+// Only an ACTIVE membership with ACTIVE roles produces claims. A PENDING member
+// gets a token carrying no school at all, so every tenant-owned query they could
+// reach throws rather than returning rows.
 async function buildAuthClaims(userId) {
     return runUnscoped(
         'resolving a membership before any school scope exists',
         async () => {
             const membership = await prisma.schoolMembership.findFirst({
-                /*
-                  A deactivated school issues no claims, which is the whole
-                  mechanism behind withdrawing its access (ticket 14): without a
-                  schoolId in the token there is no ambient scope, so every
-                  tenant-owned query throws and requireActiveMembership answers
-                  403. The membership row itself is untouched - the school coming
-                  back should find its people still in it.
-                */
+                // A deactivated school issues no claims, which is the whole
+                // mechanism behind withdrawing its access (ticket 14): without a
+                // schoolId in the token there is no ambient scope, so every
+                // tenant-owned query throws and requireActiveMembership answers
+                // 403. The membership row itself is untouched - the school coming
+                // back should find its people still in it.
                 where: {
                     userId,
                     status: 'ACTIVE',
@@ -123,12 +115,10 @@ async function buildAuthClaims(userId) {
 // Refresh tokens
 // ---------------------------------------------------------------------------
 
-/*
-  The row's expiry is read back out of the JWT rather than recomputed from the
-  remember-me lifetimes in shared/auth.js. One source of truth: change a lifetime
-  there and the table follows, with no chance of a row outliving the token it
-  stands for.
-*/
+// The row's expiry is read back out of the JWT rather than recomputed from the
+// remember-me lifetimes in shared/auth.js. One source of truth: change a lifetime
+// there and the table follows, with no chance of a row outliving the token it
+// stands for.
 async function issueRefreshToken(userId, { rememberMe = false } = {}) {
     const token = signRefreshToken({ userId, rememberMe });
     const { exp } = verifyRefreshToken(token);
@@ -162,11 +152,11 @@ async function authResponse(user, refreshToken, { rememberMe = false } = {}) {
         user: publicUser(user),
         membership: claims.membershipId
             ? {
-                  id: claims.membershipId,
-                  schoolId: claims.schoolId,
-                  schoolName: claims.schoolName,
-                  roles: claims.roles,
-              }
+                id: claims.membershipId,
+                schoolId: claims.schoolId,
+                schoolName: claims.schoolName,
+                roles: claims.roles,
+            }
             : null,
     };
 }
@@ -175,14 +165,12 @@ async function authResponse(user, refreshToken, { rememberMe = false } = {}) {
 // Registration and verification
 // ---------------------------------------------------------------------------
 
-/*
-  A taken email answers 409 rather than a vague success.
-
-  That does confirm the address has an account, and it is a deliberate, narrow
-  trade: a signup form has to be able to say "this email is already registered"
-  or people cannot sign up at all. The endpoints where enumeration actually costs
-  something - forgot-password and resend-verification - stay silent.
-*/
+// A taken email answers 409 rather than a vague success.
+//
+// That does confirm the address has an account, and it is a deliberate, narrow
+// trade: a signup form has to be able to say "this email is already registered"
+// or people cannot sign up at all. The endpoints where enumeration actually costs
+// something - forgot-password and resend-verification - stay silent.
 async function registerUser({ email, password, fullName }) {
     const existing = await prisma.user.findUnique({
         where: { email },
@@ -203,10 +191,8 @@ async function registerUser({ email, password, fullName }) {
     return publicUser(user);
 }
 
-/*
-  Issuing a new link retires every outstanding one. "Single-use" has to mean the
-  newest link is the only one that works, or a forwarded old email stays live.
-*/
+// Issuing a new link retires every outstanding one. "Single-use" has to mean the
+// newest link is the only one that works, or a forwarded old email stays live.
 async function issueVerificationToken(user) {
     const token = generateToken();
 
@@ -283,12 +269,10 @@ async function login({ email, password, rememberMe }) {
 
     if (!usable || !matches) throw unauthorized('Email or password is incorrect');
 
-    /*
-      A distinct code, not the generic 401. This does reveal that the account
-      exists - but only to someone who has just proved they know its password,
-      who therefore learns nothing new. The client needs to tell the two apart to
-      offer "resend the verification email" instead of "wrong password".
-    */
+    // A distinct code, not the generic 401. This does reveal that the account
+    // exists - but only to someone who has just proved they know its password,
+    // who therefore learns nothing new. The client needs to tell the two apart to
+    // offer "resend the verification email" instead of "wrong password".
     if (!user.emailVerifiedAt) {
         throw new AppError(
             403,
@@ -301,23 +285,21 @@ async function login({ email, password, rememberMe }) {
     return authResponse(user, token, { rememberMe });
 }
 
-/*
-  Rotation. Every refresh mints a new token and revokes the one presented, so a
-  refresh token is good exactly once.
-
-  That is what makes theft detectable: if a revoked token comes back, either the
-  legitimate holder replayed it or someone copied it - and there is no way to
-  tell which. Signing that user out everywhere is the only safe answer, and costs
-  the honest user one login.
-
-  "Session" is not the word for this anywhere in the codebase: CONTEXT.md gives it
-  to one meeting of a ClassSubject. A sign-in belongs to a device.
-
-  The remember-me choice is inherited from the token presented - read from its
-  signed payload, never from the request - and the new token gets that choice's
-  full lifetime again. A token minted before `rem` existed carries none, and is
-  treated as not remembered.
-*/
+// Rotation. Every refresh mints a new token and revokes the one presented, so a
+// refresh token is good exactly once.
+//
+// That is what makes theft detectable: if a revoked token comes back, either the
+// legitimate holder replayed it or someone copied it - and there is no way to
+// tell which. Signing that user out everywhere is the only safe answer, and costs
+// the honest user one login.
+//
+// "Session" is not the word for this anywhere in the codebase: CONTEXT.md gives it
+// to one meeting of a ClassSubject. A sign-in belongs to a device.
+//
+// The remember-me choice is inherited from the token presented - read from its
+// signed payload, never from the request - and the new token gets that choice's
+// full lifetime again. A token minted before `rem` existed carries none, and is
+// treated as not remembered.
 async function refreshAuth(rawToken) {
     const rejected = unauthorized('Invalid or expired refresh token');
 
@@ -357,11 +339,9 @@ async function refreshAuth(rawToken) {
     return authResponse(user, issued.token, { rememberMe });
 }
 
-/*
-  Idempotent. Logging out twice, or with a token we never issued, is not a
-  condition worth reporting - the caller's intent is satisfied either way, and a
-  404 here would confirm which tokens are real.
-*/
+// Idempotent. Logging out twice, or with a token we never issued, is not a
+// condition worth reporting - the caller's intent is satisfied either way, and a
+// 404 here would confirm which tokens are real.
 async function logout(rawToken) {
     const row = await prisma.refreshToken.findUnique({
         where: { tokenHash: hashToken(rawToken) },
@@ -385,28 +365,26 @@ const googleRejected = () => unauthorized('Google sign-in failed');
 // Google's name when it sends one, else the part of the address before the @.
 const googleFullName = (name, email) => (name?.trim() || email.split('@')[0]).slice(0, 120);
 
-/*
-  Which User a verified Google identity signs in as.
-
-  The link is googleSub, never the email: a Google account can change its
-  address, and its sub never changes. The email is only consulted the first
-  time, to find the account this Google identity should attach to.
-
-  Three outcomes the first time:
-    - no account for the address  -> one is created, already verified
-    - a verified account          -> linked, its password untouched
-    - an UNVERIFIED account       -> linked, and its password discarded
-
-  The last is the one that matters. Anyone can register an address they do not
-  own; it just stays unverified. If the real owner later arrives through Google,
-  that account becomes verified - and without this, the stranger's password
-  would now open it. So the password goes, every refresh token issued against
-  it goes, and any verification link still sitting in the inbox is retired.
-  The owner sets a password of their own through forgot-password.
-
-  Two first sign-ins racing each other both miss the lookups; the unique index
-  on email catches the second create and server.js turns P2002 into a 409.
-*/
+// Which User a verified Google identity signs in as.
+//
+// The link is googleSub, never the email: a Google account can change its
+// address, and its sub never changes. The email is only consulted the first
+// time, to find the account this Google identity should attach to.
+//
+// Three outcomes the first time:
+//   - no account for the address  -> one is created, already verified
+//   - a verified account          -> linked, its password untouched
+//   - an UNVERIFIED account       -> linked, and its password discarded
+//
+// The last is the one that matters. Anyone can register an address they do not
+// own; it just stays unverified. If the real owner later arrives through Google,
+// that account becomes verified - and without this, the stranger's password
+// would now open it. So the password goes, every refresh token issued against
+// it goes, and any verification link still sitting in the inbox is retired.
+// The owner sets a password of their own through forgot-password.
+//
+// Two first sign-ins racing each other both miss the lookups; the unique index
+// on email catches the second create and server.js turns P2002 into a 409.
 async function resolveGoogleUser({ sub, email, name }) {
     const linked = await prisma.user.findUnique({ where: { googleSub: sub } });
     if (linked) {
@@ -460,12 +438,10 @@ async function resolveGoogleUser({ sub, email, name }) {
     return user;
 }
 
-/*
-  The Google equivalent of login(), answering in exactly the same shape.
-
-  An address Google itself has not verified proves nothing about who owns it,
-  so it is refused rather than trusted.
-*/
+// The Google equivalent of login(), answering in exactly the same shape.
+//
+// An address Google itself has not verified proves nothing about who owns it,
+// so it is refused rather than trusted.
 async function googleSignIn({ idToken, rememberMe }) {
     const google = await googleVerifier.verify(idToken);
     if (!google.emailVerified) throw googleRejected();
@@ -526,11 +502,9 @@ async function checkResetToken(rawToken) {
     return { valid: true };
 }
 
-/*
-  A password change signs out every device. Whoever forced the reset - the owner
-  locked out, or an attacker who had the password - the sign-ins made before this
-  moment are exactly the ones that must not survive it.
-*/
+// A password change signs out every device. Whoever forced the reset - the owner
+// locked out, or an attacker who had the password - the sign-ins made before this
+// moment are exactly the ones that must not survive it.
 async function resetPassword({ token, password }) {
     const row = await loadUsableResetToken(token);
     const passwordHash = await hashPassword(password);

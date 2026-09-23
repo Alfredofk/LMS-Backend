@@ -23,13 +23,11 @@ const SUBJECT_TYPE = 'SchoolRegistration';
 const SCHOOL_SUBJECT = 'School';
 const KTP_FOLDER = 'ktp';
 
-/*
-  School Code: 8 characters, opaque, globally unique (ADR-0002, handoff #50).
-
-  The alphabet drops 0/O and 1/I, because the code is read aloud in a classroom
-  and typed from a WhatsApp message. 32 symbols over 8 places is 2^40 codes -
-  far more than will ever exist, so a collision is rare and a retry is enough.
-*/
+// School Code: 8 characters, opaque, globally unique (ADR-0002, handoff #50).
+//
+// The alphabet drops 0/O and 1/I, because the code is read aloud in a classroom
+// and typed from a WhatsApp message. 32 symbols over 8 places is 2^40 codes -
+// far more than will ever exist, so a collision is rare and a retry is enough.
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const CODE_LENGTH = 8;
 const CODE_ATTEMPTS = 5;
@@ -54,11 +52,9 @@ async function generateSchoolCode() {
 // Views - what each side is allowed to see of a registration
 // ---------------------------------------------------------------------------
 
-/*
-  A school as either side sees it after approval. The applicant is the Principal,
-  so they see the same four fields the admin does: being told your school was
-  deactivated, and why, is the whole point of recording a reason.
-*/
+// A school as either side sees it after approval. The applicant is the Principal,
+// so they see the same four fields the admin does: being told your school was
+// deactivated, and why, is the whole point of recording a reason.
 const schoolView = (school) => ({
     id: school.id,
     name: school.name,
@@ -83,18 +79,16 @@ const adminView = (registration) => ({
     rejectionReason: registration.rejectionReason,
     createdSchoolId: registration.createdSchoolId,
     createdAt: registration.createdAt,
-    /*
-      The school this registration became, once it became one. The admin screen
-      needs `deactivatedAt` to tell a live school from a switched-off one, and the
-      code so they can read it back to whoever lost it.
-    */
+    // The school this registration became, once it became one. The admin screen
+    // needs `deactivatedAt` to tell a live school from a switched-off one, and the
+    // code so they can read it back to whoever lost it.
     school: registration.createdSchool ? schoolView(registration.createdSchool) : null,
     applicant: registration.applicant
         ? {
-              id: registration.applicant.id,
-              email: registration.applicant.email,
-              fullName: registration.applicant.fullName,
-          }
+            id: registration.applicant.id,
+            email: registration.applicant.email,
+            fullName: registration.applicant.fullName,
+        }
         : undefined,
 });
 
@@ -128,14 +122,12 @@ const createdSchoolSelect = {
 // Rules shared by submit and approve
 // ---------------------------------------------------------------------------
 
-/*
-  One pending-or-active membership per User (ADR-0002, and the partial unique
-  index behind it). Approval makes the applicant an ACTIVE Principal, so someone
-  who already belongs somewhere - or has asked to - cannot found a school.
-
-  SchoolMembership is tenant-owned; callers run this inside runUnscoped(),
-  because the question is precisely "which school, if any".
-*/
+// One pending-or-active membership per User (ADR-0002, and the partial unique
+// index behind it). Approval makes the applicant an ACTIVE Principal, so someone
+// who already belongs somewhere - or has asked to - cannot found a school.
+//
+// SchoolMembership is tenant-owned; callers run this inside runUnscoped(),
+// because the question is precisely "which school, if any".
 async function assertHoldsNoMembership(userId, message) {
     const held = await prisma.schoolMembership.findFirst({
         where: { userId, status: { in: ['PENDING', 'ACTIVE'] } },
@@ -144,12 +136,10 @@ async function assertHoldsNoMembership(userId, message) {
     if (held) throw conflict(message);
 }
 
-/*
-  The KTP goes the moment a decision is made, approve or reject (UU PDP
-  27/2022). By the time this runs the column is already null and the decision
-  committed, so a failure here cannot undo either - it is logged loudly with the
-  key, for a human to remove the file by hand.
-*/
+// The KTP goes the moment a decision is made, approve or reject (UU PDP
+// 27/2022). By the time this runs the column is already null and the decision
+// committed, so a failure here cannot undo either - it is logged loudly with the
+// key, for a human to remove the file by hand.
 async function discardKtp(key, registrationId) {
     if (!key) return;
     try {
@@ -167,11 +157,9 @@ async function discardKtp(key, registrationId) {
 // Applicant
 // ---------------------------------------------------------------------------
 
-/*
-  A registration predates the school it asks for, so none of this has a school
-  scope. The three models it writes or reads beyond SchoolRegistration -
-  SchoolMembership, School and ApprovalAudit - are why it runs unscoped.
-*/
+// A registration predates the school it asks for, so none of this has a school
+// scope. The three models it writes or reads beyond SchoolRegistration -
+// SchoolMembership, School and ApprovalAudit - are why it runs unscoped.
 async function submitRegistration(userId, body, file) {
     return runUnscoped('a school registration predates the school it asks for', async () => {
         const user = await prisma.user.findUnique({
@@ -198,10 +186,8 @@ async function submitRegistration(userId, body, file) {
             'You already belong to a school, or have asked to join one'
         );
 
-        /*
-          One answer whether a School holds the NPSN or another registration is
-          waiting on it, and never which school: the ticket forbids revealing it.
-        */
+        // One answer whether a School holds the NPSN or another registration is
+        // waiting on it, and never which school: the ticket forbids revealing it.
         const npsnTaken =
             (await prisma.school.findUnique({ where: { npsn: body.npsn }, select: { id: true } })) ??
             (await prisma.schoolRegistration.findFirst({
@@ -272,18 +258,16 @@ async function listMine(userId) {
 
 const adminInclude = { applicant: applicantSelect, createdSchool: createdSchoolSelect };
 
-/*
-  The filters, as one where clause.
-
-  `q` is a contains match, case-insensitive, over the five fields an admin might
-  half-remember - including two that live on the applicant, reached through the
-  relation rather than by fetching everybody and sifting in JavaScript.
-
-  Postgres cannot use a btree index for `contains`, so this is a sequential scan
-  by design. At the scale of "schools applying to one platform" that is the right
-  trade: a trigram index would cost writes on every registration to speed up a
-  screen one person opens. Revisit it if the queue ever reaches six figures.
-*/
+// The filters, as one where clause.
+//
+// `q` is a contains match, case-insensitive, over the five fields an admin might
+// half-remember - including two that live on the applicant, reached through the
+// relation rather than by fetching everybody and sifting in JavaScript.
+//
+// Postgres cannot use a btree index for `contains`, so this is a sequential scan
+// by design. At the scale of "schools applying to one platform" that is the right
+// trade: a trigram index would cost writes on every registration to speed up a
+// screen one person opens. Revisit it if the queue ever reaches six figures.
 function buildRegistrationWhere({
     status,
     q,
@@ -309,12 +293,10 @@ function buildRegistrationWhere({
         ];
     }
 
-    /*
-      Only an approved registration has a school, so either value of this implies
-      APPROVED: `true` is "switched off", `false` is "still running". A PENDING
-      row matches neither, which is the honest answer - there is nothing to be
-      deactivated yet.
-    */
+    // Only an approved registration has a school, so either value of this implies
+    // APPROVED: `true` is "switched off", `false` is "still running". A PENDING
+    // row matches neither, which is the honest answer - there is nothing to be
+    // deactivated yet.
     if (deactivated === true) where.createdSchool = { deactivatedAt: { not: null } };
     if (deactivated === false) where.createdSchool = { deactivatedAt: null };
 
@@ -328,17 +310,15 @@ function buildRegistrationWhere({
     return where;
 }
 
-/*
-  One page of the queue, the number of rows behind that page, and the per-status
-  totals the tab badges are made of.
-
-  The counts are deliberately NOT filtered. A badge that shrinks as the admin
-  types stops answering the question they opened the page to ask - is there work
-  waiting - and the frontend says so in its own comments. `total` is the filtered
-  number, for "37 results".
-
-  Oldest first by default: a queue is worked from the front.
-*/
+// One page of the queue, the number of rows behind that page, and the per-status
+// totals the tab badges are made of.
+//
+// The counts are deliberately NOT filtered. A badge that shrinks as the admin
+// types stops answering the question they opened the page to ask - is there work
+// waiting - and the frontend says so in its own comments. `total` is the filtered
+// number, for "37 results".
+//
+// Oldest first by default: a queue is worked from the front.
 async function listRegistrations(filters) {
     const { sort, limit, offset } = filters;
     const where = buildRegistrationWhere(filters);
@@ -389,12 +369,10 @@ async function readKtp(id) {
     return { buffer, contentType: MIME[type] };
 }
 
-/*
-  Claiming the row with updateMany({ status: 'PENDING' }) inside the
-  transaction is what makes a decision happen once. Two admins clicking at the
-  same moment both pass assertDecidable() on their earlier read; only one of
-  them can move the row out of PENDING, and the other gets the same 409.
-*/
+// Claiming the row with updateMany({ status: 'PENDING' }) inside the
+// transaction is what makes a decision happen once. Two admins clicking at the
+// same moment both pass assertDecidable() on their earlier read; only one of
+// them can move the row out of PENDING, and the other gets the same 409.
 async function claimPending(tx, id, data) {
     const claimed = await tx.schoolRegistration.updateMany({
         where: { id, status: 'PENDING' },
@@ -403,15 +381,13 @@ async function claimPending(tx, id, data) {
     if (claimed.count === 0) throw conflict('This school registration has already been decided');
 }
 
-/*
-  Approval founds the school. In one transaction: the School with its code, the
-  applicant's ACTIVE membership, their ACTIVE PRINCIPAL role - nobody else could
-  have approved the first Principal - the decision on the registration, and the
-  audit row. The KTP is removed only after all of that has committed.
-
-  The applicant's current token carries no school. Their next /refresh rebuilds
-  the claims (auth.service.js buildAuthClaims) and picks the school up.
-*/
+// Approval founds the school. In one transaction: the School with its code, the
+// applicant's ACTIVE membership, their ACTIVE PRINCIPAL role - nobody else could
+// have approved the first Principal - the decision on the registration, and the
+// audit row. The KTP is removed only after all of that has committed.
+//
+// The applicant's current token carries no school. Their next /refresh rebuilds
+// the claims (auth.service.js buildAuthClaims) and picks the school up.
 async function approveRegistration(id, { adminId, adminUserId }) {
     return runUnscoped('a platform admin founding a school', async () => {
         const registration = await loadRegistration(id);
@@ -537,24 +513,22 @@ async function rejectRegistration(id, { adminId, adminUserId, reason }) {
 // Withdrawing a school's access - and giving it back
 // ---------------------------------------------------------------------------
 
-/*
-  Deactivation, keyed by the registration because that is the row the admin is
-  looking at. Only an APPROVED one has a school to switch off.
-
-  What it does, and does not do:
-  - `School.deactivatedAt` is set, with the reason and the admin who decided.
-    buildAuthClaims() then issues no school claims to any member, so their tokens
-    carry no schoolId and every tenant-owned query is out of reach; the School
-    Code stops resolving for new joins.
-  - Live sessions are cut, because an access token is minted from a refresh token:
-    leaving those alone would let a member renew their way back in for up to
-    fourteen days. Revoking them means the school is gone at the next refresh -
-    within one access-token lifetime (JWT_ACCESS_TTL, 15 minutes by default) for
-    somebody holding a valid one right now.
-  - **Nothing is deleted, and no membership changes.** Ending memberships is
-    leaving, which is ADR-0004 and ticket 06; a school that comes back should find
-    its people still in it.
-*/
+// Deactivation, keyed by the registration because that is the row the admin is
+// looking at. Only an APPROVED one has a school to switch off.
+//
+// What it does, and does not do:
+// - `School.deactivatedAt` is set, with the reason and the admin who decided.
+//   buildAuthClaims() then issues no school claims to any member, so their tokens
+//   carry no schoolId and every tenant-owned query is out of reach; the School
+//   Code stops resolving for new joins.
+// - Live sessions are cut, because an access token is minted from a refresh token:
+//   leaving those alone would let a member renew their way back in for up to
+//   fourteen days. Revoking them means the school is gone at the next refresh -
+//   within one access-token lifetime (JWT_ACCESS_TTL, 15 minutes by default) for
+//   somebody holding a valid one right now.
+// - **Nothing is deleted, and no membership changes.** Ending memberships is
+//   leaving, which is ADR-0004 and ticket 06; a school that comes back should find
+//   its people still in it.
 async function deactivateSchool(id, { adminId, adminUserId, reason }) {
     assertRejectionReason('DEACTIVATE', reason);
     const trimmed = reason.trim();
@@ -596,9 +570,9 @@ async function deactivateSchool(id, { adminId, adminUserId, reason }) {
             const revoked =
                 userIds.length > 0
                     ? await tx.refreshToken.updateMany({
-                          where: { userId: { in: userIds }, revokedAt: null },
-                          data: { revokedAt: now },
-                      })
+                        where: { userId: { in: userIds }, revokedAt: null },
+                        data: { revokedAt: now },
+                    })
                     : { count: 0 };
 
             await recordAudit({
@@ -623,17 +597,15 @@ async function deactivateSchool(id, { adminId, adminUserId, reason }) {
     });
 }
 
-/*
-  The way back. The frontend has no button for it yet, and it exists anyway: a
-  school switched off by a misclick would otherwise need the database edited by
-  hand. The note is optional - there is nobody waiting to be told why their access
-  came back - but it is recorded when given.
-
-  Members have to sign in again: their refresh tokens were revoked on the way out,
-  and reactivating does not un-revoke them. That is deliberate. A revoked token
-  coming back to life is exactly the shape of a replay, and auth.service.js treats
-  it as theft.
-*/
+// The way back. The frontend has no button for it yet, and it exists anyway: a
+// school switched off by a misclick would otherwise need the database edited by
+// hand. The note is optional - there is nobody waiting to be told why their access
+// came back - but it is recorded when given.
+//
+// Members have to sign in again: their refresh tokens were revoked on the way out,
+// and reactivating does not un-revoke them. That is deliberate. A revoked token
+// coming back to life is exactly the shape of a replay, and auth.service.js treats
+// it as theft.
 async function reactivateSchool(id, { adminUserId, reason }) {
     const note = reason?.trim() ? reason.trim() : null;
 
@@ -658,12 +630,10 @@ async function reactivateSchool(id, { adminUserId, reason }) {
             });
             if (claimed.count === 0) throw conflict('This school is not deactivated');
 
-            /*
-              The reason is cleared from the row, not from the record: why a school
-              was switched off lives in ApprovalAudit, which is append-only
-              (ADR-0003). Leaving a stale reason on a running school would be worse
-              than losing it - it reads as current.
-            */
+            // The reason is cleared from the row, not from the record: why a school
+            // was switched off lives in ApprovalAudit, which is append-only
+            // (ADR-0003). Leaving a stale reason on a running school would be worse
+            // than losing it - it reads as current.
             await recordAudit({
                 schoolId,
                 subjectType: SCHOOL_SUBJECT,
@@ -685,22 +655,20 @@ async function reactivateSchool(id, { adminUserId, reason }) {
 // Principal - the School Code
 // ---------------------------------------------------------------------------
 
-/*
-  School Code rotation (ticket 06). The mitigation that makes ADR-0002's join-code
-  model defensible: once a code has spread beyond the people it was meant for,
-  the Principal replaces it.
-
-  - The old code stops resolving at once: resolveSchool() looks the code up by
-    unique value, and nothing else remembers it.
-  - Requests already PENDING are untouched. They name the school by id; the code
-    only located it, and they are past that.
-  - A deactivated school cannot rotate. Its members' tokens stop carrying the
-    school at the next refresh, and one still in flight is refused here, since a
-    code that resolves nowhere has nothing worth replacing.
-
-  Principal checked against the database rather than the token's roles, the way
-  guards.js reads status - a role withdrawn minutes ago must not still work.
-*/
+// School Code rotation (ticket 06). The mitigation that makes ADR-0002's join-code
+// model defensible: once a code has spread beyond the people it was meant for,
+// the Principal replaces it.
+//
+// - The old code stops resolving at once: resolveSchool() looks the code up by
+//   unique value, and nothing else remembers it.
+// - Requests already PENDING are untouched. They name the school by id; the code
+//   only located it, and they are past that.
+// - A deactivated school cannot rotate. Its members' tokens stop carrying the
+//   school at the next refresh, and one still in flight is refused here, since a
+//   code that resolves nowhere has nothing worth replacing.
+//
+// Principal checked against the database rather than the token's roles, the way
+// guards.js reads status - a role withdrawn minutes ago must not still work.
 async function rotateSchoolCode(auth) {
     if (!(await isPrincipal(auth.membershipId))) throw forbidden('Only the Principal can do this');
 

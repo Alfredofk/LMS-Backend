@@ -1,11 +1,9 @@
 import { ok } from '../../shared/errors.js';
 import * as service from './school.service.js';
 
-/*
-  Thin by design, like auth.controller.js: read what validation produced, call
-  the service, wrap the answer in the envelope. No try/catch - Express 5 hands a
-  rejected promise to the error handler in server.js on its own.
-*/
+// Thin by design, like auth.controller.js: read what validation produced, call
+// the service, wrap the answer in the envelope. No try/catch - Express 5 hands a
+// rejected promise to the error handler in server.js on its own.
 
 // ---- applicant --------------------------------------------------------------
 
@@ -30,12 +28,10 @@ async function listMine(req, res) {
 
 const reviewer = (req) => ({ adminId: req.platformAdminId, adminUserId: req.auth.userId });
 
-/*
-  The service already answers in the shape the screen wants - registrations, the
-  filtered total, and the unfiltered per-status counts the tab badges are made of -
-  so it is spread rather than wrapped. `registrations` keeps its name, which is
-  what the existing frontend reads.
-*/
+// The service already answers in the shape the screen wants - registrations, the
+// filtered total, and the unfiltered per-status counts the tab badges are made of -
+// so it is spread rather than wrapped. `registrations` keeps its name, which is
+// what the existing frontend reads.
 async function list(req, res) {
     return ok(res, await service.listRegistrations(req.validated.query));
 }
@@ -44,11 +40,9 @@ async function get(req, res) {
     return ok(res, { registration: await service.getRegistration(req.validated.params.id) });
 }
 
-/*
-  The one response in the API that is not the JSON envelope: it is the image
-  itself, for the admin's browser to show. no-store because it is a national ID
-  document, and it must not linger in a cache after the file is deleted.
-*/
+// The one response in the API that is not the JSON envelope: it is the image
+// itself, for the admin's browser to show. no-store because it is a national ID
+// document, and it must not linger in a cache after the file is deleted.
 async function ktp(req, res) {
     const { buffer, contentType } = await service.readKtp(req.validated.params.id);
     res.set({
@@ -72,12 +66,10 @@ async function reject(req, res) {
     return ok(res, { registration, message: 'Rejected.' });
 }
 
-/*
-  Withdrawing an approved school's access, and giving it back. Both answer with
-  the registration, like approve and reject, because that is the row the admin
-  screen is holding - and `registration.school.deactivatedAt` is how it can tell
-  which way this went.
-*/
+// Withdrawing an approved school's access, and giving it back. Both answer with
+// the registration, like approve and reject, because that is the row the admin
+// screen is holding - and `registration.school.deactivatedAt` is how it can tell
+// which way this went.
 async function deactivate(req, res) {
     const registration = await service.deactivateSchool(req.validated.params.id, {
         ...reviewer(req),

@@ -1,8 +1,6 @@
-/*
-  Carries the current school across the whole request without threading it
-  through every function signature. The auth middleware opens the scope; the
-  Prisma extension in ./prisma.js and the logger in ../lib/helpers.js read it.
-*/
+// Carries the current school across the whole request without threading it
+// through every function signature. The auth middleware opens the scope; the
+// Prisma extension in ./prisma.js and the logger in ../lib/helpers.js read it.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 const storage = new AsyncLocalStorage();

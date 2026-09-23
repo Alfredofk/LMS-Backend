@@ -1,30 +1,26 @@
 import { prisma } from './prisma.js';
 import { badRequest, conflict, forbidden } from './errors.js';
 
-/*
-  The shared approval service (ADR-0003).
-
-  Three things need the same pending -> approved/rejected lifecycle: school
-  registrations, memberships and their roles, and teaching assignments. They
-  share this BEHAVIOUR while each keeping its own status column and real foreign
-  keys - deliberately not a polymorphic ApprovalRequest table, which would trade
-  referential integrity for a queue view we can assemble from typed queries.
-
-  Everything that changes an approval state should route through here, because
-  this is also the only place that writes ApprovalAudit.
-*/
+// The shared approval service (ADR-0003).
+//
+// Three things need the same pending -> approved/rejected lifecycle: school
+// registrations, memberships and their roles, and teaching assignments. They
+// share this BEHAVIOUR while each keeping its own status column and real foreign
+// keys - deliberately not a polymorphic ApprovalRequest table, which would trade
+// referential integrity for a queue view we can assemble from typed queries.
+//
+// Everything that changes an approval state should route through here, because
+// this is also the only place that writes ApprovalAudit.
 
 const RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const MAX_ATTEMPTS_PER_WINDOW = 3;
 
-/*
-  STUDENT is exclusive.
-
-  A student who also held TEACHER would gain grading authority over their own
-  class, which is the escalation the whole approval design exists to prevent.
-  Every other combination is legitimate - TEACHER + GUARDIAN is the common case
-  of a teacher whose own child attends the same school.
-*/
+// STUDENT is exclusive.
+//
+// A student who also held TEACHER would gain grading authority over their own
+// class, which is the escalation the whole approval design exists to prevent.
+// Every other combination is legitimate - TEACHER + GUARDIAN is the common case
+// of a teacher whose own child attends the same school.
 function assertRoleCombinationAllowed(roles) {
     const unique = [...new Set(roles)];
 
@@ -49,15 +45,13 @@ function assertDecidable(currentStatus, subjectType) {
     }
 }
 
-/*
-  A rejection without a reason is invisible to the person rejected - they cannot
-  tell whether to correct something and re-apply, or stop asking.
-
-  DEACTIVATE joins it for the same reason, one step larger: a school whose access
-  is withdrawn has a Principal who will ask why, and "no reason given" is not an
-  answer anybody can act on. Only the wording differs, because a school being
-  switched off has not been rejected.
-*/
+// A rejection without a reason is invisible to the person rejected - they cannot
+// tell whether to correct something and re-apply, or stop asking.
+//
+// DEACTIVATE joins it for the same reason, one step larger: a school whose access
+// is withdrawn has a Principal who will ask why, and "no reason given" is not an
+// answer anybody can act on. Only the wording differs, because a school being
+// switched off has not been rejected.
 function assertRejectionReason(action, reason) {
     if (action !== 'REJECT' && action !== 'DEACTIVATE') return;
     if (!reason || reason.trim().length < 3) {
@@ -107,14 +101,12 @@ async function assertClassSubjectRetryAllowed({
     }
 }
 
-/*
-  The durable ceiling on school registrations.
-
-  registrationLimiter in ./rateLimit.js damps the traffic, but its memory store
-  is per-process and forgets on every restart - `npm run dev` runs under
-  --watch, so that window resets whenever a file is saved. A rule a human
-  reviewer relies on has to outlive the process.
-*/
+// The durable ceiling on school registrations.
+//
+// registrationLimiter in ./rateLimit.js damps the traffic, but its memory store
+// is per-process and forgets on every restart - `npm run dev` runs under
+// --watch, so that window resets whenever a file is saved. A rule a human
+// reviewer relies on has to outlive the process.
 async function assertSchoolRegistrationAllowed({ applicantUserId }) {
     const since = new Date(Date.now() - RETRY_WINDOW_MS);
     const recent = await prisma.schoolRegistration.count({
@@ -129,13 +121,11 @@ async function assertSchoolRegistrationAllowed({ applicantUserId }) {
     }
 }
 
-/*
-  Append-only. Never updated, never deleted - it is the record of who decided
-  what, and a mutable audit log is not an audit log.
-
-  `schoolId` is null for school-registration decisions, which happen before any
-  school exists; those callers run inside runUnscoped().
-*/
+// Append-only. Never updated, never deleted - it is the record of who decided
+// what, and a mutable audit log is not an audit log.
+//
+// `schoolId` is null for school-registration decisions, which happen before any
+// school exists; those callers run inside runUnscoped().
 async function recordAudit({
     schoolId = null,
     subjectType,
@@ -150,10 +140,8 @@ async function recordAudit({
     });
 }
 
-/*
-  Guard for the deadline on new teaching assignments. The principal override is
-  a separate, audited path - not a bypass callers may take on their own.
-*/
+// Guard for the deadline on new teaching assignments. The principal override is
+// a separate, audited path - not a bypass callers may take on their own.
 function assertWithinRegistrationDeadline(semester, { isOverride = false } = {}) {
     if (isOverride) return;
 

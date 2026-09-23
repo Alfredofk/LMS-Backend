@@ -13,27 +13,25 @@ import {
     googleBody,
 } from './auth.schema.js';
 
-/*
-  Every route here is unauthenticated - these are the endpoints a person reaches
-  before they have a token, so none of them can lean on the per-user budget in
-  generalLimiter. Two threats earn a limiter of their own, and only two.
-
-  loginLimiter guards password guessing, per account. emailDispatchLimiter
-  rations our mail relay on the two endpoints that send an email on demand.
-  Both key partly on req.body.email, so both must sit after express.json()
-  (server.js). They do: this router is mounted well below it.
-
-  Everything else here - register, and the three link-click paths - is covered by
-  generalLimiter alone, which is where the reasoning for that lives. The short
-  version: a 256-bit token is not guessable, a real link only arrives by an
-  email emailDispatchLimiter already counted, and an address can be registered
-  exactly once.
-
-  The emails link to the web app's /verify-email and /reset-password pages
-  (mailer.js), not here. Those pages call the two GETs below with the token as a
-  query string, and the frontend's authService.js is written against exactly
-  that shape - change it there too, or not at all.
-*/
+// Every route here is unauthenticated - these are the endpoints a person reaches
+// before they have a token, so none of them can lean on the per-user budget in
+// generalLimiter. Two threats earn a limiter of their own, and only two.
+//
+// loginLimiter guards password guessing, per account. emailDispatchLimiter
+// rations our mail relay on the two endpoints that send an email on demand.
+// Both key partly on req.body.email, so both must sit after express.json()
+// (server.js). They do: this router is mounted well below it.
+//
+// Everything else here - register, and the three link-click paths - is covered by
+// generalLimiter alone, which is where the reasoning for that lives. The short
+// version: a 256-bit token is not guessable, a real link only arrives by an
+// email emailDispatchLimiter already counted, and an address can be registered
+// exactly once.
+//
+// The emails link to the web app's /verify-email and /reset-password pages
+// (mailer.js), not here. Those pages call the two GETs below with the token as a
+// query string, and the frontend's authService.js is written against exactly
+// that shape - change it there too, or not at all.
 const router = Router();
 
 router.post('/register', validate({ body: registerBody }), controller.register);

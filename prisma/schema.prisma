@@ -51,6 +51,9 @@ enum ApprovalStatus {
     PENDING
     ACTIVE
     REJECTED
+    /// Taken back by the person who asked, before anybody decided (owner, 2026-09-23).
+    /// Not REJECTED: nobody turned it down, and it never counts against a retry cap.
+    CANCELLED
 }
 
 enum MembershipStatus {
@@ -58,6 +61,8 @@ enum MembershipStatus {
     ACTIVE
     REJECTED
     LEFT
+    /// A join request its applicant withdrew while it was still PENDING.
+    CANCELLED
 }
 
 enum RegistrationStatus {
@@ -97,6 +102,8 @@ enum ApprovalAction {
     /// a school being switched off from a teacher being let go.
     DEACTIVATE
     REACTIVATE
+    /// The person who asked taking a PENDING request back.
+    CANCEL
 }
 
 // ---------------------------------------------------------------------------
@@ -239,19 +246,17 @@ model School {
     city          String?
     /// Opaque, regenerable. Locates a school; grants nothing (ADR-0002).
     schoolCode    String     @unique
-    /*
-      Access withdrawn by a platform admin, with the data left where it is.
-
-      Deactivation is never a delete: School has thirteen cascading relations, so
-      removing the row would take the academic history with it - including the
-      ApprovalAudit rows that record the decision. A year of somebody's grades is
-      not one button's to erase.
-
-      While this is set: buildAuthClaims() issues no school claims, so every
-      member's token carries no school and no tenant-owned row is reachable; the
-      School Code stops resolving. Nothing about the memberships themselves
-      changes - that is leaving, which is ADR-0004 and ticket 06.
-    */
+    // Access withdrawn by a platform admin, with the data left where it is.
+    //
+    // Deactivation is never a delete: School has thirteen cascading relations, so
+    // removing the row would take the academic history with it - including the
+    // ApprovalAudit rows that record the decision. A year of somebody's grades is
+    // not one button's to erase.
+    //
+    // While this is set: buildAuthClaims() issues no school claims, so every
+    // member's token carries no school and no tenant-owned row is reachable; the
+    // School Code stops resolving. Nothing about the memberships themselves
+    // changes - that is leaving, which is ADR-0004 and ticket 06.
     deactivatedAt        DateTime?
     deactivationReason   String?
     deactivatedByAdminId String?
@@ -309,17 +314,15 @@ model SchoolMembership {
     taughtSubjects  ClassSubject[]    @relation("AssignedTeacher")
     notifications   Notification[]
 
-    /*
-      No @@unique([schoolId, userId]). Dropped on 2026-09-20 (owner), because a
-      TOTAL constraint here contradicts decision #51: a rejected applicant may
-      re-apply after a cooldown, and assertMembershipRetryAllowed() counts their
-      REJECTED rows against a cap of three - a count that can never pass one if
-      only one row per (school, user) may exist. Leaving and later rejoining the
-      same school (ticket 06) needs the repeats too.
-
-      The real rule is the partial index in partial-indexes.sql: one
-      PENDING-or-ACTIVE membership per user, across every school.
-    */
+    // No @@unique([schoolId, userId]). Dropped on 2026-09-20 (owner), because a
+    // TOTAL constraint here contradicts decision #51: a rejected applicant may
+    // re-apply after a cooldown, and assertMembershipRetryAllowed() counts their
+    // REJECTED rows against a cap of three - a count that can never pass one if
+    // only one row per (school, user) may exist. Leaving and later rejoining the
+    // same school (ticket 06) needs the repeats too.
+    //
+    // The real rule is the partial index in partial-indexes.sql: one
+    // PENDING-or-ACTIVE membership per user, across every school.
     @@index([schoolId, status])
     @@index([userId])
 }
@@ -397,6 +400,9 @@ model GuardianStudent {
     status               ApprovalStatus @default(PENDING)
     approvedByUserId     String?
     approvedAt           DateTime?
+    /// A link can be refused on its own - a guardian claiming a further child -
+    /// with no role row to carry the reason.
+    rejectionReason      String?
     endedAt              DateTime?
     createdAt            DateTime       @default(now())
     updatedAt            DateTime       @updatedAt

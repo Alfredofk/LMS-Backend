@@ -2,11 +2,9 @@ import { z } from 'zod';
 
 import { fullName, password } from '../auth/auth.schema.js';
 
-/*
-  Email is deliberately absent. Changing it is an identity change, not a profile
-  edit: it would need re-verification of the new address and a way back if the
-  old one is lost. Out of scope for ticket 03.
-*/
+// Email is deliberately absent. Changing it is an identity change, not a profile
+// edit: it would need re-verification of the new address and a way back if the
+// old one is lost. Out of scope for ticket 03.
 const updateMeBody = z.object({ fullName });
 
 const changePasswordBody = z.object({

@@ -25,14 +25,12 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.disable('x-powered-by');
-/*
-  Harus sama persis dengan jumlah reverse proxy di depan app (0 = langsung).
-
-  Kalau kebesaran, req.ip jadi alamat proxy dan SEMUA user berbagi satu counter
-  rate limit. Kalau kekecilan, klien bisa mengarang X-Forwarded-For sendiri dan
-  limitnya bypass total. Tidak ada warning untuk nilai yang salah - makanya ini
-  dari env, bukan di-hardcode.
-*/
+// Harus sama persis dengan jumlah reverse proxy di depan app (0 = langsung).
+//
+// Kalau kebesaran, req.ip jadi alamat proxy dan SEMUA user berbagi satu counter
+// rate limit. Kalau kekecilan, klien bisa mengarang X-Forwarded-For sendiri dan
+// limitnya bypass total. Tidak ada warning untuk nilai yang salah - makanya ini
+// dari env, bukan di-hardcode.
 app.set('trust proxy', Number(process.env.TRUST_PROXY ?? 0));
 
 app.use(helmet());
@@ -45,33 +43,31 @@ app.get('/health', (_req, res) =>
     ok(res, { status: 'up', timestamp: new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Jakarta' }) })
 );
 
-/*
-  Module routes. Still to come: academics (ticket 07).
-
-  The /api prefix is not a free choice - the web app's dev server proxies
-  exactly /api to this process (LMS-Frontend vite.config.js), and its
-  authService.js builds every call on it. Emails no longer link here: mailer.js
-  points them at the web app's own pages, which then call these routes.
-
-  Where the per-route limiters go (./shared/rateLimit.js):
-    POST /api/auth/login                 loginLimiter         (mounted)
-    resend-verification + forgot         emailDispatchLimiter (mounted)
-    lookup + join request                joinSchoolLimiter    (mounted)
-    POST /api/school-registrations       registrationLimiter  (mounted)
-
-  joinSchoolLimiter and registrationLimiter key on req.auth.userId, so they MUST
-  be mounted after requireAuth. Mounted before it, req.auth is still empty when
-  the key is computed, the key silently falls back to the IP, and a whole school
-  shares one budget again - with no error to tell you.
-
-  The auth routes above are the exception, and deliberately so: they run before
-  anyone has a token, so their limiters key on the address or the network.
-
-  Register and the two link-click endpoints are on no list at all, on purpose.
-  They used to carry a signupLimiter and a tokenClaimLimiter; both were removed
-  because neither was guarding a real threat, so generalLimiter above is their
-  whole ceiling now. The reasoning sits with generalLimiter itself.
-*/
+// Module routes. Still to come: academics (ticket 07).
+//
+// The /api prefix is not a free choice - the web app's dev server proxies
+// exactly /api to this process (LMS-Frontend vite.config.js), and its
+// authService.js builds every call on it. Emails no longer link here: mailer.js
+// points them at the web app's own pages, which then call these routes.
+//
+// Where the per-route limiters go (./shared/rateLimit.js):
+//   POST /api/auth/login                 loginLimiter         (mounted)
+//   resend-verification + forgot         emailDispatchLimiter (mounted)
+//   lookup + join request                joinSchoolLimiter    (mounted)
+//   POST /api/school-registrations       registrationLimiter  (mounted)
+//
+// joinSchoolLimiter and registrationLimiter key on req.auth.userId, so they MUST
+// be mounted after requireAuth. Mounted before it, req.auth is still empty when
+// the key is computed, the key silently falls back to the IP, and a whole school
+// shares one budget again - with no error to tell you.
+//
+// The auth routes above are the exception, and deliberately so: they run before
+// anyone has a token, so their limiters key on the address or the network.
+//
+// Register and the two link-click endpoints are on no list at all, on purpose.
+// They used to carry a signupLimiter and a tokenClaimLimiter; both were removed
+// because neither was guarding a real threat, so generalLimiter above is their
+// whole ceiling now. The reasoning sits with generalLimiter itself.
 app.use('/api/auth', authRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/school-registrations', schoolRegistrationRoutes);
@@ -132,11 +128,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     app.listen(port, () => {
         log.success(`Listening on PORT: ${port}`);
 
-        /*
-          Fire and forget: the answer is a log line, not a gate. Mail failing is
-          never a reason to refuse to serve - resend-verification is the remedy
-          and it needs this process up (auth.service.js:44-51).
-        */
+        // Fire and forget: the answer is a log line, not a gate. Mail failing is
+        // never a reason to refuse to serve - resend-verification is the remedy
+        // and it needs this process up (auth.service.js:44-51).
         void verifyTransport();
     });
 }

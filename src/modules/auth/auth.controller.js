@@ -1,14 +1,12 @@
 import { ok } from '../../shared/errors.js';
 import * as service from './auth.service.js';
 
-/*
-  Thin by design: read req.validated, call the service, wrap in the envelope.
-  Every decision worth arguing about lives in auth.service.js.
-
-  No try/catch anywhere here. Express 5 forwards a rejected promise from an async
-  handler to the error handler on its own, which is exactly what server.js:56
-  is waiting for. Wrapping these in try/catch would only duplicate it.
-*/
+// Thin by design: read req.validated, call the service, wrap in the envelope.
+// Every decision worth arguing about lives in auth.service.js.
+//
+// No try/catch anywhere here. Express 5 forwards a rejected promise from an async
+// handler to the error handler on its own, which is exactly what server.js:56
+// is waiting for. Wrapping these in try/catch would only duplicate it.
 
 // The same wording whether or not the address turned out to exist.
 const SILENT_REPLY = {

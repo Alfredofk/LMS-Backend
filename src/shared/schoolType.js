@@ -1,16 +1,14 @@
-/*
-  National curriculum facts, not school preferences.
-
-  These are hardcoded deliberately. A school able to edit its own grade range or
-  phase boundaries could only misconfigure itself, and cross-school reporting
-  depends on this spine being identical everywhere.
-
-  "School type" is the Indonesian `jenjang`. It is NOT called a "level" anywhere
-  in this codebase, because that word is already taken by grade level.
-
-  Phase boundaries are Kurikulum Merdeka's: A=1-2, B=3-4, C=5-6, D=7-9, E=10, F=11-12.
-  Academic streaming (IPA/IPS) is deliberately absent - Kurikulum Merdeka abolished it.
-*/
+// National curriculum facts, not school preferences.
+//
+// These are hardcoded deliberately. A school able to edit its own grade range or
+// phase boundaries could only misconfigure itself, and cross-school reporting
+// depends on this spine being identical everywhere.
+//
+// "School type" is the Indonesian `jenjang`. It is NOT called a "level" anywhere
+// in this codebase, because that word is already taken by grade level.
+//
+// Phase boundaries are Kurikulum Merdeka's: A=1-2, B=3-4, C=5-6, D=7-9, E=10, F=11-12.
+// Academic streaming (IPA/IPS) is deliberately absent - Kurikulum Merdeka abolished it.
 
 const SCHOOL_TYPES = {
     SD: { minGrade: 1, maxGrade: 6, defaultDurationYears: 6 },
@@ -79,10 +77,8 @@ function isFinalGrade(schoolType, gradeLevel, durationYears) {
     return gradeLevel === maxGradeFor(schoolType, durationYears);
 }
 
-/*
-  Where a student lands next year, given their promotion outcome.
-  Null means they leave the school: they either graduated or ran out of grades.
-*/
+// Where a student lands next year, given their promotion outcome.
+// Null means they leave the school: they either graduated or ran out of grades.
 function nextGradeLevel(schoolType, gradeLevel, outcome, durationYears) {
     switch (outcome) {
         case 'PROMOTED':

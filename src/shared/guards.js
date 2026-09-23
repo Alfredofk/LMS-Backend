@@ -1,17 +1,15 @@
 import { prisma } from './prisma.js';
 import { forbidden, notFound } from './errors.js';
 
-/*
-  Resource-scoped authorization.
-
-  This is the real access control. requireRole() in ./auth.js only narrows who
-  may reach a handler; these answer the question that actually protects a
-  student's record: "is THIS teacher assigned to THIS class subject?"
-
-  Every query here runs inside the tenant scope, so a resource belonging to
-  another school simply is not found - the guards never need to compare school
-  ids themselves, and cannot forget to.
-*/
+// Resource-scoped authorization.
+//
+// This is the real access control. requireRole() in ./auth.js only narrows who
+// may reach a handler; these answer the question that actually protects a
+// student's record: "is THIS teacher assigned to THIS class subject?"
+//
+// Every query here runs inside the tenant scope, so a resource belonging to
+// another school simply is not found - the guards never need to compare school
+// ids themselves, and cannot forget to.
 
 // Does this membership hold this role, approved and active?
 async function hasActiveRole(membershipId, role) {
@@ -26,13 +24,11 @@ async function isPrincipal(membershipId) {
     return hasActiveRole(membershipId, 'PRINCIPAL');
 }
 
-/*
-  Homeroom teacher of this specific class.
-
-  Not a role - it is a property of the class. That is why this takes a classId:
-  a role string could never say WHICH class, and "is a homeroom teacher
-  somewhere" is not an authorization anyone should have.
-*/
+// Homeroom teacher of this specific class.
+//
+// Not a role - it is a property of the class. That is why this takes a classId:
+// a role string could never say WHICH class, and "is a homeroom teacher
+// somewhere" is not an authorization anyone should have.
 async function isHomeroomOf(membershipId, classId) {
     const found = await prisma.class.findFirst({
         where: { id: classId, homeroomTeacherMembershipId: membershipId },
@@ -74,11 +70,9 @@ async function isHomeroomOfStudent(membershipId, studentProfileId) {
     return isHomeroomOf(membershipId, placement.classId);
 }
 
-/*
-  Express middleware factory. Reads the resource id from req.params and refuses
-  with 404 rather than 403 when the check fails for a resource that may simply
-  belong to another school - a 403 would confirm it exists (ADR-0001).
-*/
+// Express middleware factory. Reads the resource id from req.params and refuses
+// with 404 rather than 403 when the check fails for a resource that may simply
+// belong to another school - a 403 would confirm it exists (ADR-0001).
 function requireResource(check, { param = 'id', message } = {}) {
     return async (req, _res, next) => {
         const membershipId = req.auth?.membershipId;
@@ -96,14 +90,12 @@ function requireResource(check, { param = 'id', message } = {}) {
     };
 }
 
-/*
-  The platform operator, above every school. Mount after requireAuth.
-
-  Read from the PlatformAdmin table on every request rather than from a token
-  claim: the role is granted only by the seed, and a claim would outlive its
-  removal by up to one access-token lifetime. PlatformAdmin is an unscoped model,
-  so this lookup works with or without a school in context.
-*/
+// The platform operator, above every school. Mount after requireAuth.
+//
+// Read from the PlatformAdmin table on every request rather than from a token
+// claim: the role is granted only by the seed, and a claim would outlive its
+// removal by up to one access-token lifetime. PlatformAdmin is an unscoped model,
+// so this lookup works with or without a school in context.
 async function requirePlatformAdmin(req, _res, next) {
     const userId = req.auth?.userId;
     if (!userId) return next(forbidden());

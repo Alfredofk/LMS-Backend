@@ -12,19 +12,17 @@ import {
 
 const log = createLogger('Users');
 
-/*
-  What a member is allowed to know about their own standing, and nothing more.
-
-  A PENDING member sees their status, the name of the school they asked to join,
-  and which roles they requested - that is the whole point of the endpoint, since
-  otherwise a person waiting on approval has no way to tell whether anything is
-  happening. They see no roster, no classes, no other member: this reads their
-  own membership row by userId and never opens a school scope, so nothing
-  tenant-owned is reachable from the token they hold (ADR-0001).
-
-  Unscoped for the same reason buildAuthClaims is: a PENDING user's token carries
-  no schoolId, so there is no ambient school for the extension to filter by.
-*/
+// What a member is allowed to know about their own standing, and nothing more.
+//
+// A PENDING member sees their status, the name of the school they asked to join,
+// and which roles they requested - that is the whole point of the endpoint, since
+// otherwise a person waiting on approval has no way to tell whether anything is
+// happening. They see no roster, no classes, no other member: this reads their
+// own membership row by userId and never opens a school scope, so nothing
+// tenant-owned is reachable from the token they hold (ADR-0001).
+//
+// Unscoped for the same reason buildAuthClaims is: a PENDING user's token carries
+// no schoolId, so there is no ambient school for the extension to filter by.
 const membershipSelect = {
     id: true,
     status: true,
@@ -48,17 +46,28 @@ const membershipSelect = {
     // their NISN. Their own row only, so nothing about anybody else comes along.
     teacherProfile: { select: { nip: true, nuptk: true } },
     studentProfile: { select: { nisn: true, birthDate: true } },
+    // A guardian's own claims, each with its id (to cancel a PENDING one) and the
+    // reason it was turned down. The child's name is one the guardian typed; no
+    // NISN and nothing else about the child comes back.
+    guardianLinks: {
+        select: {
+            id: true,
+            status: true,
+            relationship: true,
+            rejectionReason: true,
+            studentProfile: { select: { membership: { select: { user: { select: { fullName: true } } } } } },
+        },
+        orderBy: { createdAt: 'asc' },
+    },
 };
 
-/*
-  A deactivated school has to say so here: buildAuthClaims() already hands this
-  member a token with no school, and without deactivatedAt they would see an
-  ACTIVE membership that opens nothing, with no hint why (ticket 14).
-
-  Every member learns THAT it happened; only the Principal learns WHY. The
-  reason is written by a platform admin to the person who runs the school, the
-  same audience schoolView in school.service.js shows it to (owner, 2026-09-22).
-*/
+// A deactivated school has to say so here: buildAuthClaims() already hands this
+// member a token with no school, and without deactivatedAt they would see an
+// ACTIVE membership that opens nothing, with no hint why (ticket 14).
+//
+// Every member learns THAT it happened; only the Principal learns WHY. The
+// reason is written by a platform admin to the person who runs the school, the
+// same audience schoolView in school.service.js shows it to (owner, 2026-09-22).
 function schoolForMember(school, roles) {
     const principal = roles.some((role) => role.role === 'PRINCIPAL' && role.status === 'ACTIVE');
     return {
@@ -78,17 +87,15 @@ async function loadMembership(userId) {
             select: membershipSelect,
         });
 
-        /*
-          A rejected applicant has no pending or active row, and ticket 05 requires
-          the reason they were turned down to be visible to them. So when there is
-          nothing live, the most recent REJECTED row is shown instead - the status
-          field is what tells the two apart, and a REJECTED membership grants
-          nothing anywhere (buildAuthClaims only reads ACTIVE).
-        */
+        // A rejected applicant has no pending or active row, and ticket 05 requires
+        // the reason they were turned down to be visible to them. So when there is
+        // nothing live, the most recent REJECTED - or CANCELLED, their own withdrawal
+        // - row is shown instead. The status field is what tells them apart, and
+        // neither grants anything anywhere (buildAuthClaims only reads ACTIVE).
         const decided =
             membership ??
             (await prisma.schoolMembership.findFirst({
-                where: { userId, status: 'REJECTED' },
+                where: { userId, status: { in: ['REJECTED', 'CANCELLED'] } },
                 orderBy: { updatedAt: 'desc' },
                 select: membershipSelect,
             }));
@@ -104,6 +111,13 @@ async function loadMembership(userId) {
             roles: decided.roles,
             teacher: decided.teacherProfile,
             student: decided.studentProfile,
+            children: decided.guardianLinks.map((link) => ({
+                id: link.id,
+                status: link.status,
+                relationship: link.relationship,
+                rejectionReason: link.rejectionReason,
+                student: { fullName: link.studentProfile.membership.user.fullName },
+            })),
         };
     });
 }
@@ -130,21 +144,19 @@ async function updateMe(userId, { fullName }) {
     return { user: publicUser(user), membership: await loadMembership(userId) };
 }
 
-/*
-  Changing a password signs out every device, then signs this one back in.
-
-  Cutting them all is the point: if the reason for the change is that someone
-  else had the old password, a sign-in they already hold must not outlive it. The
-  caller gets a new pair back so the person doing the right thing is not signed
-  out of the device they are typing on.
-
-  The access token already in flight is untouched and lives out its remaining
-  minutes - the accepted cost of a stateless access token, and why the tenant
-  guards in guards.js read status from the database rather than from claims.
-
-  The new sign-in keeps this device's remember-me choice, taken from the access
-  token (`rem`) because that is all this request carries.
-*/
+// Changing a password signs out every device, then signs this one back in.
+//
+// Cutting them all is the point: if the reason for the change is that someone
+// else had the old password, a sign-in they already hold must not outlive it. The
+// caller gets a new pair back so the person doing the right thing is not signed
+// out of the device they are typing on.
+//
+// The access token already in flight is untouched and lives out its remaining
+// minutes - the accepted cost of a stateless access token, and why the tenant
+// guards in guards.js read status from the database rather than from claims.
+//
+// The new sign-in keeps this device's remember-me choice, taken from the access
+// token (`rem`) because that is all this request carries.
 async function changePassword(userId, { currentPassword, newPassword }, { rememberMe = false } = {}) {
     const user = await loadUser(userId);
 

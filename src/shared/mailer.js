@@ -2,16 +2,14 @@ import nodemailer from 'nodemailer';
 
 import { createLogger } from '../lib/helpers.js';
 
-/*
-  Transactional email ONLY: account verification and password reset (ADR-0002).
-
-  Notifications stay in-app and polled. Nothing about grades, attendance, reports
-  or guardian alerts is ever emailed - that was settled deliberately, and adding
-  it here would route minors' academic data through an external relay.
-
-  With SMTP_HOST unset the transport logs to the console instead of sending, so
-  development and tests never need a real mail server.
-*/
+// Transactional email ONLY: account verification and password reset (ADR-0002).
+//
+// Notifications stay in-app and polled. Nothing about grades, attendance, reports
+// or guardian alerts is ever emailed - that was settled deliberately, and adding
+// it here would route minors' academic data through an external relay.
+//
+// With SMTP_HOST unset the transport logs to the console instead of sending, so
+// development and tests never need a real mail server.
 
 const log = createLogger('Mail');
 
@@ -48,17 +46,15 @@ function getTransport() {
     return cachedTransport;
 }
 
-/*
-  Called once at startup (server.js) so the log says plainly which of the two
-  transports is live.
-
-  It exists because every send sits behind deliver() in auth.service.js, which
-  swallows failures on purpose - a dead relay must not fail a registration that
-  is already committed. Without this check a misconfigured relay is completely
-  silent: the account is created, the response is 201, and the email simply
-  never arrives. Never throws; a server that cannot mail must still come up,
-  because resend is the remedy and it needs the server running.
-*/
+// Called once at startup (server.js) so the log says plainly which of the two
+// transports is live.
+//
+// It exists because every send sits behind deliver() in auth.service.js, which
+// swallows failures on purpose - a dead relay must not fail a registration that
+// is already committed. Without this check a misconfigured relay is completely
+// silent: the account is created, the response is 201, and the email simply
+// never arrives. Never throws; a server that cannot mail must still come up,
+// because resend is the remedy and it needs the server running.
 async function verifyTransport() {
     if (!isConfigured()) {
         log.warn('SMTP_HOST is not set - verification and reset emails will only be logged here');
@@ -77,19 +73,15 @@ async function verifyTransport() {
 
 const webUrl = () => process.env.WEB_BASE_URL ?? 'http://localhost:5173';
 
-/*
-  MAIL_FROM falls back to the authenticated account rather than to a made-up
-  local address. Gmail and most relays reject - or silently rewrite - a From
-  that is neither the account nor one of its verified aliases, and the rejection
-  surfaces only in the log line below.
-*/
+// MAIL_FROM falls back to the authenticated account rather than to a made-up
+// local address. Gmail and most relays reject - or silently rewrite - a From
+// that is neither the account nor one of its verified aliases, and the rejection
+// surfaces only in the log line below.
 const mailFrom = () => process.env.MAIL_FROM || process.env.SMTP_USER || 'LMS <no-reply@lms.local>';
 
-/*
-  Five characters, and that is enough: everything interpolated below is either a
-  name this system stores or a URL it built itself. No recipient-supplied markup
-  reaches these templates.
-*/
+// Five characters, and that is enough: everything interpolated below is either a
+// name this system stores or a URL it built itself. No recipient-supplied markup
+// reaches these templates.
 const escapeHtml = (value) =>
     String(value)
         .replaceAll('&', '&amp;')
@@ -98,24 +90,22 @@ const escapeHtml = (value) =>
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#39;');
 
-/*
-  One layout for both emails: a title, a greeting, one sentence, one labelled
-  button and a caveat.
-
-  The label is the point - the reader sees "Verify my account" instead of sixty
-  characters of hex, and the URL appears nowhere in the HTML. That is the owner's
-  call: no "button not working, copy this address" line under it.
-
-  So the plain-text alternative below is the only copy of the URL left, and it
-  has to stay one: it is all a text-only client can follow, it is what the
-  console transport prints, and it is where the probes read the token back out.
-  A recipient whose client strips the button can still reach the link there.
-
-  Every style is inline and the markup is divs and one table for the button.
-  Mail clients drop <style> blocks, ignore flexbox, and Outlook renders a
-  padded <a> inconsistently - a single-cell table is the one button that lands
-  the same way everywhere.
-*/
+// One layout for both emails: a title, a greeting, one sentence, one labelled
+// button and a caveat.
+//
+// The label is the point - the reader sees "Verify my account" instead of sixty
+// characters of hex, and the URL appears nowhere in the HTML. That is the owner's
+// call: no "button not working, copy this address" line under it.
+//
+// So the plain-text alternative below is the only copy of the URL left, and it
+// has to stay one: it is all a text-only client can follow, it is what the
+// console transport prints, and it is where the probes read the token back out.
+// A recipient whose client strips the button can still reach the link there.
+//
+// Every style is inline and the markup is divs and one table for the button.
+// Mail clients drop <style> blocks, ignore flexbox, and Outlook renders a
+// padded <a> inconsistently - a single-cell table is the one button that lands
+// the same way everywhere.
 function layout({ title, fullName, intro, action, link, caveat }) {
     const safeLink = escapeHtml(link);
 

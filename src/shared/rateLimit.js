@@ -1,31 +1,27 @@
 import rateLimit from 'express-rate-limit';
 
-/*
-  Rate limiting is one of the four things that make the School Code model
-  defensible (ADR-0002). It does not stand alone - the human approval gate is
-  the real control - but it raises the cost of guessing codes or bulk-creating
-  accounts enough that the gate is never facing a flood.
+// Rate limiting is one of the four things that make the School Code model
+// defensible (ADR-0002). It does not stand alone - the human approval gate is
+// the real control - but it raises the cost of guessing codes or bulk-creating
+// accounts enough that the gate is never facing a flood.
+//
+// Every limiter here is keyed on the most specific identity available, NOT on
+// req.ip - which is what express-rate-limit keys on by default. In Indonesia one
+// public IP is one computer lab, one school Wi-Fi, or one carrier CGNAT block,
+// so "per IP" reads as "per school" and an IP-keyed limit punishes a class of
+// forty for the behaviour of one. Keyed per person, a lab of forty and a
+// hundred students joining at once are simply forty and a hundred separate
+// budgets.
+//
+// The other half of the rule: what burns budget is the attempt that FAILED.
+// Typing your own school code correctly should cost nothing.
 
-  Every limiter here is keyed on the most specific identity available, NOT on
-  req.ip - which is what express-rate-limit keys on by default. In Indonesia one
-  public IP is one computer lab, one school Wi-Fi, or one carrier CGNAT block,
-  so "per IP" reads as "per school" and an IP-keyed limit punishes a class of
-  forty for the behaviour of one. Keyed per person, a lab of forty and a
-  hundred students joining at once are simply forty and a hundred separate
-  budgets.
-
-  The other half of the rule: what burns budget is the attempt that FAILED.
-  Typing your own school code correctly should cost nothing.
-*/
-
-/*
-  A single IPv6 customer holds an entire /64, so keying on the full address lets
-  an attacker rotate through 18 quintillion buckets. Truncating to the /64 makes
-  the subnet the unit, which is what the ISP actually hands out.
-
-  express-rate-limit ships an ipKeyGenerator helper for this in later releases;
-  7.5.1 does not export one, so it lives here.
-*/
+// A single IPv6 customer holds an entire /64, so keying on the full address lets
+// an attacker rotate through 18 quintillion buckets. Truncating to the /64 makes
+// the subnet the unit, which is what the ISP actually hands out.
+//
+// express-rate-limit ships an ipKeyGenerator helper for this in later releases;
+// 7.5.1 does not export one, so it lives here.
 function expandV6(address) {
     const bare = address.split('%')[0]; // drop the zone id on fe80::1%eth0
     const [head, tail] = bare.split('::');
@@ -53,17 +49,15 @@ function ipKey(req) {
 // Limit the person when we know who they are; only fall back to the network.
 const byUserThenIp = (req) => req.auth?.userId ?? ipKey(req);
 
-/*
-  Brute force attacks ONE account, so the bucket belongs to that account.
-
-  Keyed on the IP alone, five students fumbling their password would lock their
-  whole class out for fifteen minutes - and a 429 is returned before the handler
-  runs, so a correct password would not rescue them.
-
-  The email comes from req.body, which means this limiter only works mounted
-  after express.json(), and the value has to be normalised and bounded before it
-  becomes a store key.
-*/
+// Brute force attacks ONE account, so the bucket belongs to that account.
+//
+// Keyed on the IP alone, five students fumbling their password would lock their
+// whole class out for fifteen minutes - and a 429 is returned before the handler
+// runs, so a correct password would not rescue them.
+//
+// The email comes from req.body, which means this limiter only works mounted
+// after express.json(), and the value has to be normalised and bounded before it
+// becomes a store key.
 const byIpAndEmail = (req) => {
     const raw = req.body?.email;
     const email = typeof raw === 'string' ? raw.trim().toLowerCase().slice(0, 254) : null;
@@ -98,18 +92,16 @@ const loginLimiter = build({
     message: 'Too many failed login attempts for this account. Try again in a few minutes.',
 });
 
-/*
-  Endpoints that SEND an email: resend-verification and forgot-password.
-
-  The thing being rationed is our mail relay, not our database. Without this,
-  anyone could point forgot-password at one address and have us deliver a
-  hundred emails to a person who never asked - so the budget belongs to the
-  target address, which is what byIpAndEmail keys on.
-
-  Successful requests count here, unlike everywhere else in this file. They have
-  to: forgot-password answers 200 whether or not the address exists, so "failed"
-  is not a category this endpoint can report without leaking who has an account.
-*/
+// Endpoints that SEND an email: resend-verification and forgot-password.
+//
+// The thing being rationed is our mail relay, not our database. Without this,
+// anyone could point forgot-password at one address and have us deliver a
+// hundred emails to a person who never asked - so the budget belongs to the
+// target address, which is what byIpAndEmail keys on.
+//
+// Successful requests count here, unlike everywhere else in this file. They have
+// to: forgot-password answers 200 whether or not the address exists, so "failed"
+// is not a category this endpoint can report without leaking who has an account.
 const emailDispatchLimiter = build({
     windowMs: 60 * 60 * 1000,
     limit: 5,
@@ -117,16 +109,14 @@ const emailDispatchLimiter = build({
     message: 'Too many emails requested for this address. Try again later.',
 });
 
-/*
-  School Code lookup and the join request that follows - one flow, one limiter.
-
-  Both happen after login, so both key on the user, and separating "lookup" from
-  "join" would only be separating two halves of the same act. Deliberately
-  loose: the real ceiling is in the database, where a partial unique index
-  allows one PENDING or ACTIVE membership per user and
-  assertMembershipRetryAllowed() caps rejected retries. This only damps HTTP
-  spam, so only failed guesses count.
-*/
+// School Code lookup and the join request that follows - one flow, one limiter.
+//
+// Both happen after login, so both key on the user, and separating "lookup" from
+// "join" would only be separating two halves of the same act. Deliberately
+// loose: the real ceiling is in the database, where a partial unique index
+// allows one PENDING or ACTIVE membership per user and
+// assertMembershipRetryAllowed() caps rejected retries. This only damps HTTP
+// spam, so only failed guesses count.
 const joinSchoolLimiter = build({
     windowMs: 60 * 60 * 1000,
     limit: 10,
@@ -135,15 +125,13 @@ const joinSchoolLimiter = build({
     message: 'Too many incorrect school codes. Try again later.',
 });
 
-/*
-  School registration: a human reviews each one, so the ceiling is low.
-
-  Per applicant, not per address - ten schools registering from one Dinas
-  onboarding event are ten applicants with ten budgets. The durable version of
-  this rule is assertSchoolRegistrationAllowed() in ./approval.js; this is only
-  the traffic shield in front of it, because the memory store forgets on every
-  restart.
-*/
+// School registration: a human reviews each one, so the ceiling is low.
+//
+// Per applicant, not per address - ten schools registering from one Dinas
+// onboarding event are ten applicants with ten budgets. The durable version of
+// this rule is assertSchoolRegistrationAllowed() in ./approval.js; this is only
+// the traffic shield in front of it, because the memory store forgets on every
+// restart.
 const registrationLimiter = build({
     windowMs: 24 * 60 * 60 * 1000,
     limit: 5,
@@ -151,24 +139,22 @@ const registrationLimiter = build({
     message: 'Too many school registration submissions today. Try again tomorrow.',
 });
 
-/*
-  Two ceilings, one limiter - and, for three endpoints, the only one.
-
-  A signed-in user will never approach 1000 requests in fifteen minutes through
-  normal use. Anonymous traffic is a different animal: only /auth/* and the code
-  lookup reach here unauthenticated.
-
-  Register and the two link-click endpoints carry no limiter of their own and
-  lean on this ceiling alone. That is deliberate. Guessing a token is not a
-  threat worth a limiter - the values are 256 bits of crypto.randomBytes
-  (auth.js) - and the only way to be handed a real link is through an email that
-  emailDispatchLimiter has already rationed. Register is rationed by the address
-  itself: one email can be registered exactly once, and the second attempt is a
-  409 raised before any mail is sent (auth.service.js). What is left in all
-  three cases is a flood of HTTP requests, which is precisely what this limiter
-  is for. Forty students signing in one morning is well under a hundred
-  anonymous requests.
-*/
+// Two ceilings, one limiter - and, for three endpoints, the only one.
+//
+// A signed-in user will never approach 1000 requests in fifteen minutes through
+// normal use. Anonymous traffic is a different animal: only /auth/* and the code
+// lookup reach here unauthenticated.
+//
+// Register and the two link-click endpoints carry no limiter of their own and
+// lean on this ceiling alone. That is deliberate. Guessing a token is not a
+// threat worth a limiter - the values are 256 bits of crypto.randomBytes
+// (auth.js) - and the only way to be handed a real link is through an email that
+// emailDispatchLimiter has already rationed. Register is rationed by the address
+// itself: one email can be registered exactly once, and the second attempt is a
+// 409 raised before any mail is sent (auth.service.js). What is left in all
+// three cases is a flood of HTTP requests, which is precisely what this limiter
+// is for. Forty students signing in one morning is well under a hundred
+// anonymous requests.
 const generalLimiter = build({
     windowMs: 15 * 60 * 1000,
     limit: (req) => (req.auth?.userId ? 1000 : 300),

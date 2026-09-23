@@ -1,11 +1,9 @@
 import { ok } from '../../shared/errors.js';
 import * as service from './membership.service.js';
 
-/*
-  Thin by design, like school.controller.js: read what validation produced, call
-  the service, wrap the answer in the envelope. No try/catch - Express 5 hands a
-  rejected promise to the error handler in server.js on its own.
-*/
+// Thin by design, like school.controller.js: read what validation produced, call
+// the service, wrap the answer in the envelope. No try/catch - Express 5 hands a
+// rejected promise to the error handler in server.js on its own.
 
 // ---- applicant --------------------------------------------------------------
 
@@ -25,7 +23,40 @@ async function request(req, res) {
     );
 }
 
+async function cancelRequest(req, res) {
+    const membership = await service.cancelJoinRequest(req.auth.userId);
+    return ok(res, {
+        membership,
+        message: 'Join request cancelled. You are free to ask to join any school.',
+    });
+}
+
 // ---- member -----------------------------------------------------------------
+
+async function cancelRole(req, res) {
+    const membership = await service.cancelRole(req.auth, req.validated.params.role);
+    return ok(res, { membership, message: 'Role request cancelled.' });
+}
+
+async function linkChild(req, res) {
+    const link = await service.linkChild(req.auth, req.validated.body);
+    return ok(
+        res,
+        {
+            link,
+            message:
+                link.status === 'ACTIVE'
+                    ? 'Linked. The student has been told.'
+                    : "Request recorded. The student's homeroom teacher has to release it.",
+        },
+        201
+    );
+}
+
+async function cancelLink(req, res) {
+    const link = await service.cancelLink(req.auth, req.validated.params.linkId);
+    return ok(res, { link, message: 'Link request cancelled.' });
+}
 
 async function addRoles(req, res) {
     const membership = await service.addRoles(req.auth, req.validated.body);
@@ -65,11 +96,9 @@ async function reject(req, res) {
     return ok(res, { request: request_, message: 'Rejected.' });
 }
 
-/*
-  Always 200, even when some items failed: the caller asked about many requests
-  and gets an answer per request. A single overall status code could only lie
-  about one half of a mixed outcome.
-*/
+// Always 200, even when some items failed: the caller asked about many requests
+// and gets an answer per request. A single overall status code could only lie
+// about one half of a mixed outcome.
 async function bulkApprove(req, res) {
     const results = await service.bulkApprove(req.auth, req.validated.body);
     const released = results.filter((entry) => entry.ok).length;
@@ -80,4 +109,17 @@ async function bulkApprove(req, res) {
     });
 }
 
-export { lookup, request, addRoles, list, get, approve, reject, bulkApprove };
+export {
+    lookup,
+    request,
+    cancelRequest,
+    addRoles,
+    cancelRole,
+    linkChild,
+    cancelLink,
+    list,
+    get,
+    approve,
+    reject,
+    bulkApprove,
+};

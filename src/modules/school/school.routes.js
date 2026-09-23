@@ -15,18 +15,16 @@ import {
     reactivateBody,
 } from './school.schema.js';
 
-/*
-  Two routers, because two different people use them.
-
-  The applicant's, mounted at /api/school-registrations. registrationLimiter
-  keys on req.auth.userId, so it sits AFTER requireAuth - mounted before it, the
-  key silently falls back to the IP (CLAUDE.md). It also sits before the upload,
-  so a request over budget is refused without its 2 MB being read.
-
-  The platform admin's, mounted at /api/admin/school-registrations. Every route
-  on it is cross-tenant by definition, which is why requirePlatformAdmin guards
-  the whole router rather than route by route.
-*/
+// Two routers, because two different people use them.
+//
+// The applicant's, mounted at /api/school-registrations. registrationLimiter
+// keys on req.auth.userId, so it sits AFTER requireAuth - mounted before it, the
+// key silently falls back to the IP (CLAUDE.md). It also sits before the upload,
+// so a request over budget is refused without its 2 MB being read.
+//
+// The platform admin's, mounted at /api/admin/school-registrations. Every route
+// on it is cross-tenant by definition, which is why requirePlatformAdmin guards
+// the whole router rather than route by route.
 
 // KTP: JPG or PNG, at most 2 MB - the owner's rule (ticket 04).
 const ktpUpload = singleFile('ktp', { maxBytes: 2 * 1024 * 1024, types: ['jpg', 'png'] });
@@ -57,12 +55,10 @@ adminRouter.post(
     validate({ params: idParams, body: rejectBody }),
     controller.reject
 );
-/*
-  Keyed on the registration, not the school, because that is the row the admin
-  screen is holding - and because a school founded any other way has no
-  registration to reach it through. If schools ever arrive by another route, this
-  needs a sibling at /api/admin/schools/:id.
-*/
+// Keyed on the registration, not the school, because that is the row the admin
+// screen is holding - and because a school founded any other way has no
+// registration to reach it through. If schools ever arrive by another route, this
+// needs a sibling at /api/admin/schools/:id.
 adminRouter.post(
     '/:id/deactivate',
     validate({ params: idParams, body: deactivateBody }),
@@ -74,12 +70,10 @@ adminRouter.post(
     controller.reactivate
 );
 
-/*
-  A third router, for the school's own people, mounted at /api/school. The
-  school is the one the token names - there is no id in the path to get wrong,
-  and none to guess. requireRole is the coarse filter; the service re-reads the
-  Principal role from the database.
-*/
+// A third router, for the school's own people, mounted at /api/school. The
+// school is the one the token names - there is no id in the path to get wrong,
+// and none to guess. requireRole is the coarse filter; the service re-reads the
+// Principal role from the database.
 const memberRouter = Router();
 
 memberRouter.use(requireAuth, requireActiveMembership, requireRole('PRINCIPAL'));

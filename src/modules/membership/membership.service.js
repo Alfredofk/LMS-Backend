@@ -15,52 +15,52 @@ const log = createLogger('Membership');
 
 const MEMBERSHIP_SUBJECT = 'SchoolMembership';
 const ROLE_SUBJECT = 'MembershipRole';
+const LINK_SUBJECT = 'GuardianStudent';
 
-/*
-  Join by School Code, and the tiered approval behind it (ticket 05, ADR-0002).
+// A role or a guardian link in one of these states is closed, and asking again
+// moves the same row back to PENDING: both tables are unique on what was asked
+// for, so a second row is not an option.
+const REOPENABLE = ['REJECTED', 'CANCELLED'];
 
-  The shape of the whole module: a School Code LOCATES a school and grants
-  nothing. What releases a role is a human who can check the applicant against a
-  roster they hold outside this system - the Principal for a TEACHER, the
-  homeroom teacher for a STUDENT or a GUARDIAN.
+// Join by School Code, and the tiered approval behind it (ticket 05, ADR-0002).
+//
+// The shape of the whole module: a School Code LOCATES a school and grants
+// nothing. What releases a role is a human who can check the applicant against a
+// roster they hold outside this system - the Principal for a TEACHER, the
+// homeroom teacher for a STUDENT or a GUARDIAN.
+//
+// Two scopes are in play, and the difference matters:
+// - The applicant's token carries no schoolId (buildAuthClaims only fills it for
+//   an ACTIVE membership), so requireAuth opened no school. Every tenant-owned
+//   read or write here therefore names its own scope: runUnscoped() for "does this
+//   person belong anywhere", runInSchool() for everything inside the school they
+//   are asking to join.
+// - The reviewer's token does carry a schoolId, so requireAuth already opened the
+//   scope and their queries need no wrapper at all. A request id from another
+//   school simply is not found - 404, never 403 (ADR-0001).
+//
+// Prisma queries are lazy: they run when awaited, not when built. Anything
+// wrapped in runInSchool / runUnscoped must therefore await INSIDE the callback,
+// or the query escapes the scope and the extension throws (ticket 04 found this
+// the hard way).
 
-  Two scopes are in play, and the difference matters:
-  - The applicant's token carries no schoolId (buildAuthClaims only fills it for
-    an ACTIVE membership), so requireAuth opened no school. Every tenant-owned
-    read or write here therefore names its own scope: runUnscoped() for "does this
-    person belong anywhere", runInSchool() for everything inside the school they
-    are asking to join.
-  - The reviewer's token does carry a schoolId, so requireAuth already opened the
-    scope and their queries need no wrapper at all. A request id from another
-    school simply is not found - 404, never 403 (ADR-0001).
-
-  Prisma queries are lazy: they run when awaited, not when built. Anything
-  wrapped in runInSchool / runUnscoped must therefore await INSIDE the callback,
-  or the query escapes the scope and the extension throws (ticket 04 found this
-  the hard way).
-*/
-
-/*
-  One message for every way a guardian's claim can fail: unknown NISN, a name
-  that does not match, a child whose own membership is not active yet, a child
-  with no class. Refusing at request time is the owner's decision (2026-09-20);
-  the identical wording is what keeps the endpoint from becoming an oracle that
-  answers "does this NISN attend this school?" one guess at a time.
-
-  What still holds the guessing down: the caller must hold a verified account, and
-  joinSchoolLimiter charges every failure (10/hour, keyed per user). What is
-  missing, knowingly: a durable ceiling. That limiter's store is process memory
-  and forgets on restart, unlike assertMembershipRetryAllowed().
-*/
+// One message for every way a guardian's claim can fail: unknown NISN, a name
+// that does not match, a child whose own membership is not active yet, a child
+// with no class. Refusing at request time is the owner's decision (2026-09-20);
+// the identical wording is what keeps the endpoint from becoming an oracle that
+// answers "does this NISN attend this school?" one guess at a time.
+//
+// What still holds the guessing down: the caller must hold a verified account, and
+// joinSchoolLimiter charges every failure (10/hour, keyed per user). What is
+// missing, knowingly: a durable ceiling. That limiter's store is process memory
+// and forgets on restart, unlike assertMembershipRetryAllowed().
 const CHILD_NO_MATCH = 'Those child details do not match this school’s records';
 
-/*
-  Names are compared, never listed. Indonesian names arrive with inconsistent
-  spacing, capitals and punctuation ("Muhammad Rizky", "muhammad  rizky"), so both
-  sides are folded to letters and single spaces before comparing. Nothing fuzzier
-  than that: this is a security check, and a loose match would hand a stranger
-  somebody else's child.
-*/
+// Names are compared, never listed. Indonesian names arrive with inconsistent
+// spacing, capitals and punctuation ("Muhammad Rizky", "muhammad  rizky"), so both
+// sides are folded to letters and single spaces before comparing. Nothing fuzzier
+// than that: this is a security check, and a loose match would hand a stranger
+// somebody else's child.
 const normalizeName = (value) =>
     value
         .normalize('NFKD')
@@ -73,14 +73,12 @@ const normalizeName = (value) =>
 // Views
 // ---------------------------------------------------------------------------
 
-/*
-  What an applicant is allowed to learn from a School Code: the school's public
-  identity, and nothing more. No roster, no class, no member count - and no id
-  either, so the only way to name a school to this API is to hold its code.
-
-  durationYears is part of that identity: it is what tells a three-year SMK from
-  a four-year one, and so whether grade 13 is a choice the form should offer.
-*/
+// What an applicant is allowed to learn from a School Code: the school's public
+// identity, and nothing more. No roster, no class, no member count - and no id
+// either, so the only way to name a school to this API is to hold its code.
+//
+// durationYears is part of that identity: it is what tells a three-year SMK from
+// a four-year one, and so whether grade 13 is a choice the form should offer.
 const publicSchoolView = (school) => ({
     name: school.name,
     schoolType: school.schoolType,
@@ -90,13 +88,11 @@ const publicSchoolView = (school) => ({
 
 const applicantSelect = { select: { id: true, email: true, fullName: true } };
 
-/*
-  The reviewer's view of a request: who is asking, which roles, the identifiers
-  they typed, and the child they claim - everything the out-of-band check needs.
-
-  canRelease per role is why a homeroom teacher can see that the TEACHER role on
-  the same request is the Principal's to decide, not theirs.
-*/
+// The reviewer's view of a request: who is asking, which roles, the identifiers
+// they typed, and the child they claim - everything the out-of-band check needs.
+//
+// canRelease per role is why a homeroom teacher can see that the TEACHER role on
+// the same request is the Principal's to decide, not theirs.
 const requestInclude = {
     user: applicantSelect,
     roles: { orderBy: { role: 'asc' } },
@@ -114,9 +110,10 @@ const requestInclude = {
     },
 };
 
-function requestView(membership, releasable = []) {
+function requestView(membership, releasable = [], links = []) {
     const detail = membership.joinRequest;
     const canRelease = new Set(releasable.map((role) => role.role));
+    const canReleaseLink = new Set(links.map((link) => link.id));
 
     return {
         id: membership.id,
@@ -125,10 +122,10 @@ function requestView(membership, releasable = []) {
         approvedAt: membership.approvedAt,
         applicant: membership.user
             ? {
-                  id: membership.user.id,
-                  email: membership.user.email,
-                  fullName: membership.user.fullName,
-              }
+                id: membership.user.id,
+                email: membership.user.email,
+                fullName: membership.user.fullName,
+            }
             : undefined,
         roles: membership.roles.map((role) => ({
             role: role.role,
@@ -148,6 +145,8 @@ function requestView(membership, releasable = []) {
             id: link.id,
             status: link.status,
             relationship: link.relationship,
+            rejectionReason: link.rejectionReason,
+            canRelease: canReleaseLink.has(link.id),
             student: {
                 id: link.studentProfile.id,
                 nisn: link.studentProfile.nisn,
@@ -161,11 +160,9 @@ function requestView(membership, releasable = []) {
 // Applicant
 // ---------------------------------------------------------------------------
 
-/*
-  School is exempt from the tenant extension (it defines the tenant), so this
-  reads without any scope. A code that resolves to nothing is a 404 with the same
-  wording whatever went wrong - a code either locates a school or it does not.
-*/
+// School is exempt from the tenant extension (it defines the tenant), so this
+// reads without any scope. A code that resolves to nothing is a 404 with the same
+// wording whatever went wrong - a code either locates a school or it does not.
 async function resolveSchool(schoolCode) {
     const school = await prisma.school.findUnique({
         where: { schoolCode },
@@ -178,24 +175,20 @@ async function resolveSchool(schoolCode) {
             deactivatedAt: true,
         },
     });
-    /*
-      A deactivated school's code stops resolving, with the same 404 an unknown
-      code gets (ticket 14). Saying "this school is switched off" would name a
-      school to somebody who is not in it, and there is nothing they could do with
-      the answer anyway - joining is not available either way.
-    */
+    // A deactivated school's code stops resolving, with the same 404 an unknown
+    // code gets (ticket 14). Saying "this school is switched off" would name a
+    // school to somebody who is not in it, and there is nothing they could do with
+    // the answer anyway - joining is not available either way.
     if (!school || school.deactivatedAt) throw notFound('No school uses that code');
     return school;
 }
 
-/*
-  Who may ask to join: a verified, live account that belongs nowhere yet.
-
-  The membership question spans schools, so it runs unscoped - that is precisely
-  what is being asked, "which school, if any". The partial unique index
-  SchoolMembership_one_pending_or_active_per_user is the real ceiling; this check
-  exists so the answer is a sentence instead of a constraint violation.
-*/
+// Who may ask to join: a verified, live account that belongs nowhere yet.
+//
+// The membership question spans schools, so it runs unscoped - that is precisely
+// what is being asked, "which school, if any". The partial unique index
+// SchoolMembership_one_pending_or_active_per_user is the real ceiling; this check
+// exists so the answer is a sentence instead of a constraint violation.
 async function assertEligibleApplicant(userId) {
     const user = await prisma.user.findUnique({
         where: { id: userId },
@@ -233,23 +226,27 @@ async function lookupSchool(userId, { schoolCode }) {
     return publicSchoolView(await resolveSchool(schoolCode));
 }
 
-/*
-  The child a guardian claims. Runs inside the school's scope, so a NISN that
-  belongs to another school is simply not there.
-
-  Four different failures, one answer (see CHILD_NO_MATCH): no such NISN in this
-  school, a name that does not match, a child whose own membership is not ACTIVE,
-  and a child with no current class - that last one because the homeroom teacher
-  of that class is who would release this request, and without a class there is
-  nobody to ask.
-*/
+// The child a guardian claims. Runs inside the school's scope, so a NISN that
+// belongs to another school is simply not there.
+//
+// Four different failures, one answer (see CHILD_NO_MATCH): no such NISN in this
+// school, a name that does not match, a child whose own membership is not ACTIVE,
+// and a child with no current class - that last one because the homeroom teacher
+// of that class is who would release this request, and without a class there is
+// nobody to ask.
+//
+// Who that homeroom teacher is comes back too, with the child's own membership:
+// addRoles needs both when the claimant IS that homeroom teacher.
 async function resolveChild({ childNisn, childFullName }) {
     const profile = await prisma.studentProfile.findFirst({
         where: { nisn: childNisn, membership: { status: 'ACTIVE' } },
         select: {
             id: true,
-            membership: { select: { user: { select: { fullName: true } } } },
-            classMemberships: { where: { endedAt: null }, select: { id: true } },
+            membership: { select: { id: true, user: { select: { fullName: true } } } },
+            classMemberships: {
+                where: { endedAt: null },
+                select: { class: { select: { homeroomTeacherMembershipId: true } } },
+            },
         },
     });
 
@@ -259,20 +256,22 @@ async function resolveChild({ childNisn, childFullName }) {
     }
     if (profile.classMemberships.length === 0) throw badRequest(CHILD_NO_MATCH);
 
-    return { studentProfileId: profile.id };
+    return {
+        studentProfileId: profile.id,
+        studentMembershipId: profile.membership.id,
+        homeroomMembershipId: profile.classMemberships[0].class.homeroomTeacherMembershipId,
+    };
 }
 
-/*
-  The join request itself. One SchoolMembership, PENDING, with one PENDING
-  MembershipRole per requested role - each released on its own, by whoever is
-  entitled to release it.
-
-  A GUARDIAN request also creates its PENDING GuardianStudent here, because the
-  child is resolved before the request is stored. TEACHER and STUDENT payloads go
-  to JoinRequestDetail instead: their real profiles are only created at approval,
-  and StudentProfile is unique on (schoolId, nisn), so writing one now would let a
-  stranger reserve a real child's NISN forever.
-*/
+// The join request itself. One SchoolMembership, PENDING, with one PENDING
+// MembershipRole per requested role - each released on its own, by whoever is
+// entitled to release it.
+//
+// A GUARDIAN request also creates its PENDING GuardianStudent here, because the
+// child is resolved before the request is stored. TEACHER and STUDENT payloads go
+// to JoinRequestDetail instead: their real profiles are only created at approval,
+// and StudentProfile is unique on (schoolId, nisn), so writing one now would let a
+// stranger reserve a real child's NISN forever.
 async function requestJoin(userId, body) {
     await assertEligibleApplicant(userId);
     const school = await resolveSchool(body.schoolCode);
@@ -349,11 +348,9 @@ async function requestJoin(userId, body) {
                 school: publicSchoolView(school),
             };
         } catch (error) {
-            /*
-              The partial unique index, reached by two requests racing each other
-              past assertEligibleApplicant. The index is the rule; that check is
-              only the polite version of it.
-            */
+            // The partial unique index, reached by two requests racing each other
+            // past assertEligibleApplicant. The index is the rule; that check is
+            // only the polite version of it.
             if (error?.code === 'P2002') {
                 throw conflict('You already have a join request waiting for approval');
             }
@@ -363,28 +360,83 @@ async function requestJoin(userId, body) {
 }
 
 // ---------------------------------------------------------------------------
+// Guardian links - written the same way by every path that makes one
+// ---------------------------------------------------------------------------
+
+// The student is told. A guardian is never attached in silence (ticket 05) -
+// in-app only, because mailer.js sends verification and password reset and
+// nothing else.
+function notifyGuardianLinked(tx, { studentMembershipId, guardianName, relationship }) {
+    return tx.notification.create({
+        data: {
+            recipientMembershipId: studentMembershipId,
+            type: 'GUARDIAN_LINK_APPROVED',
+            title: 'A guardian was linked to your account',
+            body: `${guardianName} (${relationship}) can now see your progress at this school.`,
+        },
+    });
+}
+
+// A guardian's claim on one child, PENDING for the child's homeroom teacher, or
+// ACTIVE at once when the claimant IS that homeroom teacher (owner, 2026-09-23).
+//
+// @@unique([guardianMembershipId, studentProfileId]): a link turned down or
+// cancelled before is moved back rather than duplicated, and loses its old
+// reason and end on the way. Returns the link's id.
+async function writeGuardianLink(
+    tx,
+    { membershipId, studentProfileId, relationship, priorLink, selfGranted, userId, now }
+) {
+    const data = {
+        relationship,
+        rejectionReason: null,
+        endedAt: null,
+        ...(selfGranted
+            ? { status: 'ACTIVE', approvedByUserId: userId, approvedAt: now }
+            : { status: 'PENDING', approvedByUserId: null, approvedAt: null }),
+    };
+
+    if (priorLink) {
+        const claimed = await tx.guardianStudent.updateMany({
+            where: { id: priorLink.id, status: { in: REOPENABLE } },
+            data,
+        });
+        if (claimed.count === 0) throw conflict('Your link to that student changed meanwhile');
+        return priorLink.id;
+    }
+
+    const created = await tx.guardianStudent.create({
+        data: { guardianMembershipId: membershipId, studentProfileId, ...data },
+    });
+    return created.id;
+}
+
+// ---------------------------------------------------------------------------
 // Member - adding a role to a membership already held
 // ---------------------------------------------------------------------------
 
-/*
-  A role added to an ACTIVE membership (owner, 2026-09-22): the Principal who
-  also teaches, the teacher whose child has just enrolled, the guardian who is
-  hired. The membership stays ACTIVE throughout; only the new role waits.
-
-  It is released the way the same role would be on a fresh join request - the
-  queue filters on PENDING roles, not on the membership's status, so a Principal
-  sees a new TEACHER and the child's homeroom teacher sees a new GUARDIAN with no
-  change to the reviewer side. The one exception is the Principal's own TEACHER:
-  there is nobody above them inside the school to release it, so it is ACTIVE at
-  once, and the audit shows the same person submitting and approving.
-
-  The caller's token opened the school scope, so nothing here needs a wrapper.
-*/
+// A role added to an ACTIVE membership (owner, 2026-09-22): the Principal who
+// also teaches, the teacher whose child has just enrolled, the guardian who is
+// hired. The membership stays ACTIVE throughout; only the new role waits.
+//
+// It is released the way the same role would be on a fresh join request - the
+// queue filters on PENDING roles, not on the membership's status, so a Principal
+// sees a new TEACHER and the child's homeroom teacher sees a new GUARDIAN with no
+// change to the reviewer side. Two exceptions are ACTIVE at once, the audit
+// showing the same person submitting and approving:
+// - the Principal's own TEACHER: nobody inside the school stands above them;
+// - the GUARDIAN of a child in the claimant's own homeroom class (owner,
+//   2026-09-23). The Principal named them that class's homeroom teacher, and
+//   releasing a guardian for that class is exactly the authority it carries -
+//   the release would otherwise fall to them and be refused as their own.
+//
+// The caller's token opened the school scope, so nothing here needs a wrapper.
 async function addRoles(auth, body) {
     const membership = await prisma.schoolMembership.findFirst({
         where: { id: auth.membershipId, status: 'ACTIVE' },
         select: {
             id: true,
+            user: { select: { fullName: true } },
             roles: { select: { id: true, role: true, status: true } },
             joinRequest: { select: { id: true } },
             teacherProfile: { select: { id: true } },
@@ -392,7 +444,7 @@ async function addRoles(auth, body) {
     });
     if (!membership) throw notFound('Membership not found');
 
-    const held = membership.roles.filter((role) => role.status !== 'REJECTED');
+    const held = membership.roles.filter((role) => !REOPENABLE.includes(role.status));
     const requested = [...new Set(body.roles)];
 
     for (const role of requested) {
@@ -411,17 +463,21 @@ async function addRoles(auth, body) {
 
     const principal = held.some((role) => role.role === 'PRINCIPAL' && role.status === 'ACTIVE');
     const child = requested.includes('GUARDIAN') ? await resolveChild(body.guardian) : null;
+    const ownHomeroomChild = child?.homeroomMembershipId === membership.id;
     const now = new Date();
 
-    // A child this member was linked to before and turned down for comes back
-    // PENDING; @@unique([guardianMembershipId, studentProfileId]) forbids a second row.
+    const grantsItself = (role) =>
+        (role === 'TEACHER' && principal) || (role === 'GUARDIAN' && ownHomeroomChild);
+
+    // A child this member was linked to before and turned down for, or cancelled,
+    // comes back through writeGuardianLink.
     const priorLink = child
         ? await prisma.guardianStudent.findFirst({
-              where: { guardianMembershipId: membership.id, studentProfileId: child.studentProfileId },
-              select: { id: true, status: true },
-          })
+            where: { guardianMembershipId: membership.id, studentProfileId: child.studentProfileId },
+            select: { id: true, status: true },
+        })
         : null;
-    if (priorLink && priorLink.status !== 'REJECTED') {
+    if (priorLink && !REOPENABLE.includes(priorLink.status)) {
         throw conflict('You are already linked to that student');
     }
 
@@ -435,31 +491,30 @@ async function addRoles(auth, body) {
             });
 
             for (const role of requested) {
-                const selfGranted = role === 'TEACHER' && principal;
+                const selfGranted = grantsItself(role);
                 const data = selfGranted
                     ? {
-                          status: 'ACTIVE',
-                          approvedByUserId: auth.userId,
-                          approvedAt: now,
-                          rejectionReason: null,
-                      }
+                        status: 'ACTIVE',
+                        approvedByUserId: auth.userId,
+                        approvedAt: now,
+                        rejectionReason: null,
+                    }
                     : { status: 'PENDING', approvedByUserId: null, approvedAt: null, rejectionReason: null };
 
-                /*
-                  @@unique([membershipId, role]): a role turned down earlier keeps its
-                  row, so asking again moves that row back rather than adding one.
-                */
-                const rejected = membership.roles.find(
-                    (entry) => entry.role === role && entry.status === 'REJECTED'
+                // @@unique([membershipId, role]): a role turned down or cancelled
+                // earlier keeps its row, so asking again moves that row back rather
+                // than adding one.
+                const closed = membership.roles.find(
+                    (entry) => entry.role === role && REOPENABLE.includes(entry.status)
                 );
                 let roleId;
-                if (rejected) {
+                if (closed) {
                     const claimed = await tx.membershipRole.updateMany({
-                        where: { id: rejected.id, status: 'REJECTED' },
+                        where: { id: closed.id, status: { in: REOPENABLE } },
                         data,
                     });
                     if (claimed.count === 0) throw conflict(`Your ${role} role changed meanwhile`);
-                    roleId = rejected.id;
+                    roleId = closed.id;
                 } else {
                     const created = await tx.membershipRole.create({
                         data: { membershipId: membership.id, role, ...data },
@@ -476,7 +531,7 @@ async function addRoles(auth, body) {
                     client: tx,
                 });
 
-                if (selfGranted) {
+                if (selfGranted && role === 'TEACHER') {
                     const teacher = {
                         nip: body.teacher.nip ?? null,
                         nuptk: body.teacher.nuptk ?? null,
@@ -491,7 +546,9 @@ async function addRoles(auth, body) {
                             data: { membershipId: membership.id, ...teacher },
                         });
                     }
+                }
 
+                if (selfGranted) {
                     await recordAudit({
                         schoolId: auth.schoolId,
                         subjectType: ROLE_SUBJECT,
@@ -522,25 +579,21 @@ async function addRoles(auth, body) {
             }
 
             if (child) {
-                const link = { relationship: body.guardian.relationship };
-                if (priorLink) {
-                    await tx.guardianStudent.updateMany({
-                        where: { id: priorLink.id, status: 'REJECTED' },
-                        data: {
-                            ...link,
-                            status: 'PENDING',
-                            approvedByUserId: null,
-                            approvedAt: null,
-                            endedAt: null,
-                        },
-                    });
-                } else {
-                    await tx.guardianStudent.create({
-                        data: {
-                            guardianMembershipId: membership.id,
-                            studentProfileId: child.studentProfileId,
-                            ...link,
-                        },
+                await writeGuardianLink(tx, {
+                    membershipId: membership.id,
+                    studentProfileId: child.studentProfileId,
+                    relationship: body.guardian.relationship,
+                    priorLink,
+                    selfGranted: ownHomeroomChild,
+                    userId: auth.userId,
+                    now,
+                });
+
+                if (ownHomeroomChild) {
+                    await notifyGuardianLinked(tx, {
+                        studentMembershipId: child.studentMembershipId,
+                        guardianName: membership.user.fullName,
+                        relationship: body.guardian.relationship,
                     });
                 }
             }
@@ -559,19 +612,294 @@ async function addRoles(auth, body) {
     return { id: membership.id, status: 'ACTIVE', roles };
 }
 
+// What a guardian sees of their own link: the child's name they typed, never a
+// NISN or anything else about the child.
+const linkSelect = {
+    id: true,
+    status: true,
+    relationship: true,
+    rejectionReason: true,
+    studentProfile: { select: { membership: { select: { user: { select: { fullName: true } } } } } },
+};
+
+const linkView = (link) => ({
+    id: link.id,
+    status: link.status,
+    relationship: link.relationship,
+    rejectionReason: link.rejectionReason,
+    student: { fullName: link.studentProfile.membership.user.fullName },
+});
+
+// A further child for a guardian who already has one (owner, 2026-09-23). The
+// GUARDIAN role is held, so /me/roles answers 409; this asks for the link alone.
+//
+// Released like the first child: by the homeroom teacher of the class the child
+// sits in, from the same /api/membership-requests queue - and ACTIVE at once when
+// the claimant is that homeroom teacher. The role must already be ACTIVE: a link
+// beside a PENDING role would be released with the role, by whoever releases it,
+// which is a second child riding on the first one's approval.
+async function linkChild(auth, body) {
+    const membership = await prisma.schoolMembership.findFirst({
+        where: { id: auth.membershipId, status: 'ACTIVE' },
+        select: {
+            id: true,
+            user: { select: { fullName: true } },
+            roles: { where: { role: 'GUARDIAN' }, select: { status: true } },
+        },
+    });
+    if (!membership) throw notFound('Membership not found');
+
+    const guardian = membership.roles[0];
+    if (guardian?.status === 'PENDING') {
+        throw conflict('Your GUARDIAN role is still waiting for approval');
+    }
+    if (guardian?.status !== 'ACTIVE') {
+        throw conflict('Ask for the GUARDIAN role first');
+    }
+
+    const child = await resolveChild(body);
+    const priorLink = await prisma.guardianStudent.findFirst({
+        where: { guardianMembershipId: membership.id, studentProfileId: child.studentProfileId },
+        select: { id: true, status: true },
+    });
+    if (priorLink && !REOPENABLE.includes(priorLink.status)) {
+        throw conflict(
+            priorLink.status === 'PENDING'
+                ? 'Your link to that student is already waiting for approval'
+                : 'You are already linked to that student'
+        );
+    }
+
+    const selfGranted = child.homeroomMembershipId === membership.id;
+    const now = new Date();
+    let linkId;
+
+    try {
+        await prisma.$transaction(async (tx) => {
+            // The row lock decideRequest takes, so this and a decision on an
+            // earlier link take turns.
+            await tx.schoolMembership.updateMany({
+                where: { id: membership.id },
+                data: { updatedAt: now },
+            });
+
+            linkId = await writeGuardianLink(tx, {
+                membershipId: membership.id,
+                studentProfileId: child.studentProfileId,
+                relationship: body.relationship,
+                priorLink,
+                selfGranted,
+                userId: auth.userId,
+                now,
+            });
+
+            await recordAudit({
+                schoolId: auth.schoolId,
+                subjectType: LINK_SUBJECT,
+                subjectId: linkId,
+                action: 'SUBMIT',
+                actorUserId: auth.userId,
+                client: tx,
+            });
+
+            if (selfGranted) {
+                await recordAudit({
+                    schoolId: auth.schoolId,
+                    subjectType: LINK_SUBJECT,
+                    subjectId: linkId,
+                    action: 'APPROVE',
+                    actorUserId: auth.userId,
+                    client: tx,
+                });
+                await notifyGuardianLinked(tx, {
+                    studentMembershipId: child.studentMembershipId,
+                    guardianName: membership.user.fullName,
+                    relationship: body.relationship,
+                });
+            }
+        });
+    } catch (error) {
+        throw translateUniqueViolation(error);
+    }
+
+    log.info(`Further child claimed at ${auth.schoolName}${selfGranted ? ' (own homeroom class)' : ''}`);
+
+    return linkView(await prisma.guardianStudent.findFirst({ where: { id: linkId }, select: linkSelect }));
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation - the person who asked, taking a PENDING request back
+// ---------------------------------------------------------------------------
+
+// Cancelled, not rejected (owner, 2026-09-23): nobody turned it down, so no
+// reason is asked for and nothing counts against assertMembershipRetryAllowed,
+// which reads REJECTED rows only. Every cancellation claims its rows with
+// updateMany({ status: 'PENDING' }), so a reviewer deciding at the same moment
+// and the person cancelling cannot both win - whoever commits second finds
+// nothing PENDING and gets a 409.
+
+// A whole join request. The applicant holds no school yet - their token opened
+// no scope - so the membership is found unscoped and written inside its school,
+// the way requestJoin does it. Afterwards they are free to ask anywhere.
+async function cancelJoinRequest(userId) {
+    const pending = await runUnscoped('finding the join request a user is cancelling', async () =>
+        await prisma.schoolMembership.findFirst({
+            where: { userId, status: 'PENDING' },
+            select: { id: true, school: { select: { id: true, name: true } } },
+        })
+    );
+    if (!pending) throw notFound('You have no join request waiting');
+
+    const now = new Date();
+
+    await runInSchool(pending.school.id, pending.school.name, async () => {
+        await prisma.$transaction(async (tx) => {
+            // The claim is also the lock: decideRequest updates this same row first.
+            const claimed = await tx.schoolMembership.updateMany({
+                where: { id: pending.id, status: 'PENDING' },
+                data: { status: 'CANCELLED', endedAt: now },
+            });
+            if (claimed.count === 0) throw conflict('This join request has already been decided');
+
+            await tx.membershipRole.updateMany({
+                where: { membershipId: pending.id, status: 'PENDING' },
+                data: { status: 'CANCELLED' },
+            });
+            await tx.guardianStudent.updateMany({
+                where: { guardianMembershipId: pending.id, status: 'PENDING' },
+                data: { status: 'CANCELLED', endedAt: now },
+            });
+
+            await recordAudit({
+                schoolId: pending.school.id,
+                subjectType: MEMBERSHIP_SUBJECT,
+                subjectId: pending.id,
+                action: 'CANCEL',
+                actorUserId: userId,
+                client: tx,
+            });
+        });
+
+        log.info(`Join request cancelled at ${pending.school.name}`);
+    });
+
+    return { id: pending.id, status: 'CANCELLED', school: { name: pending.school.name } };
+}
+
+// One PENDING role on an ACTIVE membership, asked for through /me/roles. The
+// membership stays ACTIVE. Cancelling GUARDIAN takes its PENDING child link with
+// it - a link without its role would have nobody left to release it.
+async function cancelRole(auth, role) {
+    const pending = await prisma.membershipRole.findFirst({
+        where: {
+            membershipId: auth.membershipId,
+            role,
+            status: 'PENDING',
+            membership: { status: 'ACTIVE' },
+        },
+        select: { id: true },
+    });
+    if (!pending) throw notFound(`You have no ${role} role waiting`);
+
+    const now = new Date();
+
+    await prisma.$transaction(async (tx) => {
+        await tx.schoolMembership.updateMany({
+            where: { id: auth.membershipId },
+            data: { updatedAt: now },
+        });
+
+        const claimed = await tx.membershipRole.updateMany({
+            where: { id: pending.id, status: 'PENDING' },
+            data: { status: 'CANCELLED' },
+        });
+        if (claimed.count === 0) throw conflict(`Your ${role} role has already been decided`);
+
+        if (role === 'GUARDIAN') {
+            await tx.guardianStudent.updateMany({
+                where: { guardianMembershipId: auth.membershipId, status: 'PENDING' },
+                data: { status: 'CANCELLED', endedAt: now },
+            });
+        }
+
+        await recordAudit({
+            schoolId: auth.schoolId,
+            subjectType: ROLE_SUBJECT,
+            subjectId: pending.id,
+            action: 'CANCEL',
+            actorUserId: auth.userId,
+            client: tx,
+        });
+    });
+
+    log.info(`${role} role request cancelled at ${auth.schoolName}`);
+
+    const roles = await prisma.membershipRole.findMany({
+        where: { membershipId: auth.membershipId },
+        select: { role: true, status: true, rejectionReason: true },
+        orderBy: { role: 'asc' },
+    });
+    return { id: auth.membershipId, status: 'ACTIVE', roles };
+}
+
+// One PENDING further-child link. Only beside an ACTIVE GUARDIAN role: while the
+// role itself waits, its link is part of that one request, and cancelRole is how
+// it is taken back.
+async function cancelLink(auth, linkId) {
+    const link = await prisma.guardianStudent.findFirst({
+        where: { id: linkId, guardianMembershipId: auth.membershipId, status: 'PENDING' },
+        select: {
+            id: true,
+            guardianMembership: {
+                select: { roles: { where: { role: 'GUARDIAN' }, select: { status: true } } },
+            },
+        },
+    });
+    // Another member's link, another school's, or one already decided: one answer.
+    if (!link) throw notFound('No link of yours is waiting under that id');
+    if (link.guardianMembership.roles[0]?.status !== 'ACTIVE') {
+        throw conflict('Cancel the GUARDIAN role request instead');
+    }
+
+    const now = new Date();
+
+    await prisma.$transaction(async (tx) => {
+        await tx.schoolMembership.updateMany({
+            where: { id: auth.membershipId },
+            data: { updatedAt: now },
+        });
+
+        const claimed = await tx.guardianStudent.updateMany({
+            where: { id: link.id, status: 'PENDING' },
+            data: { status: 'CANCELLED', endedAt: now },
+        });
+        if (claimed.count === 0) throw conflict('That link has already been decided');
+
+        await recordAudit({
+            schoolId: auth.schoolId,
+            subjectType: LINK_SUBJECT,
+            subjectId: link.id,
+            action: 'CANCEL',
+            actorUserId: auth.userId,
+            client: tx,
+        });
+    });
+
+    log.info(`Child link cancelled at ${auth.schoolName}`);
+    return linkView(await prisma.guardianStudent.findFirst({ where: { id: link.id }, select: linkSelect }));
+}
+
 // ---------------------------------------------------------------------------
 // Reviewer
 // ---------------------------------------------------------------------------
 
-/*
-  What this reviewer is entitled to release, resolved once per request.
-
-  Homeroom teaching is not a role - it is Class.homeroomTeacherMembershipId - so
-  this asks the classes, not the token. `grades` is what a STUDENT request is
-  matched against (the applicant asked for a grade, not a class), and
-  `studentProfileIds` is the current roster of those classes, which is what a
-  GUARDIAN request is matched against.
-*/
+// What this reviewer is entitled to release, resolved once per request.
+//
+// Homeroom teaching is not a role - it is Class.homeroomTeacherMembershipId - so
+// this asks the classes, not the token. `grades` is what a STUDENT request is
+// matched against (the applicant asked for a grade, not a class), and
+// `studentProfileIds` is the current roster of those classes, which is what a
+// GUARDIAN request is matched against.
 async function reviewerScope(membershipId) {
     const [principal, classes] = await Promise.all([
         isPrincipal(membershipId),
@@ -599,22 +927,21 @@ async function reviewerScope(membershipId) {
     };
 }
 
-/*
-  Tiered approval, in one place (ticket 05):
-    TEACHER  -> the Principal.
-    STUDENT  -> a homeroom teacher of a class at the grade that was asked for.
-    GUARDIAN -> the homeroom teacher of the class the claimed child sits in.
-
-  A grade with no class yet has no releaser, and that is honest rather than
-  broken: until a Principal creates the class (ticket 07) there is nobody holding
-  that roster.
-
-  Nobody releases their own role. Before roles could be added to an ACTIVE
-  membership this could not come up; now a homeroom teacher asking to be the
-  guardian of a child in their own class would otherwise approve themselves.
-  The Principal's own TEACHER is the one sanctioned exception, and it never
-  reaches this queue (addRoles makes it ACTIVE directly).
-*/
+// Tiered approval, in one place (ticket 05):
+//   TEACHER  -> the Principal.
+//   STUDENT  -> a homeroom teacher of a class at the grade that was asked for.
+//   GUARDIAN -> the homeroom teacher of the class the claimed child sits in.
+//
+// A grade with no class yet has no releaser, and that is honest rather than
+// broken: until a Principal creates the class (ticket 07) there is nobody holding
+// that roster.
+//
+// Nobody releases their own role. Before roles could be added to an ACTIVE
+// membership this could not come up; now a homeroom teacher asking to be the
+// guardian of a child in their own class would otherwise approve themselves.
+// The two sanctioned exceptions - the Principal's own TEACHER, and a homeroom
+// teacher's GUARDIAN for a child in their own class - never reach this queue:
+// addRoles makes them ACTIVE directly.
 function releasableRoles(scope, membership) {
     if (membership.id === scope.membershipId) return [];
     const detail = membership.joinRequest;
@@ -632,6 +959,23 @@ function releasableRoles(scope, membership) {
 
         return false;
     });
+}
+
+// The child links this reviewer decides: PENDING, for a child in one of their
+// classes. They ride with the GUARDIAN role when that role is released now, or
+// stand alone when it is already ACTIVE - a further child (linkChild). The same
+// no-self-release rule as releasableRoles.
+function releasableLinks(scope, membership, roles = releasableRoles(scope, membership)) {
+    if (membership.id === scope.membershipId) return [];
+
+    const guardian = membership.roles.find((role) => role.role === 'GUARDIAN');
+    const decidable =
+        guardian?.status === 'ACTIVE' || roles.some((role) => role.role === 'GUARDIAN');
+    if (!decidable) return [];
+
+    return (membership.guardianLinks ?? []).filter(
+        (link) => link.status === 'PENDING' && scope.studentProfileIds.includes(link.studentProfileId)
+    );
 }
 
 function visibleRequestFilter(scope, status) {
@@ -655,19 +999,21 @@ function visibleRequestFilter(scope, status) {
                 { guardianLinks: { some: { studentProfileId: { in: scope.studentProfileIds } } } },
             ],
         });
+        // A further child's link, whose GUARDIAN role is already ACTIVE.
+        or.push({
+            guardianLinks: { some: { status, studentProfileId: { in: scope.studentProfileIds } } },
+        });
     }
 
     return or;
 }
 
-/*
-  The queue. Oldest first - a queue is worked from the front, like the platform
-  admin's in ticket 04.
-
-  A teacher who is neither Principal nor homeroom of anything gets an empty list
-  rather than a 403: there is nothing for them to release, and nothing leaks
-  either way.
-*/
+// The queue. Oldest first - a queue is worked from the front, like the platform
+// admin's in ticket 04.
+//
+// A teacher who is neither Principal nor homeroom of anything gets an empty list
+// rather than a 403: there is nothing for them to release, and nothing leaks
+// either way.
 async function listRequests(auth, { status }) {
     const scope = await reviewerScope(auth.membershipId);
     const or = visibleRequestFilter(scope, status);
@@ -680,9 +1026,10 @@ async function listRequests(auth, { status }) {
         orderBy: { requestedAt: 'asc' },
     });
 
-    return memberships.map((membership) =>
-        requestView(membership, releasableRoles(scope, membership))
-    );
+    return memberships.map((membership) => {
+        const roles = releasableRoles(scope, membership);
+        return requestView(membership, roles, releasableLinks(scope, membership, roles));
+    });
 }
 
 async function loadRequest(id) {
@@ -694,30 +1041,29 @@ async function loadRequest(id) {
     return membership;
 }
 
-/*
-  A request nobody in this reviewer's hands can release is 404 - the same 404 a
-  request from another school gets. Inside one school that is a little strict, but
-  it keeps one rule instead of two, and a 403 would be the confirmation ADR-0001
-  refuses to give. The Principal is the exception: they run the school, so they
-  may read the whole queue even where the release is a homeroom teacher's.
-*/
+// A request nobody in this reviewer's hands can release is 404 - the same 404 a
+// request from another school gets. Inside one school that is a little strict, but
+// it keeps one rule instead of two, and a 403 would be the confirmation ADR-0001
+// refuses to give. The Principal is the exception: they run the school, so they
+// may read the whole queue even where the release is a homeroom teacher's.
 async function getRequest(auth, id) {
     const membership = await loadRequest(id);
     const scope = await reviewerScope(auth.membershipId);
     const releasable = releasableRoles(scope, membership);
+    const links = releasableLinks(scope, membership, releasable);
 
-    if (releasable.length === 0 && !scope.principal) throw notFound('Join request not found');
-    return requestView(membership, releasable);
+    if (releasable.length === 0 && links.length === 0 && !scope.principal) {
+        throw notFound('Join request not found');
+    }
+    return requestView(membership, releasable, links);
 }
 
-/*
-  Where a STUDENT lands. The applicant asked for a grade; the class is chosen
-  here, by the person who just matched them against a roster.
-
-  The class must be one this reviewer is homeroom of - anything else, including a
-  class at another school, is 404 - and it must be at the grade that was
-  requested, or a grade 7 applicant would quietly become a grade 9 student.
-*/
+// Where a STUDENT lands. The applicant asked for a grade; the class is chosen
+// here, by the person who just matched them against a roster.
+//
+// The class must be one this reviewer is homeroom of - anything else, including a
+// class at another school, is 404 - and it must be at the grade that was
+// requested, or a grade 7 applicant would quietly become a grade 9 student.
 function resolveTargetClass(scope, membership, classId) {
     if (!classId) throw badRequest('Choose the class this student joins');
 
@@ -750,16 +1096,14 @@ function translateUniqueViolation(error) {
     return error;
 }
 
-/*
-  Approve or reject: one function, because they differ only in what they write.
-
-  Each role is claimed with updateMany({ status: 'PENDING' }) inside the
-  transaction, which is what makes a decision happen exactly once - two reviewers
-  clicking together both pass the read above, and only one of them moves the row.
-
-  updateMany, not update, for every tenant-owned write here: the extension ANDs
-  the school onto the where clause, and update() wants a unique one.
-*/
+// Approve or reject: one function, because they differ only in what they write.
+//
+// Each role is claimed with updateMany({ status: 'PENDING' }) inside the
+// transaction, which is what makes a decision happen exactly once - two reviewers
+// clicking together both pass the read above, and only one of them moves the row.
+//
+// updateMany, not update, for every tenant-owned write here: the extension ANDs
+// the school onto the where clause, and update() wants a unique one.
 async function decideRequest(auth, id, { action, classId, reason }) {
     let trimmed = null;
     if (action === 'REJECT') {
@@ -770,9 +1114,16 @@ async function decideRequest(auth, id, { action, classId, reason }) {
     const membership = await loadRequest(id);
     const scope = await reviewerScope(auth.membershipId);
     const releasable = releasableRoles(scope, membership);
-    if (releasable.length === 0) throw notFound('Join request not found');
+    const links = releasableLinks(scope, membership, releasable);
+    if (releasable.length === 0 && links.length === 0) throw notFound('Join request not found');
 
-    const releasing = releasable.map((role) => role.role);
+    // A link with no role released beside it is a further child on an ACTIVE
+    // GUARDIAN role (linkChild): decided, and audited, on its own.
+    const linksAlone = !releasable.some((role) => role.role === 'GUARDIAN');
+    const releasing = [
+        ...releasable.map((role) => role.role),
+        ...(linksAlone && links.length > 0 ? ['child link'] : []),
+    ];
     const detail = membership.joinRequest;
     const now = new Date();
 
@@ -783,44 +1134,47 @@ async function decideRequest(auth, id, { action, classId, reason }) {
             if (!detail?.nisn) throw badRequest('This student request carries no NISN');
         }
 
-        /*
-          STUDENT is exclusive, checked again here and not only at request time -
-          ticket 05 asks for exactly that. The set tested is what would be ACTIVE
-          after this decision, so a STUDENT role can never be released onto a
-          membership that already holds another.
-        */
+        // STUDENT is exclusive, checked again here and not only at request time -
+        // ticket 05 asks for exactly that. The set tested is what would be ACTIVE
+        // after this decision, so a STUDENT role can never be released onto a
+        // membership that already holds another.
         assertRoleCombinationAllowed([
             ...membership.roles.filter((role) => role.status === 'ACTIVE').map((role) => role.role),
-            ...releasing,
+            ...releasable.map((role) => role.role),
         ]);
     }
 
+    // approvedAt stays null on a rejection: the column is named for the
+    // approval path, and filling it would make "approvedAt != null"
+    // stop meaning approved. When a rejection happened is in
+    // ApprovalAudit, which is the record that matters (ADR-0003).
     const roleData =
         action === 'APPROVE'
             ? { status: 'ACTIVE', approvedByUserId: auth.userId, approvedAt: now }
-            : /*
-                 approvedAt stays null on a rejection: the column is named for the
-                 approval path, and filling it would make "approvedAt != null"
-                 stop meaning approved. When a rejection happened is in
-                 ApprovalAudit, which is the record that matters (ADR-0003).
-              */
-              { status: 'REJECTED', approvedByUserId: auth.userId, rejectionReason: trimmed };
+            : { status: 'REJECTED', approvedByUserId: auth.userId, rejectionReason: trimmed };
+    const linkData =
+        action === 'APPROVE'
+            ? { status: 'ACTIVE', approvedByUserId: auth.userId, approvedAt: now }
+            : {
+                status: 'REJECTED',
+                approvedByUserId: auth.userId,
+                rejectionReason: trimmed,
+                endedAt: now,
+            };
 
     try {
         await prisma.$transaction(async (tx) => {
-            /*
-              Decisions on one membership take turns. A TEACHER + GUARDIAN request
-              has two releasers, and each claim below moves a different row, so
-              nothing else would stop the Principal and the homeroom teacher
-              deciding at the same moment - each then derives the membership's
-              status without the other's role, and two rejections strand it
-              PENDING with nothing left for anyone to decide.
-
-              This write is the lock: Postgres holds the row until commit, so a
-              second decision waits here. A tenant-scoped updateMany rather than
-              SELECT ... FOR UPDATE, because raw SQL would step outside the
-              tenant extension.
-            */
+            // Decisions on one membership take turns. A TEACHER + GUARDIAN request
+            // has two releasers, and each claim below moves a different row, so
+            // nothing else would stop the Principal and the homeroom teacher
+            // deciding at the same moment - each then derives the membership's
+            // status without the other's role, and two rejections strand it
+            // PENDING with nothing left for anyone to decide.
+            //
+            // This write is the lock: Postgres holds the row until commit, so a
+            // second decision waits here. A tenant-scoped updateMany rather than
+            // SELECT ... FOR UPDATE, because raw SQL would step outside the
+            // tenant extension.
             await tx.schoolMembership.updateMany({
                 where: { id: membership.id },
                 data: { updatedAt: now },
@@ -858,50 +1212,6 @@ async function decideRequest(auth, id, { action, classId, reason }) {
                     });
                 }
 
-                if (role.role === 'GUARDIAN') {
-                    const links = (membership.guardianLinks ?? []).filter(
-                        (link) =>
-                            link.status === 'PENDING' &&
-                            scope.studentProfileIds.includes(link.studentProfileId)
-                    );
-
-                    for (const link of links) {
-                        await tx.guardianStudent.updateMany({
-                            where: { id: link.id, status: 'PENDING' },
-                            data:
-                                action === 'APPROVE'
-                                    ? {
-                                          status: 'ACTIVE',
-                                          approvedByUserId: auth.userId,
-                                          approvedAt: now,
-                                      }
-                                    : {
-                                          status: 'REJECTED',
-                                          approvedByUserId: auth.userId,
-                                          endedAt: now,
-                                      },
-                        });
-
-                        /*
-                          The student is told. A guardian is never attached in
-                          silence (ticket 05) - in-app only, because mailer.js
-                          sends verification and password reset and nothing else.
-                        */
-                        if (action === 'APPROVE') {
-                            await tx.notification.create({
-                                data: {
-                                    recipientMembershipId: link.studentProfile.membership.id,
-                                    type: 'GUARDIAN_LINK_APPROVED',
-                                    title: 'A guardian was linked to your account',
-                                    body:
-                                        `${membership.user.fullName} (${link.relationship}) can now ` +
-                                        'see your progress at this school.',
-                                },
-                            });
-                        }
-                    }
-                }
-
                 await recordAudit({
                     schoolId: auth.schoolId,
                     subjectType: ROLE_SUBJECT,
@@ -913,16 +1223,47 @@ async function decideRequest(auth, id, { action, classId, reason }) {
                 });
             }
 
-            /*
-              The membership follows its roles: ACTIVE as soon as one role is
-              active, REJECTED only when nothing is left pending or active. A
-              REJECTED row leaves the partial unique index, which is what lets the
-              person apply again - capped by assertMembershipRetryAllowed.
+            // The child links, claimed like the roles: whoever commits second
+            // finds nothing PENDING. Riding with a GUARDIAN role they share its
+            // audit row; alone, each link is its own audited decision.
+            for (const link of links) {
+                const claimed = await tx.guardianStudent.updateMany({
+                    where: { id: link.id, status: 'PENDING' },
+                    data: linkData,
+                });
+                if (claimed.count === 0) {
+                    throw conflict('This join request has already been decided');
+                }
 
-              Read again here, never taken from the snapshot loadRequest() made
-              before the lock: a decision that waited on it must see what the
-              one before it committed.
-            */
+                if (action === 'APPROVE') {
+                    await notifyGuardianLinked(tx, {
+                        studentMembershipId: link.studentProfile.membership.id,
+                        guardianName: membership.user.fullName,
+                        relationship: link.relationship,
+                    });
+                }
+
+                if (linksAlone) {
+                    await recordAudit({
+                        schoolId: auth.schoolId,
+                        subjectType: LINK_SUBJECT,
+                        subjectId: link.id,
+                        action,
+                        actorUserId: auth.userId,
+                        reason: trimmed,
+                        client: tx,
+                    });
+                }
+            }
+
+            // The membership follows its roles: ACTIVE as soon as one role is
+            // active, REJECTED only when nothing is left pending or active. A
+            // REJECTED row leaves the partial unique index, which is what lets the
+            // person apply again - capped by assertMembershipRetryAllowed.
+            //
+            // Read again here, never taken from the snapshot loadRequest() made
+            // before the lock: a decision that waited on it must see what the
+            // one before it committed.
             const current = await tx.schoolMembership.findFirst({
                 where: { id: membership.id },
                 select: { status: true, approvedAt: true, roles: { select: { status: true } } },
@@ -957,7 +1298,8 @@ async function decideRequest(auth, id, { action, classId, reason }) {
 
     const reloaded = await loadRequest(id);
     const scopeAfter = await reviewerScope(auth.membershipId);
-    return requestView(reloaded, releasableRoles(scopeAfter, reloaded));
+    const rolesAfter = releasableRoles(scopeAfter, reloaded);
+    return requestView(reloaded, rolesAfter, releasableLinks(scopeAfter, reloaded, rolesAfter));
 }
 
 const approveRequest = (auth, id, { classId } = {}) =>
@@ -966,12 +1308,10 @@ const approveRequest = (auth, id, { classId } = {}) =>
 const rejectRequest = (auth, id, { reason } = {}) =>
     decideRequest(auth, id, { action: 'REJECT', reason });
 
-/*
-  Bulk approve, one transaction each rather than one for all: a homeroom teacher
-  releasing thirty students should not lose twenty-nine of them because the
-  thirtieth has a NISN that is already taken. Sequential, so every failure is
-  attributable, and only expected errors are repeated back to the caller.
-*/
+// Bulk approve, one transaction each rather than one for all: a homeroom teacher
+// releasing thirty students should not lose twenty-nine of them because the
+// thirtieth has a NISN that is already taken. Sequential, so every failure is
+// attributable, and only expected errors are repeated back to the caller.
 async function bulkApprove(auth, { ids, classId }) {
     const results = [];
 
@@ -1001,6 +1341,10 @@ export {
     lookupSchool,
     requestJoin,
     addRoles,
+    linkChild,
+    cancelJoinRequest,
+    cancelRole,
+    cancelLink,
     listRequests,
     getRequest,
     approveRequest,

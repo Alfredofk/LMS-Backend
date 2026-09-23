@@ -1,13 +1,11 @@
 import { badRequest } from './errors.js';
 
-/*
-  Zod v4. String formats moved to the top level in v4, so it is z.email(),
-  not z.string().email().
-
-  Express 5 defines req.query as a getter, so parsed output cannot be written
-  back over req.query / req.params. Validated values land on req.validated
-  instead, and handlers should read from there rather than from the raw request.
-*/
+// Zod v4. String formats moved to the top level in v4, so it is z.email(),
+// not z.string().email().
+//
+// Express 5 defines req.query as a getter, so parsed output cannot be written
+// back over req.query / req.params. Validated values land on req.validated
+// instead, and handlers should read from there rather than from the raw request.
 
 const formatIssues = (error) =>
     error.issues.map((issue) => ({
