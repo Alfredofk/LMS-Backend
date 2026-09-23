@@ -72,6 +72,29 @@ async function addRoles(req, res) {
     );
 }
 
+async function leave(req, res) {
+    const membership = await service.leaveSchool(req.auth);
+    return ok(res, {
+        membership,
+        message: 'You have left the school. You are free to ask to join any school.',
+    });
+}
+
+// ---- Principal and homeroom teacher: the school's people ---------------------
+
+async function listMembers(req, res) {
+    return ok(res, { members: await service.listMembers(req.auth, req.validated.query) });
+}
+
+async function removeMember(req, res) {
+    const membership = await service.removeMember(
+        req.auth,
+        req.validated.params.id,
+        req.validated.body
+    );
+    return ok(res, { membership, message: 'Removed from the school.' });
+}
+
 // ---- reviewer ---------------------------------------------------------------
 
 async function list(req, res) {
@@ -117,6 +140,9 @@ export {
     cancelRole,
     linkChild,
     cancelLink,
+    leave,
+    listMembers,
+    removeMember,
     list,
     get,
     approve,

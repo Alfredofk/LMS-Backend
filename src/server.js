@@ -15,6 +15,7 @@ import schoolRegistrationRoutes, {
 } from './modules/school/school.routes.js';
 import membershipRoutes, {
     reviewRouter as membershipReviewRoutes,
+    membersRouter as memberRoutes,
 } from './modules/membership/membership.routes.js';
 import academicsRoutes from './modules/academics/academics.routes.js';
 import { generalLimiter } from './shared/rateLimit.js';
@@ -76,6 +77,7 @@ app.use('/api/admin/school-registrations', adminSchoolRegistrationRoutes);
 app.use('/api/school', schoolRoutes);
 app.use('/api/memberships', membershipRoutes);
 app.use('/api/membership-requests', membershipReviewRoutes);
+app.use('/api/members', memberRoutes);
 app.use('/api/academics', academicsRoutes);
 
 // Catch 404

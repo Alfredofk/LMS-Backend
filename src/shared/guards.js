@@ -11,10 +11,14 @@ import { forbidden, notFound } from './errors.js';
 // another school simply is not found - the guards never need to compare school
 // ids themselves, and cannot forget to.
 
-// Does this membership hold this role, approved and active?
+// Does this membership hold this role, approved and active - on a membership
+// that is itself still ACTIVE?
+//
+// A member who leaves keeps their role rows, as history (ticket 06), so the role's
+// own status is not enough: a LEFT Principal's PRINCIPAL row still reads ACTIVE.
 async function hasActiveRole(membershipId, role) {
     const found = await prisma.membershipRole.findFirst({
-        where: { membershipId, role, status: 'ACTIVE' },
+        where: { membershipId, role, status: 'ACTIVE', membership: { status: 'ACTIVE' } },
         select: { id: true },
     });
     return Boolean(found);

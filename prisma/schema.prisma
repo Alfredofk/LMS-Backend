@@ -300,6 +300,9 @@ model SchoolMembership {
     requestedAt DateTime         @default(now())
     approvedAt  DateTime?
     endedAt     DateTime?
+    /// Why a LEFT membership ended: a removal's reason, or the automatic one when a
+    /// guardian's last linked student leaves (ticket 06). Null for a plain leave.
+    endReason   String?
     createdAt   DateTime         @default(now())
     updatedAt   DateTime         @updatedAt
 

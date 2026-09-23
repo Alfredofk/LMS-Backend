@@ -313,7 +313,7 @@ async function getClass(auth, id) {
                 select: {
                     id: true,
                     nisn: true,
-                    membership: { select: { user: { select: { fullName: true } } } },
+                    membership: { select: { id: true, user: { select: { fullName: true } } } },
                 },
             },
         },
@@ -322,6 +322,8 @@ async function getClass(auth, id) {
     const students = placements
         .map((placement) => ({
             studentProfileId: placement.studentProfile.id,
+            // What POST /api/members/:id/remove takes (ticket 06).
+            membershipId: placement.studentProfile.membership.id,
             fullName: placement.studentProfile.membership.user.fullName,
             nisn: placement.studentProfile.nisn,
             placedAt: placement.startedAt,

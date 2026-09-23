@@ -1,14 +1,14 @@
 import { prisma } from '../../shared/prisma.js';
 import { runInSchool, runUnscoped } from '../../shared/tenantContext.js';
 import { isValidGrade } from '../../shared/schoolType.js';
-import { isPrincipal } from '../../shared/guards.js';
+import { isPrincipal, isHomeroomOfStudent } from '../../shared/guards.js';
 import {
     assertRoleCombinationAllowed,
     assertMembershipRetryAllowed,
     assertRejectionReason,
     recordAudit,
 } from '../../shared/approval.js';
-import { AppError, badRequest, conflict, notFound } from '../../shared/errors.js';
+import { AppError, badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
 
 const log = createLogger('Membership');
@@ -890,6 +890,306 @@ async function cancelLink(auth, linkId) {
 }
 
 // ---------------------------------------------------------------------------
+// Leaving - access revoked, nothing deleted (ADR-0004, ticket 06)
+// ---------------------------------------------------------------------------
+
+const STUDENT_LEFT = 'The student has left the school';
+const LAST_CHILD_LEFT = 'Your last linked student has left the school';
+
+// A homeroom teacher of a class in an ACTIVE year cannot go (owner, 2026-09-24):
+// the class would have nobody to release its students' requests. The Principal
+// hands the class on first (PATCH /api/academics/classes/:id/homeroom). A CLOSED
+// year's classes do not hold anyone back - nothing new happens in them.
+async function assertNoActiveHomeroom(client, membershipId, whose) {
+    const classes = await client.class.findMany({
+        where: { homeroomTeacherMembershipId: membershipId, academicYear: { status: 'ACTIVE' } },
+        select: { name: true, academicYear: { select: { label: true } } },
+        orderBy: { name: 'asc' },
+    });
+    if (classes.length === 0) return;
+
+    const names = classes.map((entry) => `${entry.name} (${entry.academicYear.label})`);
+    throw conflict(
+        `${whose} homeroom teacher of ${names.join(', ')}. The Principal has to hand ` +
+            'these classes to another homeroom teacher first.',
+        { classes: names }
+    );
+}
+
+// A guardian whose links were just ended by a student leaving. Locked first, the
+// way decideRequest locks, so two siblings leaving at the same moment take turns
+// here: whoever comes second sees the first one's ended link, and the "last child"
+// moment is never missed by both.
+//
+// - Any link still ACTIVE or PENDING: nothing changes.
+// - A GUARDIAN role still PENDING with no link left has nobody to release it, so
+//   it is rejected.
+// - A membership holding another role (a teacher whose child left) stays.
+// - Otherwise an ACTIVE membership is LEFT - it no longer grants sight of anyone
+//   (ADR-0004) - and a PENDING one (a join request for that child) is REJECTED,
+//   free to ask again.
+async function releaseOrphanedGuardian(tx, membershipId, { actorUserId, schoolId, now }) {
+    await tx.schoolMembership.updateMany({ where: { id: membershipId }, data: { updatedAt: now } });
+
+    const remaining = await tx.guardianStudent.count({
+        where: {
+            guardianMembershipId: membershipId,
+            status: { in: ['PENDING', 'ACTIVE'] },
+            endedAt: null,
+        },
+    });
+    if (remaining > 0) return;
+
+    const guardian = await tx.schoolMembership.findFirst({
+        where: { id: membershipId },
+        select: { status: true, roles: { select: { id: true, role: true, status: true } } },
+    });
+
+    const pendingGuardian = guardian.roles.find(
+        (role) => role.role === 'GUARDIAN' && role.status === 'PENDING'
+    );
+    if (pendingGuardian) {
+        await tx.membershipRole.updateMany({
+            where: { id: pendingGuardian.id, status: 'PENDING' },
+            data: { status: 'REJECTED', approvedByUserId: actorUserId, rejectionReason: STUDENT_LEFT },
+        });
+        await recordAudit({
+            schoolId,
+            subjectType: ROLE_SUBJECT,
+            subjectId: pendingGuardian.id,
+            action: 'REJECT',
+            actorUserId,
+            reason: STUDENT_LEFT,
+            client: tx,
+        });
+    }
+
+    const otherRoles = guardian.roles.filter(
+        (role) => role.role !== 'GUARDIAN' && ['PENDING', 'ACTIVE'].includes(role.status)
+    );
+    if (otherRoles.length > 0) return;
+
+    if (guardian.status === 'ACTIVE') {
+        await tx.schoolMembership.updateMany({
+            where: { id: membershipId, status: 'ACTIVE' },
+            data: { status: 'LEFT', endedAt: now, endReason: LAST_CHILD_LEFT },
+        });
+        await recordAudit({
+            schoolId,
+            subjectType: MEMBERSHIP_SUBJECT,
+            subjectId: membershipId,
+            action: 'LEAVE',
+            actorUserId,
+            reason: LAST_CHILD_LEFT,
+            client: tx,
+        });
+    } else if (guardian.status === 'PENDING') {
+        await tx.schoolMembership.updateMany({
+            where: { id: membershipId, status: 'PENDING' },
+            data: { status: 'REJECTED' },
+        });
+    }
+}
+
+// Ending one ACTIVE membership, by leaving or by removal. The one place this is
+// done - ticket 11's account deletion calls it too - and always inside the
+// caller's transaction and tenant scope.
+//
+// Revocation, never deletion: the StudentProfile, the ended class placement, the
+// audit trail (and, once they exist, Scores and Report Cards) stay with the
+// school. Role rows are left as they are, as history: access ends because the
+// membership is no longer ACTIVE, which requireActiveMembership and
+// hasActiveRole both read. Afterwards the person may ask any school again - the
+// partial unique index only counts PENDING and ACTIVE rows.
+async function endMembership(
+    tx,
+    { membershipId, schoolId, action, actorUserId, reason = null, now = new Date() }
+) {
+    // A request left waiting has nobody to wait for any more: the person's own
+    // leaving cancels it, a removal turns it down with the removal's reason.
+    const closed =
+        action === 'REMOVE'
+            ? { status: 'REJECTED', approvedByUserId: actorUserId, rejectionReason: reason }
+            : { status: 'CANCELLED' };
+
+    // The claim is also the row lock that decideRequest and addRoles take.
+    const claimed = await tx.schoolMembership.updateMany({
+        where: { id: membershipId, status: 'ACTIVE' },
+        data: { status: 'LEFT', endedAt: now, endReason: reason },
+    });
+    if (claimed.count === 0) throw conflict('This membership has already ended');
+
+    await tx.membershipRole.updateMany({
+        where: { membershipId, status: 'PENDING' },
+        data: closed,
+    });
+
+    // Their own links, if they are a guardian: none of them grants sight any more.
+    await tx.guardianStudent.updateMany({
+        where: { guardianMembershipId: membershipId, status: 'ACTIVE', endedAt: null },
+        data: { endedAt: now },
+    });
+    await tx.guardianStudent.updateMany({
+        where: { guardianMembershipId: membershipId, status: 'PENDING' },
+        data: { ...closed, endedAt: now },
+    });
+
+    // A student: the placement ends, and so does every guardian's sight of them.
+    const profile = await tx.studentProfile.findFirst({
+        where: { membershipId },
+        select: { id: true },
+    });
+    if (profile) {
+        await tx.classMembership.updateMany({
+            where: { studentProfileId: profile.id, endedAt: null },
+            data: { endedAt: now },
+        });
+
+        const links = await tx.guardianStudent.findMany({
+            where: { studentProfileId: profile.id, status: { in: ['PENDING', 'ACTIVE'] }, endedAt: null },
+            select: { id: true, status: true, guardianMembershipId: true },
+        });
+        for (const link of links) {
+            await tx.guardianStudent.updateMany({
+                where: { id: link.id },
+                data:
+                    link.status === 'ACTIVE'
+                        ? { endedAt: now }
+                        : {
+                            status: 'REJECTED',
+                            approvedByUserId: actorUserId,
+                            rejectionReason: STUDENT_LEFT,
+                            endedAt: now,
+                        },
+            });
+        }
+
+        // Sorted, so two leavers sharing guardians always lock them in one order.
+        const guardians = [...new Set(links.map((link) => link.guardianMembershipId))].sort();
+        for (const guardianMembershipId of guardians) {
+            await releaseOrphanedGuardian(tx, guardianMembershipId, { actorUserId, schoolId, now });
+        }
+    }
+
+    await recordAudit({
+        schoolId,
+        subjectType: MEMBERSHIP_SUBJECT,
+        subjectId: membershipId,
+        action,
+        actorUserId,
+        reason,
+        client: tx,
+    });
+}
+
+// A member leaving on their own. The Principal cannot (owner, 2026-09-24): a
+// school is not left without its Principal, and no second one can exist yet -
+// ticket 11 refuses the last Principal's account deletion for the same reason.
+async function leaveSchool(auth) {
+    const membership = await prisma.schoolMembership.findFirst({
+        where: { id: auth.membershipId, status: 'ACTIVE' },
+        select: { id: true, roles: { where: { status: 'ACTIVE' }, select: { role: true } } },
+    });
+    if (!membership) throw notFound('Membership not found');
+    if (membership.roles.some((role) => role.role === 'PRINCIPAL')) {
+        throw conflict('A school cannot be left without its Principal');
+    }
+
+    await prisma.$transaction(async (tx) => {
+        await assertNoActiveHomeroom(tx, membership.id, 'You are');
+        await endMembership(tx, {
+            membershipId: membership.id,
+            schoolId: auth.schoolId,
+            action: 'LEAVE',
+            actorUserId: auth.userId,
+        });
+    });
+
+    log.info(`A member left ${auth.schoolName}`);
+    return { id: membership.id, status: 'LEFT' };
+}
+
+// Taking somebody out (handoff #58). The Principal may remove any member but a
+// Principal; a homeroom teacher, only a student placed in one of their classes.
+// Everyone else - and anyone at another school - gets the same 404. The reason
+// is required and shown to the person removed (owner, 2026-09-24).
+async function removeMember(auth, membershipId, { reason }) {
+    const member = await prisma.schoolMembership.findFirst({
+        where: { id: membershipId, status: 'ACTIVE' },
+        select: {
+            id: true,
+            roles: { where: { status: 'ACTIVE' }, select: { role: true } },
+            studentProfile: { select: { id: true } },
+        },
+    });
+    if (!member || member.id === auth.membershipId) throw notFound('Member not found');
+
+    const roles = member.roles.map((role) => role.role);
+    if (await isPrincipal(auth.membershipId)) {
+        if (roles.includes('PRINCIPAL')) throw conflict('A Principal cannot be removed');
+    } else {
+        const ownStudent =
+            roles.includes('STUDENT') &&
+            member.studentProfile &&
+            (await isHomeroomOfStudent(auth.membershipId, member.studentProfile.id));
+        if (!ownStudent) throw notFound('Member not found');
+    }
+
+    await prisma.$transaction(async (tx) => {
+        await assertNoActiveHomeroom(tx, member.id, 'This member is');
+        await endMembership(tx, {
+            membershipId: member.id,
+            schoolId: auth.schoolId,
+            action: 'REMOVE',
+            actorUserId: auth.userId,
+            reason,
+        });
+    });
+
+    log.info(`A member was removed from ${auth.schoolName}`);
+    return { id: member.id, status: 'LEFT', endReason: reason };
+}
+
+// The Principal's list of the school's people. LEFT is here on purpose: a
+// departed student's records stay with the school, and this is where the school
+// still finds them (ticket 06's Done-when).
+async function listMembers(auth, { status, role }) {
+    if (!(await isPrincipal(auth.membershipId))) throw forbidden('Only the Principal can do this');
+
+    const members = await prisma.schoolMembership.findMany({
+        where: {
+            status,
+            ...(role ? { roles: { some: { role, status: 'ACTIVE' } } } : {}),
+        },
+        select: {
+            id: true,
+            status: true,
+            approvedAt: true,
+            endedAt: true,
+            endReason: true,
+            user: { select: { fullName: true } },
+            roles: { where: { status: 'ACTIVE' }, select: { role: true }, orderBy: { role: 'asc' } },
+            studentProfile: { select: { nisn: true } },
+            teacherProfile: { select: { nip: true, nuptk: true } },
+        },
+        orderBy: { user: { fullName: 'asc' } },
+    });
+
+    return members.map((member) => ({
+        membershipId: member.id,
+        status: member.status,
+        fullName: member.user.fullName,
+        roles: member.roles.map((entry) => entry.role),
+        nisn: member.studentProfile?.nisn ?? null,
+        nip: member.teacherProfile?.nip ?? null,
+        nuptk: member.teacherProfile?.nuptk ?? null,
+        joinedAt: member.approvedAt,
+        endedAt: member.endedAt,
+        endReason: member.endReason,
+    }));
+}
+
+// ---------------------------------------------------------------------------
 // Reviewer
 // ---------------------------------------------------------------------------
 
@@ -1345,6 +1645,10 @@ export {
     cancelJoinRequest,
     cancelRole,
     cancelLink,
+    endMembership,
+    leaveSchool,
+    removeMember,
+    listMembers,
     listRequests,
     getRequest,
     approveRequest,

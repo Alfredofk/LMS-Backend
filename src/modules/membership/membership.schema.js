@@ -145,6 +145,18 @@ const roleParams = z.object({ role: z.enum(ADDABLE_ROLES) });
 
 const linkParams = z.object({ linkId: z.string().min(1) });
 
+// A removal is always explained (owner, 2026-09-24): the person removed reads the
+// reason on /users/me, so it has to say something.
+const removeBody = z.strictObject({
+    reason: z.string().trim().min(3, 'A reason is required').max(500, 'Reason is too long'),
+});
+
+// The Principal's member list: the people here now, or the people who were.
+const membersQuery = z.object({
+    status: z.enum(['ACTIVE', 'LEFT']).default('ACTIVE'),
+    role: z.enum(['PRINCIPAL', 'TEACHER', 'STUDENT', 'GUARDIAN']).optional(),
+});
+
 const listQuery = z.object({
     status: z.enum(['PENDING', 'ACTIVE', 'REJECTED']).default('PENDING'),
 });
@@ -176,6 +188,8 @@ export {
     idParams,
     roleParams,
     linkParams,
+    removeBody,
+    membersQuery,
     listQuery,
     approveBody,
     rejectBody,

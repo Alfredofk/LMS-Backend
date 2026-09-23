@@ -12,14 +12,17 @@ import {
     idParams,
     roleParams,
     linkParams,
+    removeBody,
+    membersQuery,
     listQuery,
     approveBody,
     rejectBody,
     bulkApproveBody,
 } from './membership.schema.js';
 
-// Two routers, because two different people use them - and, unlike ticket 04's
-// pair, because they need opposite middleware.
+// Two routers here, because two different people use them - and, unlike ticket
+// 04's pair, because they need opposite middleware. (A third, for removing
+// members, sits at the bottom of the file.)
 //
 // The applicant's, mounted at /api/memberships. Its callers hold NO membership
 // (that is the point), so requireActiveMembership must never touch it.
@@ -75,6 +78,7 @@ router.post(
     validate({ params: linkParams }),
     controller.cancelLink
 );
+router.post('/me/leave', requireActiveMembership, controller.leave);
 
 const reviewRouter = Router();
 
@@ -95,5 +99,26 @@ reviewRouter.post(
     controller.reject
 );
 
+// A third router, mounted at /api/members: the school's people, for the ones who
+// may take somebody out (ticket 06). Listing is the Principal's alone; removal is
+// the Principal's for anyone but a Principal, and a homeroom teacher's for a
+// student in their own class - decided in the service, since homeroom teaching is
+// a property of a class, not a role.
+const membersRouter = Router();
+
+membersRouter.use(requireAuth, requireActiveMembership, requireRole('PRINCIPAL', 'TEACHER'));
+
+membersRouter.get(
+    '/',
+    requireRole('PRINCIPAL'),
+    validate({ query: membersQuery }),
+    controller.listMembers
+);
+membersRouter.post(
+    '/:id/remove',
+    validate({ params: idParams, body: removeBody }),
+    controller.removeMember
+);
+
 export default router;
-export { reviewRouter };
+export { reviewRouter, membersRouter };

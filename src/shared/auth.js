@@ -4,6 +4,7 @@ import bcrypt from 'bcrypt';
 
 import { unauthorized, forbidden } from './errors.js';
 import { runInSchool } from './tenantContext.js';
+import { prisma } from './prisma.js';
 
 // Authorization here is resource-scoped, not role-string-based.
 //
@@ -128,12 +129,33 @@ function requireRole(...allowed) {
     };
 }
 
-function requireActiveMembership(req, _res, next) {
+// The token names a membership; the database says whether it still stands.
+//
+// An access token lives up to 15 minutes, and it would go on naming a school its
+// holder has left, been removed from, or seen deactivated (owner, 2026-09-24:
+// access ends at once, not when the token lapses). So after the cheap token check
+// this reads the membership - the same conditions buildAuthClaims() issues claims
+// on - inside the scope requireAuth opened. One indexed lookup per request.
+async function requireActiveMembership(req, _res, next) {
     if (!req.auth) return next(unauthorized());
-    if (!req.auth.membershipId || !req.auth.schoolId) {
-        return next(forbidden('You are not an active member of any school'));
+
+    const refused = forbidden('You are not an active member of any school');
+    if (!req.auth.membershipId || !req.auth.schoolId) return next(refused);
+
+    try {
+        const standing = await prisma.schoolMembership.findFirst({
+            where: {
+                id: req.auth.membershipId,
+                status: 'ACTIVE',
+                endedAt: null,
+                school: { deactivatedAt: null },
+            },
+            select: { id: true },
+        });
+        return standing ? next() : next(refused);
+    } catch (error) {
+        return next(error);
     }
-    return next();
 }
 
 export {

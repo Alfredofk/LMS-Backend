@@ -28,6 +28,8 @@ const membershipSelect = {
     status: true,
     requestedAt: true,
     approvedAt: true,
+    endedAt: true,
+    endReason: true,
     school: {
         select: {
             id: true,
@@ -89,13 +91,14 @@ async function loadMembership(userId) {
 
         // A rejected applicant has no pending or active row, and ticket 05 requires
         // the reason they were turned down to be visible to them. So when there is
-        // nothing live, the most recent REJECTED - or CANCELLED, their own withdrawal
-        // - row is shown instead. The status field is what tells them apart, and
-        // neither grants anything anywhere (buildAuthClaims only reads ACTIVE).
+        // nothing live, the most recent REJECTED, CANCELLED (their own withdrawal)
+        // or LEFT (ticket 06 - with endReason when they were removed) row is shown
+        // instead. The status field is what tells them apart, and none of them
+        // grants anything anywhere (buildAuthClaims only reads ACTIVE).
         const decided =
             membership ??
             (await prisma.schoolMembership.findFirst({
-                where: { userId, status: { in: ['REJECTED', 'CANCELLED'] } },
+                where: { userId, status: { in: ['REJECTED', 'CANCELLED', 'LEFT'] } },
                 orderBy: { updatedAt: 'desc' },
                 select: membershipSelect,
             }));
@@ -107,6 +110,8 @@ async function loadMembership(userId) {
             status: decided.status,
             requestedAt: decided.requestedAt,
             approvedAt: decided.approvedAt,
+            endedAt: decided.endedAt,
+            endReason: decided.endReason,
             school: schoolForMember(decided.school, decided.roles),
             roles: decided.roles,
             teacher: decided.teacherProfile,
