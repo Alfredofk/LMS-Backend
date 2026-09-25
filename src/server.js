@@ -16,6 +16,7 @@ import schoolRegistrationRoutes, {
 import membershipRoutes, {
     reviewRouter as membershipReviewRoutes,
     membersRouter as memberRoutes,
+    leaveRequestRouter as leaveRequestRoutes,
 } from './modules/membership/membership.routes.js';
 import academicsRoutes from './modules/academics/academics.routes.js';
 import { generalLimiter } from './shared/rateLimit.js';
@@ -78,6 +79,7 @@ app.use('/api/school', schoolRoutes);
 app.use('/api/memberships', membershipRoutes);
 app.use('/api/membership-requests', membershipReviewRoutes);
 app.use('/api/members', memberRoutes);
+app.use('/api/leave-requests', leaveRequestRoutes);
 app.use('/api/academics', academicsRoutes);
 
 // Catch 404

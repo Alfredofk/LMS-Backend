@@ -1,7 +1,9 @@
 import { prisma } from '../../shared/prisma.js';
 import { runInSchool, runUnscoped } from '../../shared/tenantContext.js';
 import { isValidGrade } from '../../shared/schoolType.js';
-import { isPrincipal, isHomeroomOfStudent } from '../../shared/guards.js';
+import { isPrincipal } from '../../shared/guards.js';
+import { getStorage } from '../../shared/storage.js';
+import { MIME } from '../../shared/upload.js';
 import {
     assertRoleCombinationAllowed,
     assertMembershipRetryAllowed,
@@ -16,6 +18,7 @@ const log = createLogger('Membership');
 const MEMBERSHIP_SUBJECT = 'SchoolMembership';
 const ROLE_SUBJECT = 'MembershipRole';
 const LINK_SUBJECT = 'GuardianStudent';
+const LEAVE_SUBJECT = 'LeaveRequest';
 
 // A role or a guardian link in one of these states is closed, and asking again
 // moves the same row back to PENDING: both tables are unique on what was asked
@@ -1034,12 +1037,61 @@ async function endMembership(
         data: { ...closed, endedAt: now },
     });
 
+    // Their teaching (ticket 08, owner 2026-09-24): a request still waiting closes
+    // like any other; an ACTIVE assignment ends, so its slot is free for another
+    // teacher - the slot index ignores ended rows - and the row stays as history.
+    await tx.classSubject.updateMany({
+        where: { teacherMembershipId: membershipId, status: 'PENDING' },
+        data:
+            action === 'REMOVE'
+                ? {
+                    status: 'REJECTED',
+                    decidedByUserId: actorUserId,
+                    decidedAt: now,
+                    rejectionReason: reason,
+                }
+                : { status: 'CANCELLED' },
+    });
+    await tx.classSubject.updateMany({
+        where: { teacherMembershipId: membershipId, status: 'ACTIVE', endedAt: null },
+        data: { endedAt: now },
+    });
+
+    // Their own leave request (ticket 17). The approval path claims it before
+    // calling here, so one still PENDING means the membership is ending some other
+    // way - a removal that raced the request.
+    await tx.leaveRequest.updateMany({
+        where: { membershipId, status: 'PENDING' },
+        data:
+            action === 'REMOVE'
+                ? {
+                    status: 'REJECTED',
+                    decidedByUserId: actorUserId,
+                    decidedAt: now,
+                    rejectionReason: reason,
+                }
+                : { status: 'CANCELLED' },
+    });
+
     // A student: the placement ends, and so does every guardian's sight of them.
     const profile = await tx.studentProfile.findFirst({
         where: { membershipId },
         select: { id: true },
     });
     if (profile) {
+        // A class move still waiting has no student left to move (ticket 16).
+        // Closed before the placement, the order decideClassMove takes its rows
+        // in, so the two never wait on each other.
+        await tx.classMove.updateMany({
+            where: { studentProfileId: profile.id, status: 'PENDING' },
+            data: {
+                status: 'REJECTED',
+                decidedByUserId: actorUserId,
+                decidedAt: now,
+                rejectionReason: STUDENT_LEFT,
+            },
+        });
+
         await tx.classMembership.updateMany({
             where: { studentProfileId: profile.id, endedAt: null },
             data: { endedAt: now },
@@ -1082,10 +1134,20 @@ async function endMembership(
     });
 }
 
-// A member leaving on their own. The Principal cannot (owner, 2026-09-24): a
-// school is not left without its Principal, and no second one can exist yet -
-// ticket 11 refuses the last Principal's account deletion for the same reason.
-async function leaveSchool(auth) {
+// Leaving as a TEACHER or a STUDENT needs the Principal's approval and a
+// resignation letter (owner, 2026-09-24, ticket 17): a school keeps that letter
+// on file. Holding either role is enough - a teacher who is also a guardian asks
+// too. A member holding neither, a guardian, still leaves at once.
+const NEEDS_LEAVE_APPROVAL = ['TEACHER', 'STUDENT'];
+
+const needsLeaveApproval = (roles) =>
+    roles.some((role) => NEEDS_LEAVE_APPROVAL.includes(role.role));
+
+// The caller's own ACTIVE membership, for leaving or asking to. The Principal
+// cannot do either (owner, 2026-09-24): a school is not left without its
+// Principal, and no second one can exist yet - ticket 11 refuses the last
+// Principal's account deletion for the same reason.
+async function loadLeaver(auth) {
     const membership = await prisma.schoolMembership.findFirst({
         where: { id: auth.membershipId, status: 'ACTIVE' },
         select: { id: true, roles: { where: { status: 'ACTIVE' }, select: { role: true } } },
@@ -1093,6 +1155,18 @@ async function leaveSchool(auth) {
     if (!membership) throw notFound('Membership not found');
     if (membership.roles.some((role) => role.role === 'PRINCIPAL')) {
         throw conflict('A school cannot be left without its Principal');
+    }
+    return membership;
+}
+
+// A member leaving on their own - only one who needs nobody's approval.
+async function leaveSchool(auth) {
+    const membership = await loadLeaver(auth);
+    if (needsLeaveApproval(membership.roles)) {
+        throw conflict(
+            'A teacher or a student leaves with the Principal’s approval. Send a leave ' +
+                'request with your resignation letter instead.'
+        );
     }
 
     await prisma.$transaction(async (tx) => {
@@ -1109,30 +1183,34 @@ async function leaveSchool(auth) {
     return { id: membership.id, status: 'LEFT' };
 }
 
-// Taking somebody out (handoff #58). The Principal may remove any member but a
-// Principal; a homeroom teacher, only a student placed in one of their classes.
-// Everyone else - and anyone at another school - gets the same 404. The reason
-// is required and shown to the person removed (owner, 2026-09-24).
+// Taking somebody out of the school (handoff #58). The Principal's alone (owner,
+// 2026-09-24): a homeroom teacher who released a student into the wrong class
+// moves them instead (ticket 16), and only the Principal decides that someone
+// does not belong here at all. Any member but a Principal; an id that is not an
+// ACTIVE member here gets 404. The reason is required and shown to the person
+// removed.
+//
+// A member whose leave request is waiting is refused: approving that request is
+// the same ending, with their own letter on file.
 async function removeMember(auth, membershipId, { reason }) {
+    if (!(await isPrincipal(auth.membershipId))) throw forbidden('Only the Principal can do this');
+
     const member = await prisma.schoolMembership.findFirst({
         where: { id: membershipId, status: 'ACTIVE' },
         select: {
             id: true,
             roles: { where: { status: 'ACTIVE' }, select: { role: true } },
-            studentProfile: { select: { id: true } },
+            leaveRequests: { where: { status: 'PENDING' }, select: { id: true } },
         },
     });
     if (!member || member.id === auth.membershipId) throw notFound('Member not found');
-
-    const roles = member.roles.map((role) => role.role);
-    if (await isPrincipal(auth.membershipId)) {
-        if (roles.includes('PRINCIPAL')) throw conflict('A Principal cannot be removed');
-    } else {
-        const ownStudent =
-            roles.includes('STUDENT') &&
-            member.studentProfile &&
-            (await isHomeroomOfStudent(auth.membershipId, member.studentProfile.id));
-        if (!ownStudent) throw notFound('Member not found');
+    if (member.roles.some((role) => role.role === 'PRINCIPAL')) {
+        throw conflict('A Principal cannot be removed');
+    }
+    if (member.leaveRequests.length > 0) {
+        throw conflict('This member has a leave request waiting. Decide that request instead.', {
+            leaveRequestId: member.leaveRequests[0].id,
+        });
     }
 
     await prisma.$transaction(async (tx) => {
@@ -1149,6 +1227,285 @@ async function removeMember(auth, membershipId, { reason }) {
     log.info(`A member was removed from ${auth.schoolName}`);
     return { id: member.id, status: 'LEFT', endReason: reason };
 }
+
+// ---------------------------------------------------------------------------
+// Leave requests - a teacher or a student asking the Principal (ticket 17)
+// ---------------------------------------------------------------------------
+
+const LETTER_FOLDER = 'leave-letters';
+
+// Nothing about the member themselves: they know who they are.
+const ownLeaveView = (request) => ({
+    id: request.id,
+    status: request.status,
+    reason: request.reason,
+    requestedAt: request.requestedAt,
+    decidedAt: request.decidedAt,
+    rejectionReason: request.rejectionReason,
+});
+
+// The Principal's view: who is asking, as what, and where a student sits - what
+// the letter in hand is checked against. The storage path never leaves the server.
+const leaveSelect = {
+    id: true,
+    status: true,
+    reason: true,
+    requestedAt: true,
+    decidedAt: true,
+    rejectionReason: true,
+    membership: {
+        select: {
+            id: true,
+            status: true,
+            user: { select: { fullName: true, email: true } },
+            roles: { where: { status: 'ACTIVE' }, select: { role: true }, orderBy: { role: 'asc' } },
+            studentProfile: {
+                select: {
+                    nisn: true,
+                    classMemberships: {
+                        where: { endedAt: null },
+                        select: { class: { select: { id: true, name: true } } },
+                    },
+                },
+            },
+            teacherProfile: { select: { nip: true, nuptk: true } },
+        },
+    },
+};
+
+const leaveView = (request) => ({
+    ...ownLeaveView(request),
+    member: {
+        membershipId: request.membership.id,
+        status: request.membership.status,
+        fullName: request.membership.user.fullName,
+        email: request.membership.user.email,
+        roles: request.membership.roles.map((entry) => entry.role),
+        nisn: request.membership.studentProfile?.nisn ?? null,
+        currentClass: request.membership.studentProfile?.classMemberships[0]?.class ?? null,
+        nip: request.membership.teacherProfile?.nip ?? null,
+        nuptk: request.membership.teacherProfile?.nuptk ?? null,
+    },
+});
+
+async function loadLeaveRequest(id) {
+    const request = await prisma.leaveRequest.findFirst({ where: { id }, select: leaveSelect });
+    if (!request) throw notFound('Leave request not found');
+    return request;
+}
+
+// The letter's bytes and type, read from the key's extension the way readKtp
+// does - the key was built from the detected type, never from the upload's name.
+async function readLetter(key) {
+    const buffer = await getStorage().read(key);
+    const type = key.slice(key.lastIndexOf('.') + 1);
+    return { buffer, contentType: MIME[type] };
+}
+
+// The request itself, with its letter. Everything that can refuse is checked
+// before the file is written, so a refusal leaves nothing in storage; a failure
+// after it removes the file again, as submitRegistration does for a KTP.
+//
+// The homeroom rule is checked here and again at approval: asking is pointless
+// while the class has nobody else to hand it to, and the Principal may hand it
+// on in between.
+async function submitLeaveRequest(auth, { reason }, file) {
+    const membership = await loadLeaver(auth);
+    if (!needsLeaveApproval(membership.roles)) {
+        throw conflict('You need nobody’s approval to leave. Leave the school directly instead.');
+    }
+    await assertNoActiveHomeroom(prisma, membership.id, 'You are');
+
+    const waiting = await prisma.leaveRequest.findFirst({
+        where: { membershipId: membership.id, status: 'PENDING' },
+        select: { id: true },
+    });
+    if (waiting) throw conflict('Your leave request is already waiting for the Principal');
+
+    const storage = getStorage();
+    const key = await storage.save(file.buffer, {
+        folder: `${LETTER_FOLDER}/${auth.schoolId}`,
+        originalName: `letter.${file.detectedType}`,
+    });
+
+    try {
+        const created = await prisma.$transaction(async (tx) => {
+            const row = await tx.leaveRequest.create({
+                data: { membershipId: membership.id, reason, letterStoragePath: key },
+                select: { id: true },
+            });
+
+            await recordAudit({
+                schoolId: auth.schoolId,
+                subjectType: LEAVE_SUBJECT,
+                subjectId: row.id,
+                action: 'SUBMIT',
+                actorUserId: auth.userId,
+                client: tx,
+            });
+            return row;
+        });
+
+        log.info(`Leave request sent at ${auth.schoolName}`);
+        return ownLeaveView(await loadLeaveRequest(created.id));
+    } catch (error) {
+        await storage.remove(key).catch((removeError) =>
+            log.error(`Orphaned leave letter left in storage (${key}). Delete it by hand.`, removeError)
+        );
+        // The partial unique index, reached by two requests racing past the check above.
+        if (error?.code === 'P2002') {
+            throw conflict('Your leave request is already waiting for the Principal');
+        }
+        throw error;
+    }
+}
+
+// Every request this member ever sent here, newest first.
+async function listOwnLeaveRequests(auth) {
+    const requests = await prisma.leaveRequest.findMany({
+        where: { membershipId: auth.membershipId },
+        select: leaveSelect,
+        orderBy: { requestedAt: 'desc' },
+    });
+    return requests.map(ownLeaveView);
+}
+
+// Taking a waiting request back, claimed like every cancellation (ticket 05): a
+// Principal deciding at the same moment and the member cancelling cannot both win.
+async function cancelLeaveRequest(auth) {
+    const waiting = await prisma.leaveRequest.findFirst({
+        where: { membershipId: auth.membershipId, status: 'PENDING' },
+        select: { id: true },
+    });
+    if (!waiting) throw notFound('You have no leave request waiting');
+
+    await prisma.$transaction(async (tx) => {
+        const claimed = await tx.leaveRequest.updateMany({
+            where: { id: waiting.id, status: 'PENDING' },
+            data: { status: 'CANCELLED' },
+        });
+        if (claimed.count === 0) throw conflict('Your leave request has already been decided');
+
+        await recordAudit({
+            schoolId: auth.schoolId,
+            subjectType: LEAVE_SUBJECT,
+            subjectId: waiting.id,
+            action: 'CANCEL',
+            actorUserId: auth.userId,
+            client: tx,
+        });
+    });
+
+    log.info(`Leave request cancelled at ${auth.schoolName}`);
+    return ownLeaveView(await loadLeaveRequest(waiting.id));
+}
+
+// A member's own letter, whatever became of the request. Anybody else's is 404.
+async function readOwnLeaveLetter(auth, id) {
+    const request = await prisma.leaveRequest.findFirst({
+        where: { id, membershipId: auth.membershipId },
+        select: { letterStoragePath: true },
+    });
+    if (!request) throw notFound('Leave request not found');
+    return readLetter(request.letterStoragePath);
+}
+
+// ---- the Principal's side ---------------------------------------------------
+
+async function assertPrincipal(auth) {
+    if (!(await isPrincipal(auth.membershipId))) throw forbidden('Only the Principal can do this');
+}
+
+// The queue: PENDING unless asked otherwise, oldest first.
+async function listLeaveRequests(auth, { status }) {
+    await assertPrincipal(auth);
+
+    const requests = await prisma.leaveRequest.findMany({
+        where: { status },
+        select: leaveSelect,
+        orderBy: { requestedAt: 'asc' },
+    });
+    return requests.map(leaveView);
+}
+
+async function getLeaveRequest(auth, id) {
+    await assertPrincipal(auth);
+    return leaveView(await loadLeaveRequest(id));
+}
+
+async function readLeaveLetter(auth, id) {
+    await assertPrincipal(auth);
+    const request = await prisma.leaveRequest.findFirst({
+        where: { id },
+        select: { letterStoragePath: true },
+    });
+    if (!request) throw notFound('Leave request not found');
+    return readLetter(request.letterStoragePath);
+}
+
+// Approve or reject, claimed with updateMany({ status: 'PENDING' }) so it happens
+// once. Approval ends the membership in the same transaction, through the one
+// Leaving function: LEFT with the request's reason as endReason, and everything
+// ticket 06 ends with it. The audit then holds the request's APPROVE and the
+// membership's LEAVE, both with the Principal as actor.
+async function decideLeaveRequest(auth, id, { action, reason }) {
+    await assertPrincipal(auth);
+
+    let trimmed = null;
+    if (action === 'REJECT') {
+        assertRejectionReason('REJECT', reason);
+        trimmed = reason.trim();
+    }
+
+    const request = await loadLeaveRequest(id);
+    const now = new Date();
+
+    await prisma.$transaction(async (tx) => {
+        const claimed = await tx.leaveRequest.updateMany({
+            where: { id, status: 'PENDING' },
+            data:
+                action === 'APPROVE'
+                    ? { status: 'ACTIVE', decidedByUserId: auth.userId, decidedAt: now }
+                    : {
+                        status: 'REJECTED',
+                        decidedByUserId: auth.userId,
+                        decidedAt: now,
+                        rejectionReason: trimmed,
+                    },
+        });
+        if (claimed.count === 0) throw conflict('This leave request has already been decided');
+
+        if (action === 'APPROVE') {
+            await assertNoActiveHomeroom(tx, request.membership.id, 'This member is');
+            await endMembership(tx, {
+                membershipId: request.membership.id,
+                schoolId: auth.schoolId,
+                action: 'LEAVE',
+                actorUserId: auth.userId,
+                reason: request.reason,
+                now,
+            });
+        }
+
+        await recordAudit({
+            schoolId: auth.schoolId,
+            subjectType: LEAVE_SUBJECT,
+            subjectId: id,
+            action,
+            actorUserId: auth.userId,
+            reason: trimmed,
+            client: tx,
+        });
+    });
+
+    log.info(`Leave request ${action === 'APPROVE' ? 'approved' : 'rejected'} at ${auth.schoolName}`);
+    return leaveView(await loadLeaveRequest(id));
+}
+
+const approveLeaveRequest = (auth, id) => decideLeaveRequest(auth, id, { action: 'APPROVE' });
+
+const rejectLeaveRequest = (auth, id, { reason } = {}) =>
+    decideLeaveRequest(auth, id, { action: 'REJECT', reason });
 
 // The Principal's list of the school's people. LEFT is here on purpose: a
 // departed student's records stay with the school, and this is where the school
@@ -1648,6 +2005,15 @@ export {
     endMembership,
     leaveSchool,
     removeMember,
+    submitLeaveRequest,
+    listOwnLeaveRequests,
+    cancelLeaveRequest,
+    readOwnLeaveLetter,
+    listLeaveRequests,
+    getLeaveRequest,
+    readLeaveLetter,
+    approveLeaveRequest,
+    rejectLeaveRequest,
     listMembers,
     listRequests,
     getRequest,

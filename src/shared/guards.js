@@ -41,10 +41,16 @@ async function isHomeroomOf(membershipId, classId) {
     return Boolean(found);
 }
 
-// Assigned teacher of an ACTIVE class subject. PENDING grants nothing.
+// Assigned teacher of an ACTIVE class subject. PENDING grants nothing, and
+// neither does one that ended when its teacher left the school (ticket 08).
 async function isTeacherOfClassSubject(membershipId, classSubjectId) {
     const found = await prisma.classSubject.findFirst({
-        where: { id: classSubjectId, teacherMembershipId: membershipId, status: 'ACTIVE' },
+        where: {
+            id: classSubjectId,
+            teacherMembershipId: membershipId,
+            status: 'ACTIVE',
+            endedAt: null,
+        },
         select: { id: true },
     });
     return Boolean(found);

@@ -80,7 +80,69 @@ async function leave(req, res) {
     });
 }
 
-// ---- Principal and homeroom teacher: the school's people ---------------------
+// A letter is the one response here that is not the JSON envelope, like the KTP
+// in school.controller.js: the file itself, inline for the browser to show, and
+// no-store because it is a signed personal document.
+function sendLetter(res, { buffer, contentType }) {
+    res.set({
+        'Content-Type': contentType,
+        'Content-Disposition': 'inline',
+        'Cache-Control': 'no-store',
+    });
+    return res.send(buffer);
+}
+
+async function submitLeaveRequest(req, res) {
+    const leaveRequest = await service.submitLeaveRequest(req.auth, req.validated.body, req.file);
+    return ok(
+        res,
+        { leaveRequest, message: 'Leave request sent. The Principal has to approve it before you leave.' },
+        201
+    );
+}
+
+async function listOwnLeaveRequests(req, res) {
+    return ok(res, { leaveRequests: await service.listOwnLeaveRequests(req.auth) });
+}
+
+async function cancelLeaveRequest(req, res) {
+    const leaveRequest = await service.cancelLeaveRequest(req.auth);
+    return ok(res, { leaveRequest, message: 'Leave request cancelled.' });
+}
+
+async function ownLeaveLetter(req, res) {
+    return sendLetter(res, await service.readOwnLeaveLetter(req.auth, req.validated.params.id));
+}
+
+// ---- Principal: leave requests -----------------------------------------------
+
+async function listLeaveRequests(req, res) {
+    return ok(res, { leaveRequests: await service.listLeaveRequests(req.auth, req.validated.query) });
+}
+
+async function getLeaveRequest(req, res) {
+    return ok(res, { leaveRequest: await service.getLeaveRequest(req.auth, req.validated.params.id) });
+}
+
+async function leaveLetter(req, res) {
+    return sendLetter(res, await service.readLeaveLetter(req.auth, req.validated.params.id));
+}
+
+async function approveLeaveRequest(req, res) {
+    const leaveRequest = await service.approveLeaveRequest(req.auth, req.validated.params.id);
+    return ok(res, { leaveRequest, message: 'Approved. The member has left the school.' });
+}
+
+async function rejectLeaveRequest(req, res) {
+    const leaveRequest = await service.rejectLeaveRequest(
+        req.auth,
+        req.validated.params.id,
+        req.validated.body
+    );
+    return ok(res, { leaveRequest, message: 'Rejected.' });
+}
+
+// ---- Principal: the school's people ------------------------------------------
 
 async function listMembers(req, res) {
     return ok(res, { members: await service.listMembers(req.auth, req.validated.query) });
@@ -141,6 +203,15 @@ export {
     linkChild,
     cancelLink,
     leave,
+    submitLeaveRequest,
+    listOwnLeaveRequests,
+    cancelLeaveRequest,
+    ownLeaveLetter,
+    listLeaveRequests,
+    getLeaveRequest,
+    leaveLetter,
+    approveLeaveRequest,
+    rejectLeaveRequest,
     listMembers,
     removeMember,
     list,

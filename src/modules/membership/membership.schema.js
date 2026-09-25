@@ -151,6 +151,19 @@ const removeBody = z.strictObject({
     reason: z.string().trim().min(3, 'A reason is required').max(500, 'Reason is too long'),
 });
 
+// A leave request (ticket 17) arrives as multipart/form-data, the letter beside
+// this one text field, so it is an object rather than strictObject: multer puts
+// only fields on req.body, and a stray one is harmless here. The reason becomes
+// the membership's endReason once the Principal approves.
+const leaveRequestBody = z.object({
+    reason: z.string().trim().min(3, 'A reason is required').max(500, 'Reason is too long'),
+});
+
+// The Principal's queue of them.
+const leaveListQuery = z.object({
+    status: z.enum(['PENDING', 'ACTIVE', 'REJECTED', 'CANCELLED']).default('PENDING'),
+});
+
 // The Principal's member list: the people here now, or the people who were.
 const membersQuery = z.object({
     status: z.enum(['ACTIVE', 'LEFT']).default('ACTIVE'),
@@ -189,6 +202,8 @@ export {
     roleParams,
     linkParams,
     removeBody,
+    leaveRequestBody,
+    leaveListQuery,
     membersQuery,
     listQuery,
     approveBody,

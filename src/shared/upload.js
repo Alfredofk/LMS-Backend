@@ -10,12 +10,15 @@ import { badRequest } from './errors.js';
 // Content-Type header. Both of those are whatever the client says they are, and
 // "ktp.png" can hold anything.
 
+// "%PDF-" opens every PDF (ticket 17: a resignation letter is often a scan saved
+// as one).
 const SIGNATURES = {
     jpg: [0xff, 0xd8, 0xff],
     png: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+    pdf: [0x25, 0x50, 0x44, 0x46, 0x2d],
 };
 
-const MIME = { jpg: 'image/jpeg', png: 'image/png' };
+const MIME = { jpg: 'image/jpeg', png: 'image/png', pdf: 'application/pdf' };
 
 function detectType(buffer) {
     for (const [type, bytes] of Object.entries(SIGNATURES)) {
@@ -28,7 +31,7 @@ function detectType(buffer) {
 
 // One required file under `field`, at most `maxBytes`, of one of `types`.
 //
-// On success req.file carries `detectedType` ('jpg' | 'png'). Multer's own
+// On success req.file carries `detectedType` ('jpg' | 'png' | 'pdf'). Multer's own
 // errors - too large, too many files, an unexpected field - become a 400 in the
 // usual envelope instead of falling through to the 500 handler.
 function singleFile(field, { maxBytes, types }) {
