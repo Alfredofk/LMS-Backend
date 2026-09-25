@@ -11,9 +11,9 @@
 // will make the tenant extension throw on first use, which is the intended
 // failure mode.
 //
-// Three uniqueness rules cannot be expressed in this DSL because they are
+// Several uniqueness rules cannot be expressed in this DSL because they are
 // partial (filtered) indexes. They live in hand-written migration SQL - see
-// prisma/migrations/*/partial_indexes.sql. Do not "fix" their absence here with
+// prisma/partial-indexes.sql. Do not "fix" their absence here with
 // plain @@unique: rejected and departed rows must be free to repeat.
 
 generator client {
@@ -277,6 +277,8 @@ model School {
     classes        Class[]
     classMemberships ClassMembership[]
     classSubjects  ClassSubject[]
+    classMoves       ClassMove[]
+    leaveRequests    LeaveRequest[]
     notifications  Notification[]
     approvalAudits ApprovalAudit[]
 
@@ -300,8 +302,9 @@ model SchoolMembership {
     requestedAt DateTime         @default(now())
     approvedAt  DateTime?
     endedAt     DateTime?
-    /// Why a LEFT membership ended: a removal's reason, or the automatic one when a
-    /// guardian's last linked student leaves (ticket 06). Null for a plain leave.
+    /// Why a LEFT membership ended: a removal's reason, the reason an approved
+    /// LeaveRequest gave (ticket 17), or the automatic one when a guardian's last
+    /// linked student leaves (ticket 06). Null for a guardian's plain leave.
     endReason   String?
     createdAt   DateTime         @default(now())
     updatedAt   DateTime         @updatedAt
@@ -315,6 +318,7 @@ model SchoolMembership {
     guardianLinks   GuardianStudent[] @relation("GuardianMembership")
     homeroomClasses Class[]           @relation("HomeroomTeacher")
     taughtSubjects  ClassSubject[]    @relation("AssignedTeacher")
+    leaveRequests   LeaveRequest[]
     notifications   Notification[]
 
     // No @@unique([schoolId, userId]). Dropped on 2026-09-20 (owner), because a
@@ -368,6 +372,7 @@ model StudentProfile {
     school           School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
     membership       SchoolMembership  @relation(fields: [membershipId], references: [id], onDelete: Cascade)
     classMemberships ClassMembership[]
+    classMoves       ClassMove[]
     guardianLinks    GuardianStudent[]
 
     @@unique([schoolId, nisn])
@@ -536,6 +541,8 @@ model Class {
     homeroomTeacher SchoolMembership? @relation("HomeroomTeacher", fields: [homeroomTeacherMembershipId], references: [id])
     memberships     ClassMembership[]
     classSubjects   ClassSubject[]
+    movesOut        ClassMove[]       @relation("ClassMoveFrom")
+    movesIn         ClassMove[]       @relation("ClassMoveTo")
 
     @@unique([schoolId, academicYearId, name])
     @@index([schoolId, gradeLevel])
@@ -586,6 +593,9 @@ model ClassSubject {
     rejectionReason     String?
     /// True when a principal created this after the registration deadline.
     createdViaOverride  Boolean        @default(false)
+    /// Set when the teacher leaves the school (ticket 08): the row stays as history,
+    /// and the partial unique index frees the slot for someone else.
+    endedAt             DateTime?
     createdAt           DateTime       @default(now())
     updatedAt           DateTime       @updatedAt
 
@@ -598,6 +608,74 @@ model ClassSubject {
     @@index([schoolId, status])
     @@index([teacherMembershipId, status])
     @@index([classId, semesterId])
+}
+
+/// A student moved from one class to another inside the school (ticket 16). The
+/// membership stays ACTIVE throughout; only the placement changes.
+///
+/// Asked for by the homeroom teacher of the class the student sits in, and
+/// decided by the homeroom teacher of the class they would move to (owner,
+/// 2026-09-24) - the Principal takes no part. Both classes are in the same ACTIVE
+/// academic year; the grade may differ. ACTIVE means the move happened: the old
+/// ClassMembership got endedAt and a new one opened in toClass.
+///
+/// At most one PENDING move per student - a partial unique index in migration SQL.
+model ClassMove {
+    id                String         @id @default(cuid())
+    schoolId          String
+    studentProfileId  String
+    fromClassId       String
+    toClassId         String
+    requestedByUserId String
+    /// Why, as the origin homeroom teacher put it. Optional.
+    reason            String?
+    status            ApprovalStatus @default(PENDING)
+    requestedAt       DateTime       @default(now())
+    decidedByUserId   String?
+    decidedAt         DateTime?
+    rejectionReason   String?
+    createdAt         DateTime       @default(now())
+    updatedAt         DateTime       @updatedAt
+
+    school         School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    studentProfile StudentProfile @relation(fields: [studentProfileId], references: [id], onDelete: Cascade)
+    fromClass      Class          @relation("ClassMoveFrom", fields: [fromClassId], references: [id], onDelete: Cascade)
+    toClass        Class          @relation("ClassMoveTo", fields: [toClassId], references: [id], onDelete: Cascade)
+
+    @@index([schoolId, status])
+    @@index([fromClassId, status])
+    @@index([toClassId, status])
+    @@index([studentProfileId])
+}
+
+/// A Teacher's or a Student's request to leave the school (ticket 17). Leaving is
+/// not theirs alone to do: a school needs a resignation letter on file (owner,
+/// 2026-09-24), so the letter is uploaded with the request and the Principal
+/// decides. ACTIVE means approved - endMembership() ran in the same transaction.
+/// A member holding neither role (a guardian) still leaves at once.
+///
+/// The letter is the school's record, so unlike a KTP it is kept after the
+/// decision. At most one PENDING request per membership - a partial unique index
+/// in migration SQL.
+model LeaveRequest {
+    id                String         @id @default(cuid())
+    schoolId          String
+    membershipId      String
+    reason            String
+    letterStoragePath String
+    status            ApprovalStatus @default(PENDING)
+    requestedAt       DateTime       @default(now())
+    decidedByUserId   String?
+    decidedAt         DateTime?
+    rejectionReason   String?
+    createdAt         DateTime       @default(now())
+    updatedAt         DateTime       @updatedAt
+
+    school     School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    membership SchoolMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+    @@index([schoolId, status])
+    @@index([membershipId])
 }
 
 // ---------------------------------------------------------------------------
