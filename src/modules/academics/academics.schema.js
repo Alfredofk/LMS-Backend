@@ -63,6 +63,60 @@ const classListQuery = z.object({
 
 const idParams = z.object({ id });
 
+// ---- ticket 16: moving a student to another class -----------------------------
+
+// The student is named by studentProfileId, as the class roster lists them. The
+// reason is optional: the receiving homeroom teacher reads it before deciding.
+const classMoveBody = z.strictObject({
+    studentProfileId: id,
+    toClassId: id,
+    reason: z.string().trim().min(3, 'Say a little more').max(500, 'Reason is too long').optional(),
+});
+
+const classMoveListQuery = z.object({
+    status: z.enum(['PENDING', 'ACTIVE', 'REJECTED', 'CANCELLED']).optional(),
+});
+
+// ---- ticket 08: subjects and teaching assignments ---------------------------
+
+// A local subject (muatan lokal). The code is folded to upper case, as the
+// national catalog's are, and may repeat a national code (partial-indexes.sql).
+const subjectBody = z.strictObject({
+    code: z
+        .string()
+        .trim()
+        .toUpperCase()
+        .regex(/^[A-Z0-9]{2,10}$/, 'Use 2 to 10 letters or digits, as in MULOK1'),
+    name: z.string().trim().min(2, 'Name the subject').max(100),
+});
+
+const slot = {
+    classId: id,
+    subjectId: id,
+    semesterId: id,
+};
+
+// A teacher taking a subject on for themselves: the caller is the teacher.
+const classSubjectBody = z.strictObject(slot);
+
+// The Principal's path past the deadline, naming the teacher.
+const overrideBody = z.strictObject({ ...slot, teacherMembershipId: id });
+
+// No default: the Principal's queue reads PENDING when nothing is asked for,
+// while a teacher's own list shows everything they ever asked for.
+const classSubjectListQuery = z.object({
+    status: z.enum(['PENDING', 'ACTIVE', 'REJECTED', 'CANCELLED']).optional(),
+});
+
+// Left loose on purpose: approval.js owns the "at least 3 characters" rule.
+const rejectBody = z.object({
+    reason: z.string().max(500, 'Reason is too long').optional(),
+});
+
+const bulkApproveBody = z.strictObject({
+    ids: z.array(id).min(1, 'Pick at least one request').max(100),
+});
+
 export {
     academicYearBody,
     semesterBody,
@@ -70,4 +124,12 @@ export {
     homeroomBody,
     classListQuery,
     idParams,
+    classMoveBody,
+    classMoveListQuery,
+    subjectBody,
+    classSubjectBody,
+    overrideBody,
+    classSubjectListQuery,
+    rejectBody,
+    bulkApproveBody,
 };
