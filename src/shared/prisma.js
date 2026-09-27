@@ -12,7 +12,8 @@ import { getSchoolId, isUnscoped } from './tenantContext.js';
 // school throws rather than returning every school's rows.
 
 // Identity lives above tenancy, and these three define or predate the tenant, so
-// none of them can be filtered by it.
+// none of them can be filtered by it. NationalHoliday is the government's calendar,
+// the same for every school (teaching-and-learning ticket 08).
 const UNSCOPED_MODELS = new Set([
     'User',
     'EmailVerificationToken',
@@ -21,6 +22,7 @@ const UNSCOPED_MODELS = new Set([
     'PlatformAdmin',
     'SchoolRegistration',
     'School',
+    'NationalHoliday',
 ]);
 
 // Subject is nullable-tenant: rows with schoolId = null are the national catalog

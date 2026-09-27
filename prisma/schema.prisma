@@ -125,6 +125,10 @@ enum ApprovalAction {
     UPDATE_LOCATION
     /// The Principal changing the school's time zone (teaching-and-learning 07).
     UPDATE_TIME_ZONE
+    /// A holiday taken back - a national one by an admin, a school one by its Principal.
+    WITHDRAW
+    /// The Principal switching whether the school observes joint leave.
+    UPDATE_JOINT_LEAVE
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +220,99 @@ model PlatformAdmin {
     user              User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
     reviewedRequests  SchoolRegistration[] @relation("RegistrationReviewer")
     deactivatedSchools School[]            @relation("SchoolDeactivatedBy")
+    confirmedHolidays NationalHoliday[]
+}
+
+// ---------------------------------------------------------------------------
+// Holidays - no Session is generated on one (teaching-and-learning ticket 08)
+// ---------------------------------------------------------------------------
+
+enum HolidayKind {
+    /// Libur nasional: every school is off.
+    NATIONAL
+    /// Cuti bersama: meant for civil servants; a school is off only if it observes it.
+    JOINT_LEAVE
+}
+
+enum HolidayStatus {
+    /// Fetched from a community source and not yet checked against the SKB 3 Menteri.
+    /// Counts for nothing.
+    DRAFT
+    CONFIRMED
+    /// Taken back. Kept, never deleted; counts for nothing.
+    WITHDRAWN
+}
+
+/// The government's national holidays and joint leave (SKB 3 Menteri, each year),
+/// kept by the Platform Admin. Belongs to no school - listed in UNSCOPED_MODELS.
+///
+/// There is no official API. A draft is fetched from a community one and counts only
+/// once an admin confirms it (owner, 2026-09-27): that source is scraped from a
+/// third party, and it missed one of 2026's eight joint-leave days.
+model NationalHoliday {
+    id                 String        @id @default(cuid())
+    /// A calendar date, the same across Indonesia's three zones.
+    date               DateTime      @db.Date
+    name               String
+    kind               HolidayKind
+    status             HolidayStatus @default(DRAFT)
+    /// Where it came from: 'api-hari-libur' or 'manual'.
+    source             String
+    /// The name exactly as the source gave it, null for one added by hand. A later
+    /// fetch recognises the day by this, not by `name`, which an admin may correct -
+    /// or every correction would come back as a fresh draft beside it.
+    sourceName         String?
+    confirmedByAdminId String?
+    confirmedAt        DateTime?
+    withdrawnAt        DateTime?
+    createdAt          DateTime      @default(now())
+    updatedAt          DateTime      @updatedAt
+
+    confirmedBy   PlatformAdmin?           @relation(fields: [confirmedByAdminId], references: [id])
+    schoolChoices SchoolJointLeaveChoice[]
+
+    // One row per day and name, so fetching a year twice adds nothing twice.
+    @@unique([date, name])
+    @@index([status, date])
+}
+
+/// A day or days one school is off - a school event, a regional holiday - set by
+/// its Principal. Withdrawn rather than deleted.
+model SchoolHoliday {
+    id                String    @id @default(cuid())
+    schoolId          String
+    startDate         DateTime  @db.Date
+    endDate           DateTime  @db.Date
+    name              String
+    createdByUserId   String
+    withdrawnAt       DateTime?
+    withdrawnByUserId String?
+    createdAt         DateTime  @default(now())
+    updatedAt         DateTime  @updatedAt
+
+    school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+    @@index([schoolId, startDate])
+}
+
+/// A school's choice for ONE joint-leave day, overriding its School.observesJointLeave
+/// default (owner, 2026-09-27): a Principal may take Idul Fitri's joint leave and not
+/// Christmas Eve's. `observed` null means "follow the school's default" - so going
+/// back to the default needs no delete. Ignored unless the day is a CONFIRMED
+/// JOINT_LEAVE.
+model SchoolJointLeaveChoice {
+    id                String   @id @default(cuid())
+    schoolId          String
+    nationalHolidayId String
+    observed          Boolean?
+    decidedByUserId   String
+    createdAt         DateTime @default(now())
+    updatedAt         DateTime @updatedAt
+
+    school          School          @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    nationalHoliday NationalHoliday @relation(fields: [nationalHolidayId], references: [id], onDelete: Cascade)
+
+    @@unique([schoolId, nationalHolidayId])
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +376,9 @@ model School {
     /// The zone its schedule is written in (teaching-and-learning ticket 07). Null
     /// for a school founded before it; a schedule needs one.
     timeZone      SchoolTimeZone?
+    /// Whether this school takes joint leave (cuti bersama) off, the Principal's
+    /// choice - regional education calendars differ (teaching-and-learning 08).
+    observesJointLeave Boolean @default(true)
     /// Opaque, regenerable. Locates a school; grants nothing (ADR-0002).
     schoolCode    String     @unique
     // Access withdrawn by a platform admin, with the data left where it is.
@@ -316,6 +416,8 @@ model School {
     leaveRequests    LeaveRequest[]
     notifications  Notification[]
     approvalAudits ApprovalAudit[]
+    schoolHolidays SchoolHoliday[]
+    jointLeaveChoices SchoolJointLeaveChoice[]
 
     @@index([deactivatedAt])
 }
