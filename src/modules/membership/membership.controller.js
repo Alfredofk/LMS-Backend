@@ -171,6 +171,19 @@ async function handOverPrincipal(req, res) {
     });
 }
 
+async function appointVicePrincipal(req, res) {
+    const member = await service.appointVicePrincipal(req.auth, req.validated.params.id);
+    return ok(res, {
+        member,
+        message: `${member.fullName} is a Vice Principal now, from their next sign-in.`,
+    });
+}
+
+async function revokeVicePrincipal(req, res) {
+    const member = await service.revokeVicePrincipal(req.auth, req.validated.params.id);
+    return ok(res, { member, message: 'No longer a Vice Principal. Still a teacher here.' });
+}
+
 async function removeMember(req, res) {
     const membership = await service.removeMember(
         req.auth,
@@ -241,6 +254,8 @@ export {
     listMembers,
     removeMember,
     handOverPrincipal,
+    appointVicePrincipal,
+    revokeVicePrincipal,
     list,
     get,
     approve,

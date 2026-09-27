@@ -1,5 +1,6 @@
 // Demo accounts, one per role (owner, 2026-09-27): a Platform Admin, and at one
-// demo school a Principal, a Teacher, a Student and a Guardian of that Student.
+// demo school a Principal, a Vice Principal, a Teacher, a Student and a Guardian of
+// that Student. The Vice Principal (ticket 19) is a teacher too, as it always is.
 //
 // Minimal by the owner's choice: no academic year, class or subject. Add those
 // through the app. The Guardian is linked to the Student all the same, because a
@@ -42,6 +43,7 @@ const SCHOOL = {
 const PEOPLE = {
     admin: { email: 'admin@demo.example', fullName: 'Admin Platform Demo' },
     principal: { email: 'kepala@demo.example', fullName: 'Kepala Sekolah Demo' },
+    vice: { email: 'wakasek@demo.example', fullName: 'Wakil Kepala Sekolah Demo' },
     teacher: { email: 'guru@demo.example', fullName: 'Guru Demo' },
     student: { email: 'siswa@demo.example', fullName: 'Siswa Demo' },
     guardian: { email: 'wali@demo.example', fullName: 'Wali Murid Demo' },
@@ -101,6 +103,7 @@ async function seed() {
     }
 
     const principal = await ensureUser(PEOPLE.principal, passwordHash);
+    const vice = await ensureUser(PEOPLE.vice, passwordHash);
     const teacher = await ensureUser(PEOPLE.teacher, passwordHash);
     const student = await ensureUser(PEOPLE.student, passwordHash);
     const guardian = await ensureUser(PEOPLE.guardian, passwordHash);
@@ -135,16 +138,22 @@ async function seed() {
     }
 
     await ensureMember(school, principal, ['PRINCIPAL']);
+    const viceMembership = await ensureMember(school, vice, ['TEACHER', 'VICE_PRINCIPAL']);
     const teacherMembership = await ensureMember(school, teacher, ['TEACHER']);
     const studentMembership = await ensureMember(school, student, ['STUDENT']);
     const guardianMembership = await ensureMember(school, guardian, ['GUARDIAN']);
 
     await runInSchool(school.id, school.name, async () => {
-        if (!(await prisma.teacherProfile.findFirst({ where: { membershipId: teacherMembership.id } }))) {
-            await prisma.teacherProfile.create({
-                data: { membershipId: teacherMembership.id, nip: '198001012005011001' },
-            });
-            note('teacher profile (NIP 198001012005011001)');
+        // Both teachers carry the profile approval would have written.
+        const teachers = [
+            [viceMembership, '197901012004011002'],
+            [teacherMembership, '198001012005011001'],
+        ];
+        for (const [membership, nip] of teachers) {
+            if (!(await prisma.teacherProfile.findFirst({ where: { membershipId: membership.id } }))) {
+                await prisma.teacherProfile.create({ data: { membershipId: membership.id, nip } });
+                note(`teacher profile (NIP ${nip})`);
+            }
         }
 
         let profile = await prisma.studentProfile.findFirst({

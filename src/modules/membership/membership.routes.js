@@ -137,23 +137,42 @@ reviewRouter.post(
 );
 
 // A third router, mounted at /api/members: the school's people (ticket 06).
-// Listing them and taking one out are the Principal's alone - since ticket 16 a
-// homeroom teacher moves a student to another class instead of removing them.
+// A Vice Principal reads the list (ticket 19); everything that changes who is in
+// the school - taking one out, the hand-over, appointing or revoking a Vice
+// Principal - is the Principal's alone. Since ticket 16 a homeroom teacher moves a
+// student to another class instead of removing them.
 const membersRouter = Router();
 
-membersRouter.use(requireAuth, requireActiveMembership, requireRole('PRINCIPAL'));
+const principalOnly = requireRole('PRINCIPAL');
+
+membersRouter.use(requireAuth, requireActiveMembership, requireRole('PRINCIPAL', 'VICE_PRINCIPAL'));
 
 membersRouter.get('/', validate({ query: membersQuery }), controller.listMembers);
 membersRouter.post(
     '/:id/remove',
+    principalOnly,
     validate({ params: idParams, body: removeBody }),
     controller.removeMember
 );
 // Handing the school to the teacher named here (owner, 2026-09-27).
 membersRouter.post(
     '/:id/handover',
+    principalOnly,
     validate({ params: idParams, body: handoverBody }),
     controller.handOverPrincipal
+);
+// Appointing and revoking a Vice Principal (ticket 19).
+membersRouter.post(
+    '/:id/vice-principal',
+    principalOnly,
+    validate({ params: idParams }),
+    controller.appointVicePrincipal
+);
+membersRouter.post(
+    '/:id/vice-principal/revoke',
+    principalOnly,
+    validate({ params: idParams }),
+    controller.revokeVicePrincipal
 );
 
 // A fourth, mounted at /api/leave-requests: the Principal deciding who may leave

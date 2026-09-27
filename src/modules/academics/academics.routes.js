@@ -27,35 +27,38 @@ import {
 // token's school is the only school in reach - there is no school id in any path.
 //
 // requireRole is the coarse filter only: a STUDENT or GUARDIAN has no business
-// here. The service re-reads PRINCIPAL from the database for every write, and
+// here. The service re-reads PRINCIPAL (or VICE_PRINCIPAL) from the database for every write, and
 // decides which classes a teacher may read, because homeroom teaching is a
 // property of a class (Class.homeroomTeacherMembershipId), not a role.
 
 const router = Router();
 
-const principal = requireRole('PRINCIPAL');
-const staff = requireRole('PRINCIPAL', 'TEACHER');
+// The academic day-to-day: the Principal, or a Vice Principal (ticket 19).
+const principalOrVice = requireRole('PRINCIPAL', 'VICE_PRINCIPAL');
+// Named outright, not left to the TEACHER every Vice Principal happens to hold: a
+// read the Vice Principal is granted (ticket 19) must not hang on another role.
+const staff = requireRole('PRINCIPAL', 'VICE_PRINCIPAL', 'TEACHER');
 
 router.use(requireAuth, requireActiveMembership);
 
-router.get('/teachers', principal, controller.listTeachers);
+router.get('/teachers', principalOrVice, controller.listTeachers);
 
 router.post(
     '/academic-years',
-    principal,
+    principalOrVice,
     validate({ body: academicYearBody }),
     controller.createAcademicYear
 );
 router.get('/academic-years', staff, controller.listAcademicYears);
 router.post(
     '/academic-years/:id/close',
-    principal,
+    principalOrVice,
     validate({ params: idParams }),
     controller.closeAcademicYear
 );
 router.post(
     '/academic-years/:id/semesters',
-    principal,
+    principalOrVice,
     validate({ params: idParams, body: semesterBody }),
     controller.createSemester
 );
@@ -64,40 +67,40 @@ router.post(
 // nothing anybody did in it goes with it.
 router.patch(
     '/academic-years/:id',
-    principal,
+    principalOrVice,
     validate({ params: idParams, body: academicYearPatch }),
     controller.updateAcademicYear
 );
 router.delete(
     '/academic-years/:id',
-    principal,
+    principalOrVice,
     validate({ params: idParams }),
     controller.deleteAcademicYear
 );
 router.patch(
     '/semesters/:id',
-    principal,
+    principalOrVice,
     validate({ params: idParams, body: semesterPatch }),
     controller.updateSemester
 );
-router.delete('/semesters/:id', principal, validate({ params: idParams }), controller.deleteSemester);
+router.delete('/semesters/:id', principalOrVice, validate({ params: idParams }), controller.deleteSemester);
 
-router.post('/classes', principal, validate({ body: classBody }), controller.createClass);
+router.post('/classes', principalOrVice, validate({ body: classBody }), controller.createClass);
 router.get('/classes', staff, validate({ query: classListQuery }), controller.listClasses);
 router.get('/classes/:id', staff, validate({ params: idParams }), controller.getClass);
 router.patch(
     '/classes/:id/homeroom',
-    principal,
+    principalOrVice,
     validate({ params: idParams, body: homeroomBody }),
     controller.changeHomeroom
 );
 router.patch(
     '/classes/:id',
-    principal,
+    principalOrVice,
     validate({ params: idParams, body: classPatch }),
     controller.updateClass
 );
-router.delete('/classes/:id', principal, validate({ params: idParams }), controller.deleteClass);
+router.delete('/classes/:id', principalOrVice, validate({ params: idParams }), controller.deleteClass);
 
 // ---- ticket 16: moving a student to another class ---------------------------
 //
@@ -136,7 +139,7 @@ router.post(
 const teacher = requireRole('TEACHER');
 
 router.get('/subjects', staff, controller.listSubjects);
-router.post('/subjects', principal, validate({ body: subjectBody }), controller.createSubject);
+router.post('/subjects', principalOrVice, validate({ body: subjectBody }), controller.createSubject);
 
 router.get(
     '/semesters/:id/class-subjects',
@@ -159,25 +162,25 @@ router.post(
 );
 router.post(
     '/class-subjects/approve',
-    principal,
+    principalOrVice,
     validate({ body: bulkApproveBody }),
     controller.bulkApproveClassSubjects
 );
 router.post(
     '/class-subjects/override',
-    principal,
+    principalOrVice,
     validate({ body: overrideBody }),
     controller.overrideClassSubject
 );
 router.post(
     '/class-subjects/:id/approve',
-    principal,
+    principalOrVice,
     validate({ params: idParams }),
     controller.approveClassSubject
 );
 router.post(
     '/class-subjects/:id/reject',
-    principal,
+    principalOrVice,
     validate({ params: idParams, body: rejectBody }),
     controller.rejectClassSubject
 );

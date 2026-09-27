@@ -54,6 +54,11 @@ enum SchoolRole {
     TEACHER
     STUDENT
     GUARDIAN
+    /// Wakil kepala sekolah (registration-and-membership ticket 19): a TEACHER the
+    /// Principal appoints to run the academic day-to-day - years, classes, teaching
+    /// assignments, the timetable, holidays. Never hiring, removing, leave requests or
+    /// the school's identity. Several per school, all alike. Never asked for.
+    VICE_PRINCIPAL
 }
 
 enum ApprovalStatus {

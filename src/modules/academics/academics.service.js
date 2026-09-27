@@ -1,6 +1,6 @@
 import { prisma } from '../../shared/prisma.js';
 import { isValidGrade, phaseFor } from '../../shared/schoolType.js';
-import { isPrincipal, isHomeroomOf, hasActiveRole } from '../../shared/guards.js';
+import { isPrincipal, isPrincipalOrVice, isHomeroomOf, hasActiveRole } from '../../shared/guards.js';
 import {
     assertClassSubjectRetryAllowed,
     assertRejectionReason,
@@ -31,8 +31,21 @@ const log = createLogger('Academics');
 
 // Checked against the database, not the token's roles, the way
 // rotateSchoolCode() does: a role withdrawn minutes ago must not still work.
-async function assertPrincipal(auth) {
-    if (!(await isPrincipal(auth.membershipId))) throw forbidden('Only the Principal can do this');
+// Everything this module guards is the academic day-to-day, which a Vice
+// Principal runs too (registration-and-membership ticket 19).
+async function assertPrincipalOrVice(auth) {
+    if (!(await isPrincipalOrVice(auth.membershipId))) {
+        throw forbidden('Only the Principal or a Vice Principal can do this');
+    }
+}
+
+// A Vice Principal is also a teacher, and never decides their own teaching: not
+// approving or rejecting their own request, not overriding one for themselves
+// (ticket 19). The Principal is left as before.
+async function assertNotDecidingForSelf(auth, teacherMembershipId) {
+    if (teacherMembershipId !== auth.membershipId) return;
+    if (await isPrincipal(auth.membershipId)) return;
+    throw forbidden('A Vice Principal cannot decide their own teaching assignment');
 }
 
 // Each table here is unique on what a Principal names, and a duplicate is a
@@ -100,7 +113,7 @@ const classView = (target) => ({
 // ---------------------------------------------------------------------------
 
 async function listTeachers(auth) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
 
     const memberships = await prisma.schoolMembership.findMany({
         where: { status: 'ACTIVE', roles: { some: { role: 'TEACHER', status: 'ACTIVE' } } },
@@ -157,7 +170,7 @@ function assertYearOpen(year) {
 }
 
 async function createAcademicYear(auth, body) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
 
     try {
         const created = await prisma.academicYear.create({
@@ -180,7 +193,7 @@ async function listAcademicYears() {
 // conflict. No semester has to be closed first: semester close is two-phase and
 // not built yet (ticket 07 leaves it to its own work).
 async function closeAcademicYear(auth, id) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
     const year = await loadYear(id);
 
     const claimed = await prisma.academicYear.updateMany({
@@ -196,7 +209,7 @@ async function closeAcademicYear(auth, id) {
 // Correcting an ACTIVE year's label or dates (owner, 2026-09-26). The dates must
 // still hold every semester already in it; a CLOSED year stays as it was closed.
 async function updateAcademicYear(auth, id, body) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
     const year = await loadYear(id);
     assertYearOpen(year);
 
@@ -229,7 +242,7 @@ async function updateAcademicYear(auth, id, body) {
 // a semester or class added a moment earlier is never taken with it - the
 // cascade would otherwise remove them.
 async function deleteAcademicYear(auth, id) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
     const year = await loadYear(id);
 
     const deleted = await prisma.academicYear.deleteMany({
@@ -271,7 +284,7 @@ function assertSemesterFits(year, { ordinal, startDate, endDate, deadline }) {
 }
 
 async function createSemester(auth, academicYearId, body) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
     const year = await loadYear(academicYearId);
     assertYearOpen(year);
 
@@ -310,7 +323,7 @@ async function loadSemester(id) {
 // 2026-09-26) - a deadline set wrong could not be put right before. The ordinal
 // stays. A deadline moved later reopens self-assign; that is what moving it means.
 async function updateSemester(auth, id, body) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
     const { semester, year } = await loadSemester(id);
     assertYearOpen(year);
     if (semester.status !== 'OPEN') throw conflict(`Semester ${semester.ordinal} is not open`);
@@ -336,7 +349,7 @@ async function updateSemester(auth, id, body) {
 // ClassSubject counts, a rejected or cancelled one too: those rows are the
 // audit's subjects, and the cascade would take them.
 async function deleteSemester(auth, id) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
     const { semester, year } = await loadSemester(id);
     assertYearOpen(year);
 
@@ -382,7 +395,7 @@ async function assertGradeExists(auth, gradeLevel) {
 // Created with its homeroom teacher in the same action (decision #53), so a class
 // never exists without somebody to release its students' requests.
 async function createClass(auth, body) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
 
     const year = await loadYear(body.academicYearId);
     assertYearOpen(year);
@@ -413,7 +426,7 @@ async function createClass(auth, body) {
 // The Principal sees every class; a teacher, the classes they are homeroom of.
 // A teacher's wider view - which classes they could teach - is ticket 08's.
 async function listClasses(auth, { academicYearId }) {
-    const principal = await isPrincipal(auth.membershipId);
+    const principal = await isPrincipalOrVice(auth.membershipId);
 
     const classes = await prisma.class.findMany({
         where: {
@@ -431,7 +444,7 @@ async function listClasses(auth, { academicYearId }) {
 // teacher. Anybody else gets the same 404 a class at another school gets.
 async function getClass(auth, id) {
     const allowed =
-        (await isPrincipal(auth.membershipId)) || (await isHomeroomOf(auth.membershipId, id));
+        (await isPrincipalOrVice(auth.membershipId)) || (await isHomeroomOf(auth.membershipId, id));
     if (!allowed) throw notFound('Class not found');
 
     const target = await loadClass(id);
@@ -469,7 +482,7 @@ async function getClass(auth, id) {
 // so the class's PENDING student and guardian requests are in the new teacher's
 // queue on their next read, and out of the old one's.
 async function changeHomeroom(auth, id, { homeroomTeacherMembershipId }) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
 
     const target = await loadClass(id);
     if (target.academicYear.status !== 'ACTIVE') {
@@ -493,7 +506,7 @@ async function changeHomeroom(auth, id, { homeroomTeacherMembershipId }) {
 // condition is in the update's own where clause, so a student placed a moment
 // earlier cannot slip under it.
 async function updateClass(auth, id, body) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
 
     const target = await loadClass(id);
     if (target.academicYear.status !== 'ACTIVE') {
@@ -528,7 +541,7 @@ async function updateClass(auth, id, body) {
 // teaching assignment or request, no class move either way. The cascade would
 // take all of those, so emptiness is the delete's own where clause.
 async function deleteClass(auth, id) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
 
     const target = await loadClass(id);
     if (target.academicYear.status !== 'ACTIVE') {
@@ -935,7 +948,7 @@ async function listSubjects() {
 
 // A local subject (muatan lokal). The extension stamps this school onto it.
 async function createSubject(auth, body) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
 
     try {
         const created = await prisma.subject.create({
@@ -1189,7 +1202,7 @@ async function requestClassSubject(auth, body) {
 // The Principal's queue (PENDING unless asked otherwise, oldest first), or a
 // teacher's own requests, every status unless one is asked for.
 async function listClassSubjects(auth, { status }) {
-    const principal = await isPrincipal(auth.membershipId);
+    const principal = await isPrincipalOrVice(auth.membershipId);
 
     const rows = await prisma.classSubject.findMany({
         where: principal
@@ -1230,7 +1243,7 @@ async function cancelClassSubject(auth, id) {
 // may ask again: a REJECTED row leaves the slot index, and the next request is a
 // new row, capped by assertClassSubjectRetryAllowed.
 async function decideClassSubject(auth, id, { action, reason }) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
 
     let trimmed = null;
     if (action === 'REJECT') {
@@ -1238,7 +1251,8 @@ async function decideClassSubject(auth, id, { action, reason }) {
         trimmed = reason.trim();
     }
 
-    await loadClassSubject(id);
+    const row = await loadClassSubject(id);
+    await assertNotDecidingForSelf(auth, row.teacher.id);
     const now = new Date();
 
     await prisma.$transaction(async (tx) => {
@@ -1306,10 +1320,11 @@ async function bulkApproveClassSubjects(auth, { ids }) {
 // audited OVERRIDE. Principal-only, and not a general back door - the slot,
 // year and semester rules still hold.
 async function overrideClassSubject(auth, body) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
 
     const { target } = await resolveSlot(body);
     const teacher = await resolveTeacher(body.teacherMembershipId, 'The teacher');
+    await assertNotDecidingForSelf(auth, teacher.id);
     const now = new Date();
 
     let created;

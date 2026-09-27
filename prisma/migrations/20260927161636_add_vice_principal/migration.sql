@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "SchoolRole" ADD VALUE 'VICE_PRINCIPAL';

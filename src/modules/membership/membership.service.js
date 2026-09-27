@@ -1,7 +1,7 @@
 import { prisma } from '../../shared/prisma.js';
 import { runInSchool, runUnscoped } from '../../shared/tenantContext.js';
 import { isValidGrade } from '../../shared/schoolType.js';
-import { isPrincipal } from '../../shared/guards.js';
+import { isPrincipal, isPrincipalOrVice } from '../../shared/guards.js';
 import { getStorage } from '../../shared/storage.js';
 import { MIME } from '../../shared/upload.js';
 import {
@@ -1338,6 +1338,120 @@ async function grantPrincipal(tx, { membershipId, actorUserId, now }) {
     } else {
         await tx.membershipRole.create({ data: { membershipId, role: 'PRINCIPAL', ...data } });
     }
+
+    // A Vice Principal who becomes Principal stops being one: the Principal's
+    // authority already holds it all (ticket 19).
+    await tx.membershipRole.updateMany({
+        where: { membershipId, role: 'VICE_PRINCIPAL', status: 'ACTIVE' },
+        data: { status: 'ENDED' },
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Vice Principals (ticket 19, owner 2026-09-27)
+// ---------------------------------------------------------------------------
+//
+// The Principal appoints an ACTIVE teacher of the school, and may revoke it.
+// Several may hold it at once, all alike. Revoking ENDs the role, the way ticket
+// 18 ends a Principal's: the person stays a teacher, and every check reading
+// status ACTIVE stops granting at once, whatever their token still claims.
+
+async function appointVicePrincipal(auth, membershipId) {
+    if (!(await isPrincipal(auth.membershipId))) throw forbidden('Only the Principal can do this');
+
+    const member = await prisma.schoolMembership.findFirst({
+        where: { id: membershipId, status: 'ACTIVE' },
+        select: {
+            id: true,
+            user: { select: { fullName: true } },
+            roles: { select: { id: true, role: true, status: true } },
+        },
+    });
+    if (!member) throw notFound('Member not found');
+
+    const held = member.roles.filter((entry) => entry.status === 'ACTIVE').map((entry) => entry.role);
+    if (held.includes('PRINCIPAL')) {
+        throw conflict('The Principal already holds every power a Vice Principal has');
+    }
+    if (held.includes('VICE_PRINCIPAL')) throw conflict('This member is already a Vice Principal');
+    if (!held.includes('TEACHER')) {
+        throw badRequest('A Vice Principal must be an active teacher at this school');
+    }
+
+    const data = {
+        status: 'ACTIVE',
+        approvedByUserId: auth.userId,
+        approvedAt: new Date(),
+        rejectionReason: null,
+    };
+
+    await prisma.$transaction(async (tx) => {
+        // One row per role: a revoked appointment is moved back, not duplicated.
+        const prior = member.roles.find((entry) => entry.role === 'VICE_PRINCIPAL');
+        let roleId;
+        if (prior) {
+            await tx.membershipRole.updateMany({ where: { id: prior.id }, data });
+            roleId = prior.id;
+        } else {
+            const created = await tx.membershipRole.create({
+                data: { membershipId: member.id, role: 'VICE_PRINCIPAL', ...data },
+            });
+            roleId = created.id;
+        }
+
+        await recordAudit({
+            schoolId: auth.schoolId,
+            subjectType: ROLE_SUBJECT,
+            subjectId: roleId,
+            action: 'APPROVE',
+            actorUserId: auth.userId,
+            client: tx,
+        });
+    });
+
+    log.info(`A Vice Principal was appointed at ${auth.schoolName}`);
+    return {
+        membershipId: member.id,
+        fullName: member.user.fullName,
+        role: 'VICE_PRINCIPAL',
+        status: 'ACTIVE',
+    };
+}
+
+async function revokeVicePrincipal(auth, membershipId) {
+    if (!(await isPrincipal(auth.membershipId))) throw forbidden('Only the Principal can do this');
+
+    const role = await prisma.membershipRole.findFirst({
+        where: {
+            membershipId,
+            role: 'VICE_PRINCIPAL',
+            status: 'ACTIVE',
+            membership: { status: 'ACTIVE' },
+        },
+        select: { id: true },
+    });
+    // Not a Vice Principal, not a member here, another school's: one answer.
+    if (!role) throw notFound('No Vice Principal of this school under that id');
+
+    await prisma.$transaction(async (tx) => {
+        const claimed = await tx.membershipRole.updateMany({
+            where: { id: role.id, status: 'ACTIVE' },
+            data: { status: 'ENDED' },
+        });
+        if (claimed.count === 0) throw conflict('This Vice Principal was already revoked');
+
+        await recordAudit({
+            schoolId: auth.schoolId,
+            subjectType: ROLE_SUBJECT,
+            subjectId: role.id,
+            action: 'WITHDRAW',
+            actorUserId: auth.userId,
+            client: tx,
+        });
+    });
+
+    log.info(`A Vice Principal was revoked at ${auth.schoolName}`);
+    return { membershipId, role: 'VICE_PRINCIPAL', status: 'ENDED' };
 }
 
 // The Principal's own hand-over. At once: the successor is a teacher here the
@@ -1793,8 +1907,11 @@ const rejectLeaveRequest = (auth, id, { reason } = {}) =>
 // The Principal's list of the school's people. LEFT is here on purpose: a
 // departed student's records stay with the school, and this is where the school
 // still finds them (ticket 06's Done-when).
+// The Principal's list, which a Vice Principal reads too (ticket 19).
 async function listMembers(auth, { status, role }) {
-    if (!(await isPrincipal(auth.membershipId))) throw forbidden('Only the Principal can do this');
+    if (!(await isPrincipalOrVice(auth.membershipId))) {
+        throw forbidden('Only the Principal or a Vice Principal can do this');
+    }
 
     const members = await prisma.schoolMembership.findMany({
         where: {
@@ -2321,6 +2438,8 @@ export {
     leaveSchool,
     removeMember,
     handOverPrincipal,
+    appointVicePrincipal,
+    revokeVicePrincipal,
     appointPrincipal,
     submitLeaveRequest,
     listOwnLeaveRequests,

@@ -1,6 +1,6 @@
 import { prisma } from '../../shared/prisma.js';
 import { runUnscoped } from '../../shared/tenantContext.js';
-import { isPrincipal } from '../../shared/guards.js';
+import { isPrincipalOrVice } from '../../shared/guards.js';
 import { recordAudit } from '../../shared/approval.js';
 import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
@@ -205,8 +205,10 @@ async function withdrawNational(id, { adminUserId }) {
 // A school's calendar
 // ---------------------------------------------------------------------------
 
-async function assertPrincipal(auth) {
-    if (!(await isPrincipal(auth.membershipId))) throw forbidden('Only the Principal can do this');
+async function assertPrincipalOrVice(auth) {
+    if (!(await isPrincipalOrVice(auth.membershipId))) {
+        throw forbidden('Only the Principal or a Vice Principal can do this');
+    }
 }
 
 // Whether a school is off on a confirmed national day. A national holiday always;
@@ -268,7 +270,7 @@ async function calendar(auth, year) {
 }
 
 async function addSchoolHoliday(auth, { startDate, endDate, name }) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
 
     const created = await prisma.$transaction(async (tx) => {
         const row = await tx.schoolHoliday.create({
@@ -295,7 +297,7 @@ async function addSchoolHoliday(auth, { startDate, endDate, name }) {
 }
 
 async function withdrawSchoolHoliday(auth, id) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
 
     await prisma.$transaction(async (tx) => {
         const claimed = await tx.schoolHoliday.updateMany({
@@ -320,7 +322,7 @@ async function withdrawSchoolHoliday(auth, id) {
 
 // The Principal's switch for joint leave. Audited only when it changes.
 async function setJointLeave(auth, { observesJointLeave }) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
 
     await prisma.$transaction(async (tx) => {
         const before = await tx.school.findUnique({
@@ -355,7 +357,7 @@ async function setJointLeave(auth, { observesJointLeave }) {
 // transaction: an upsert cannot take the tenant extension's extra schoolId filter
 // on its unique where. Audited only when the choice changes.
 async function setJointLeaveDay(auth, holidayId, { observed }) {
-    await assertPrincipal(auth);
+    await assertPrincipalOrVice(auth);
 
     const holiday = await prisma.nationalHoliday.findUnique({ where: { id: holidayId } });
     if (!holiday) throw notFound('Holiday not found');

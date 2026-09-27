@@ -182,7 +182,7 @@ const leaveListQuery = z.object({
 // The Principal's member list: the people here now, or the people who were.
 const membersQuery = z.object({
     status: z.enum(['ACTIVE', 'LEFT']).default('ACTIVE'),
-    role: z.enum(['PRINCIPAL', 'TEACHER', 'STUDENT', 'GUARDIAN']).optional(),
+    role: z.enum(['PRINCIPAL', 'VICE_PRINCIPAL', 'TEACHER', 'STUDENT', 'GUARDIAN']).optional(),
 });
 
 const listQuery = z.object({

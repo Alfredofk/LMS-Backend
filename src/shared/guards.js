@@ -28,6 +28,23 @@ async function isPrincipal(membershipId) {
     return hasActiveRole(membershipId, 'PRINCIPAL');
 }
 
+// The Principal or a Vice Principal (registration-and-membership ticket 19): who
+// runs the academic day-to-day - years, classes, teaching assignments, the
+// timetable, holidays. isPrincipal stays the gate for what is the Principal's
+// alone: hiring, removing, leave requests, the school's identity, the hand-over.
+async function isPrincipalOrVice(membershipId) {
+    const found = await prisma.membershipRole.findFirst({
+        where: {
+            membershipId,
+            role: { in: ['PRINCIPAL', 'VICE_PRINCIPAL'] },
+            status: 'ACTIVE',
+            membership: { status: 'ACTIVE' },
+        },
+        select: { id: true },
+    });
+    return Boolean(found);
+}
+
 // Homeroom teacher of this specific class.
 //
 // Not a role - it is a property of the class. That is why this takes a classId:
@@ -127,6 +144,7 @@ async function requirePlatformAdmin(req, _res, next) {
 export {
     hasActiveRole,
     isPrincipal,
+    isPrincipalOrVice,
     isHomeroomOf,
     isHomeroomOfStudent,
     isTeacherOfClassSubject,
