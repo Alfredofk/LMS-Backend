@@ -102,6 +102,11 @@ async function rotateCode(req, res) {
     });
 }
 
+async function updateLocation(req, res) {
+    const school = await service.updateSchoolLocation(req.auth, req.validated.body);
+    return ok(res, { school, message: 'School location updated.' });
+}
+
 async function appointPrincipal(req, res) {
     const result = await service.appointPrincipal(req.validated.params.id, {
         ...reviewer(req),
@@ -125,4 +130,5 @@ export {
     reactivate,
     appointPrincipal,
     rotateCode,
+    updateLocation,
 };

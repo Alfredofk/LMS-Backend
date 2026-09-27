@@ -20,12 +20,32 @@ const applicantPhone = z.preprocess(
     z.string().regex(/^\+?\d{8,15}$/, 'Enter a valid phone number')
 );
 
+// The school's point, for a student's check-in (teaching-and-learning ticket 01).
+// Checked against Indonesia's extent rather than the whole globe: a point in the
+// sea off Africa is a typo - swapped fields, a dropped minus sign - not a school.
+// Roughly 6°N to 11°S and 95°E to 141°E. Coerced, because the registration is
+// multipart and every field arrives as a string - but a blank field, or a JSON
+// null, is "not given", not zero: coerced as they stand, '' and null become 0,
+// which is on the equator and inside the box.
+const coordinate = (name, min, max) =>
+    z.preprocess(
+        (value) => (value === '' || value === null ? undefined : value),
+        z.coerce
+            .number(`${name} must be a number`)
+            .min(min, 'The point must be in Indonesia')
+            .max(max, 'The point must be in Indonesia')
+    );
+const latitude = coordinate('Latitude', -11, 6);
+const longitude = coordinate('Longitude', 95, 141);
+
 const registrationBody = z
     .object({
         npsn,
         schoolName: z.string().trim().min(3, 'School name is too short').max(150),
         schoolType: z.enum(SCHOOL_TYPE_NAMES),
         city: z.string().trim().min(2, 'City is required').max(100),
+        latitude,
+        longitude,
         applicantPhone,
         durationYears: z.preprocess(blankToUndefined, z.coerce.number().int().optional()),
     })
@@ -115,6 +135,10 @@ const rejectBody = z.object({
 const deactivateBody = rejectBody;
 const reactivateBody = rejectBody;
 
+// The Principal correcting the school's point, within the same extent as at
+// registration. Both fields, always: half a point is not a place.
+const locationBody = z.strictObject({ latitude, longitude });
+
 // A Platform Admin appointing a school's Principal when the one before cannot hand
 // it over (owner, 2026-09-27). The admin sees no member list, so the successor is
 // named by the email of an active teacher there. Always with a reason, audited.
@@ -134,4 +158,5 @@ export {
     deactivateBody,
     reactivateBody,
     appointPrincipalBody,
+    locationBody,
 };

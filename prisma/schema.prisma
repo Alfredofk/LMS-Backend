@@ -112,6 +112,8 @@ enum ApprovalAction {
     CANCEL
     /// The school handed to a new Principal, by the one before or by a Platform Admin.
     HANDOVER
+    /// The Principal correcting the school's point on the map (teaching-and-learning 01).
+    UPDATE_LOCATION
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +226,10 @@ model SchoolRegistration {
     /// every other type takes its default from shared/schoolType.js.
     durationYears   Int?
     city            String?
+    /// The school's point, carried to School on approval (teaching-and-learning
+    /// ticket 01). Required of new registrations; null on ones filed before it.
+    latitude        Float?
+    longitude       Float?
     applicantPhone  String?
     ktpStoragePath  String?
     status          RegistrationStatus @default(PENDING)
@@ -252,6 +258,11 @@ model School {
     /// 3 for most schools, 6 for SD, 4 for a four-year SMK. Drives the top grade.
     durationYears Int
     city          String?
+    /// Where the school is, for a student's check-in (teaching-and-learning ticket
+    /// 01): compared with the device's location against a fixed 150 m radius. Null
+    /// until set - self check-in is then unavailable. The Principal may correct it.
+    latitude      Float?
+    longitude     Float?
     /// Opaque, regenerable. Locates a school; grants nothing (ADR-0002).
     schoolCode    String     @unique
     // Access withdrawn by a platform admin, with the data left where it is.

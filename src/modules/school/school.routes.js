@@ -14,6 +14,7 @@ import {
     deactivateBody,
     reactivateBody,
     appointPrincipalBody,
+    locationBody,
 } from './school.schema.js';
 
 // Two routers, because two different people use them.
@@ -87,6 +88,8 @@ const memberRouter = Router();
 memberRouter.use(requireAuth, requireActiveMembership, requireRole('PRINCIPAL'));
 
 memberRouter.post('/code/rotate', controller.rotateCode);
+// Correcting the school's point (teaching-and-learning ticket 01).
+memberRouter.patch('/location', validate({ body: locationBody }), controller.updateLocation);
 
 export default router;
 export { adminRouter, memberRouter };

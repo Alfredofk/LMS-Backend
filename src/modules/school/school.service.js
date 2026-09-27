@@ -60,6 +60,8 @@ const schoolView = (school) => ({
     id: school.id,
     name: school.name,
     schoolCode: school.schoolCode,
+    latitude: school.latitude ?? null,
+    longitude: school.longitude ?? null,
     deactivatedAt: school.deactivatedAt ?? null,
     deactivationReason: school.deactivationReason ?? null,
 });
@@ -72,6 +74,8 @@ const adminView = (registration) => ({
     schoolType: registration.schoolType,
     durationYears: registration.durationYears,
     city: registration.city,
+    latitude: registration.latitude,
+    longitude: registration.longitude,
     applicantPhone: registration.applicantPhone,
     status: registration.status,
     hasKtp: Boolean(registration.ktpStoragePath),
@@ -100,6 +104,8 @@ const applicantView = (registration) => ({
     schoolType: registration.schoolType,
     durationYears: registration.durationYears,
     city: registration.city,
+    latitude: registration.latitude,
+    longitude: registration.longitude,
     applicantPhone: registration.applicantPhone,
     status: registration.status,
     rejectionReason: registration.rejectionReason,
@@ -114,6 +120,8 @@ const createdSchoolSelect = {
         id: true,
         name: true,
         schoolCode: true,
+        latitude: true,
+        longitude: true,
         deactivatedAt: true,
         deactivationReason: true,
     },
@@ -216,6 +224,8 @@ async function submitRegistration(userId, body, file) {
                         schoolType: body.schoolType,
                         durationYears: body.durationYears,
                         city: body.city,
+                        latitude: body.latitude,
+                        longitude: body.longitude,
                         applicantPhone: body.applicantPhone,
                         ktpStoragePath: key,
                     },
@@ -426,6 +436,8 @@ async function approveRegistration(id, { adminId, adminUserId }) {
                         registration.durationYears ??
                         SCHOOL_TYPES[registration.schoolType].defaultDurationYears,
                     city: registration.city,
+                    latitude: registration.latitude,
+                    longitude: registration.longitude,
                     schoolCode,
                 },
             });
@@ -698,6 +710,45 @@ async function rotateSchoolCode(auth) {
     return schoolView(school);
 }
 
+// The Principal correcting the school's point (teaching-and-learning ticket 01).
+// The registrant may have picked it from a phone somewhere else, and students'
+// check-ins are measured against it. Audited, with the old point in the reason,
+// so a moved school can be traced - check-ins flagged before the move were
+// flagged against the old point. Refused at a deactivated school, as rotation is.
+async function updateSchoolLocation(auth, { latitude, longitude }) {
+    if (!(await isPrincipal(auth.membershipId))) throw forbidden('Only the Principal can do this');
+
+    const school = await prisma.$transaction(async (tx) => {
+        const before = await tx.school.findUnique({
+            where: { id: auth.schoolId },
+            select: { latitude: true, longitude: true, deactivatedAt: true },
+        });
+        const claimed = await tx.school.updateMany({
+            where: { id: auth.schoolId, deactivatedAt: null },
+            data: { latitude, longitude },
+        });
+        if (!before || claimed.count === 0) throw notFound('School not found');
+
+        await recordAudit({
+            schoolId: auth.schoolId,
+            subjectType: SCHOOL_SUBJECT,
+            subjectId: auth.schoolId,
+            action: 'UPDATE_LOCATION',
+            actorUserId: auth.userId,
+            reason:
+                before.latitude === null
+                    ? 'No point before'
+                    : `Was ${before.latitude}, ${before.longitude}`,
+            client: tx,
+        });
+
+        return tx.school.findUnique({ where: { id: auth.schoolId }, ...createdSchoolSelect });
+    });
+
+    log.info(`School location corrected for ${school.name}`);
+    return schoolView(school);
+}
+
 // A Platform Admin appointing a school's Principal (owner, 2026-09-27), keyed by
 // the registration like deactivation, because that is the row the admin screen
 // holds. Works on a deactivated school too: one restored without a Principal
@@ -740,4 +791,5 @@ export {
     reactivateSchool,
     appointPrincipal,
     rotateSchoolCode,
+    updateSchoolLocation,
 };

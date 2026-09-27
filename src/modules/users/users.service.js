@@ -40,6 +40,8 @@ const membershipSelect = {
             name: true,
             schoolType: true,
             durationYears: true,
+            latitude: true,
+            longitude: true,
             deactivatedAt: true,
             deactivationReason: true,
         },
@@ -77,6 +79,10 @@ const membershipSelect = {
 // Every member learns THAT it happened; only the Principal learns WHY. The
 // reason is written by a platform admin to the person who runs the school, the
 // same audience schoolView in school.service.js shows it to (owner, 2026-09-22).
+//
+// The school's point follows the same split (teaching-and-learning ticket 01):
+// every member learns whether one is set - without it there is no self check-in -
+// and only the Principal, who corrects it, sees the coordinates.
 function schoolForMember(school, roles) {
     const principal = roles.some((role) => role.role === 'PRINCIPAL' && role.status === 'ACTIVE');
     return {
@@ -84,6 +90,13 @@ function schoolForMember(school, roles) {
         name: school.name,
         schoolType: school.schoolType,
         durationYears: school.durationYears,
+        hasLocation: school.latitude !== null && school.longitude !== null,
+        location: principal && school.latitude !== null
+            ? {
+                latitude: school.latitude,
+                longitude: school.longitude,
+            }
+            : null,
         deactivatedAt: school.deactivatedAt,
         deactivationReason: principal ? school.deactivationReason : null,
     };
