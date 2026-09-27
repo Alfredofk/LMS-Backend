@@ -9,6 +9,9 @@ import {
     classBody,
     homeroomBody,
     classListQuery,
+    academicYearPatch,
+    semesterPatch,
+    classPatch,
     idParams,
     classMoveBody,
     classMoveListQuery,
@@ -57,6 +60,28 @@ router.post(
     controller.createSemester
 );
 
+// Corrections (owner, 2026-09-26). A delete takes only what is still empty, so
+// nothing anybody did in it goes with it.
+router.patch(
+    '/academic-years/:id',
+    principal,
+    validate({ params: idParams, body: academicYearPatch }),
+    controller.updateAcademicYear
+);
+router.delete(
+    '/academic-years/:id',
+    principal,
+    validate({ params: idParams }),
+    controller.deleteAcademicYear
+);
+router.patch(
+    '/semesters/:id',
+    principal,
+    validate({ params: idParams, body: semesterPatch }),
+    controller.updateSemester
+);
+router.delete('/semesters/:id', principal, validate({ params: idParams }), controller.deleteSemester);
+
 router.post('/classes', principal, validate({ body: classBody }), controller.createClass);
 router.get('/classes', staff, validate({ query: classListQuery }), controller.listClasses);
 router.get('/classes/:id', staff, validate({ params: idParams }), controller.getClass);
@@ -66,6 +91,13 @@ router.patch(
     validate({ params: idParams, body: homeroomBody }),
     controller.changeHomeroom
 );
+router.patch(
+    '/classes/:id',
+    principal,
+    validate({ params: idParams, body: classPatch }),
+    controller.updateClass
+);
+router.delete('/classes/:id', principal, validate({ params: idParams }), controller.deleteClass);
 
 // ---- ticket 16: moving a student to another class ---------------------------
 //

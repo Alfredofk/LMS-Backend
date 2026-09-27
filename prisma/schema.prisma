@@ -360,12 +360,19 @@ model MembershipRole {
 
 /// NISN is unique PER SCHOOL, never globally (ADR-0004). The same child
 /// legitimately has a row at each school they have attended.
+///
+/// Unique among LIVE profiles only (owner, 2026-09-26): a student who left and
+/// comes back to the same school gets a new profile beside the ended one, which
+/// stays with its LEFT membership as history. A partial unique index in migration
+/// SQL, not @@unique.
 model StudentProfile {
     id           String    @id @default(cuid())
     schoolId     String
     membershipId String    @unique
     nisn         String
     birthDate    DateTime?
+    /// Set with the membership's endedAt when it ends (endMembership).
+    endedAt      DateTime?
     createdAt    DateTime  @default(now())
     updatedAt    DateTime  @updatedAt
 
@@ -375,24 +382,25 @@ model StudentProfile {
     classMoves       ClassMove[]
     guardianLinks    GuardianStudent[]
 
-    @@unique([schoolId, nisn])
     @@index([schoolId])
 }
 
+/// NIP and NUPTK are unique among live profiles only, for the same reason as a
+/// student's NISN - partial unique indexes in migration SQL.
 model TeacherProfile {
-    id           String   @id @default(cuid())
+    id           String    @id @default(cuid())
     schoolId     String
-    membershipId String   @unique
+    membershipId String    @unique
     nip          String?
     nuptk        String?
-    createdAt    DateTime @default(now())
-    updatedAt    DateTime @updatedAt
+    /// Set with the membership's endedAt when it ends (endMembership).
+    endedAt      DateTime?
+    createdAt    DateTime  @default(now())
+    updatedAt    DateTime  @updatedAt
 
     school     School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
     membership SchoolMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
 
-    @@unique([schoolId, nip])
-    @@unique([schoolId, nuptk])
     @@index([schoolId])
 }
 

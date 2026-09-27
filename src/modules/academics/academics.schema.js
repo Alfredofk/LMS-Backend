@@ -61,6 +61,41 @@ const classListQuery = z.object({
     academicYearId: id.optional(),
 });
 
+// ---- editing (owner, 2026-09-26) ----------------------------------------------
+//
+// Only what is sent changes. Whether the result still holds together - a year
+// that still holds its semesters, a semester still inside its year - needs the
+// row as it is, so the service checks it against the merged values.
+
+const changesSomething = (value) => Object.keys(value).length > 0;
+const NOTHING_TO_CHANGE = 'Send at least one field to change';
+
+const academicYearPatch = z
+    .strictObject({
+        label: label.optional(),
+        startDate: z.coerce.date().optional(),
+        endDate: z.coerce.date().optional(),
+    })
+    .refine(changesSomething, NOTHING_TO_CHANGE);
+
+// The ordinal is what a semester is, so it never changes. A deadline sent as
+// null is removed.
+const semesterPatch = z
+    .strictObject({
+        startDate: z.coerce.date().optional(),
+        endDate: z.coerce.date().optional(),
+        classSubjectRegistrationDeadline: z.coerce.date().nullable().optional(),
+    })
+    .refine(changesSomething, NOTHING_TO_CHANGE);
+
+// The homeroom teacher has its own route, PATCH /classes/:id/homeroom.
+const classPatch = z
+    .strictObject({
+        name: z.string().trim().min(1, 'Name the class').max(50).optional(),
+        gradeLevel: z.coerce.number().int().min(1).max(13).optional(),
+    })
+    .refine(changesSomething, NOTHING_TO_CHANGE);
+
 const idParams = z.object({ id });
 
 // ---- ticket 16: moving a student to another class -----------------------------
@@ -123,6 +158,9 @@ export {
     classBody,
     homeroomBody,
     classListQuery,
+    academicYearPatch,
+    semesterPatch,
+    classPatch,
     idParams,
     classMoveBody,
     classMoveListQuery,

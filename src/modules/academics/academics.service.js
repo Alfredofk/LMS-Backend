@@ -193,18 +193,68 @@ async function closeAcademicYear(auth, id) {
     return loadYear(id);
 }
 
+// Correcting an ACTIVE year's label or dates (owner, 2026-09-26). The dates must
+// still hold every semester already in it; a CLOSED year stays as it was closed.
+async function updateAcademicYear(auth, id, body) {
+    await assertPrincipal(auth);
+    const year = await loadYear(id);
+    assertYearOpen(year);
+
+    const startDate = body.startDate ?? year.startDate;
+    const endDate = body.endDate ?? year.endDate;
+    if (startDate >= endDate) throw badRequest('The year must end after it starts');
+
+    const outside = year.semesters.find(
+        (semester) => semester.startDate < startDate || semester.endDate > endDate
+    );
+    if (outside) {
+        throw badRequest(`Semester ${outside.ordinal} would fall outside the academic year`);
+    }
+
+    try {
+        await prisma.academicYear.updateMany({
+            where: { id },
+            data: { ...(body.label ? { label: body.label } : {}), startDate, endDate },
+        });
+    } catch (error) {
+        throw translateUniqueViolation(error);
+    }
+
+    log.info(`Academic year ${year.label} edited${body.label ? `, now ${body.label}` : ''}`);
+    return loadYear(id);
+}
+
+// Only an empty year can go (owner, 2026-09-26): a year made by mistake, before
+// anything was put in it. Emptiness is part of the delete's own where clause, so
+// a semester or class added a moment earlier is never taken with it - the
+// cascade would otherwise remove them.
+async function deleteAcademicYear(auth, id) {
+    await assertPrincipal(auth);
+    const year = await loadYear(id);
+
+    const deleted = await prisma.academicYear.deleteMany({
+        where: { id, semesters: { none: {} }, classes: { none: {} } },
+    });
+    if (deleted.count === 0) {
+        throw conflict(
+            `Academic year ${year.label} already has semesters or classes. ` +
+                'Only an empty year can be deleted'
+        );
+    }
+
+    log.info(`Academic year ${year.label} deleted`);
+    return { id, label: year.label };
+}
+
 // ---------------------------------------------------------------------------
 // Semester
 // ---------------------------------------------------------------------------
 
 // One of the year's two halves: inside the year's dates, clear of the other half,
-// and with its registration deadline (if any) inside itself.
-async function createSemester(auth, academicYearId, body) {
-    await assertPrincipal(auth);
-    const year = await loadYear(academicYearId);
-    assertYearOpen(year);
-
-    const { ordinal, startDate, endDate, classSubjectRegistrationDeadline: deadline } = body;
+// and with its registration deadline (if any) inside itself. Checked on create and
+// on every edit.
+function assertSemesterFits(year, { ordinal, startDate, endDate, deadline }) {
+    if (startDate >= endDate) throw badRequest('The semester must end after it starts');
 
     if (startDate < year.startDate || endDate > year.endDate) {
         throw badRequest(`Semester ${ordinal} must fall inside academic year ${year.label}`);
@@ -218,6 +268,15 @@ async function createSemester(auth, academicYearId, body) {
     if (deadline && (deadline < startDate || deadline > endDate)) {
         throw badRequest('The registration deadline must fall inside the semester');
     }
+}
+
+async function createSemester(auth, academicYearId, body) {
+    await assertPrincipal(auth);
+    const year = await loadYear(academicYearId);
+    assertYearOpen(year);
+
+    const { ordinal, startDate, endDate, classSubjectRegistrationDeadline: deadline } = body;
+    assertSemesterFits(year, { ordinal, startDate, endDate, deadline });
 
     try {
         await prisma.semester.create({
@@ -237,6 +296,64 @@ async function createSemester(auth, academicYearId, body) {
     return loadYear(academicYearId);
 }
 
+// A semester, with its year for the checks both need. Another school's is 404.
+async function loadSemester(id) {
+    const semester = await prisma.semester.findFirst({
+        where: { id },
+        select: { ...semesterSelect, academicYearId: true },
+    });
+    if (!semester) throw notFound('Semester not found');
+    return { semester, year: await loadYear(semester.academicYearId) };
+}
+
+// Correcting an OPEN semester's dates or its registration deadline (owner,
+// 2026-09-26) - a deadline set wrong could not be put right before. The ordinal
+// stays. A deadline moved later reopens self-assign; that is what moving it means.
+async function updateSemester(auth, id, body) {
+    await assertPrincipal(auth);
+    const { semester, year } = await loadSemester(id);
+    assertYearOpen(year);
+    if (semester.status !== 'OPEN') throw conflict(`Semester ${semester.ordinal} is not open`);
+
+    const startDate = body.startDate ?? semester.startDate;
+    const endDate = body.endDate ?? semester.endDate;
+    const deadline =
+        body.classSubjectRegistrationDeadline === undefined
+            ? semester.classSubjectRegistrationDeadline
+            : body.classSubjectRegistrationDeadline;
+    assertSemesterFits(year, { ordinal: semester.ordinal, startDate, endDate, deadline });
+
+    await prisma.semester.updateMany({
+        where: { id },
+        data: { startDate, endDate, classSubjectRegistrationDeadline: deadline },
+    });
+
+    log.info(`Semester ${semester.ordinal} of ${year.label} edited`);
+    return loadYear(year.id);
+}
+
+// Only a semester nobody has asked to teach in yet (owner, 2026-09-26). Any
+// ClassSubject counts, a rejected or cancelled one too: those rows are the
+// audit's subjects, and the cascade would take them.
+async function deleteSemester(auth, id) {
+    await assertPrincipal(auth);
+    const { semester, year } = await loadSemester(id);
+    assertYearOpen(year);
+
+    const deleted = await prisma.semester.deleteMany({
+        where: { id, classSubjects: { none: {} } },
+    });
+    if (deleted.count === 0) {
+        throw conflict(
+            `Semester ${semester.ordinal} already has teaching assignments or requests. ` +
+                'Only a semester without any can be deleted'
+        );
+    }
+
+    log.info(`Semester ${semester.ordinal} of ${year.label} deleted`);
+    return loadYear(year.id);
+}
+
 // ---------------------------------------------------------------------------
 // Class
 // ---------------------------------------------------------------------------
@@ -247,6 +364,21 @@ async function loadClass(id) {
     return target;
 }
 
+// A grade that exists at this school's type: there is no grade 7 at an SD.
+async function assertGradeExists(auth, gradeLevel) {
+    // School is exempt from the tenant extension (it defines the tenant).
+    const school = await prisma.school.findUnique({
+        where: { id: auth.schoolId },
+        select: { schoolType: true, durationYears: true },
+    });
+    if (!isValidGrade(school.schoolType, gradeLevel, school.durationYears)) {
+        throw badRequest(`Grade ${gradeLevel} does not exist at a ${school.schoolType}`, {
+            gradeLevel,
+            schoolType: school.schoolType,
+        });
+    }
+}
+
 // Created with its homeroom teacher in the same action (decision #53), so a class
 // never exists without somebody to release its students' requests.
 async function createClass(auth, body) {
@@ -254,18 +386,7 @@ async function createClass(auth, body) {
 
     const year = await loadYear(body.academicYearId);
     assertYearOpen(year);
-
-    // School is exempt from the tenant extension (it defines the tenant).
-    const school = await prisma.school.findUnique({
-        where: { id: auth.schoolId },
-        select: { schoolType: true, durationYears: true },
-    });
-    if (!isValidGrade(school.schoolType, body.gradeLevel, school.durationYears)) {
-        throw badRequest(`Grade ${body.gradeLevel} does not exist at a ${school.schoolType}`, {
-            gradeLevel: body.gradeLevel,
-            schoolType: school.schoolType,
-        });
-    }
+    await assertGradeExists(auth, body.gradeLevel);
 
     const homeroom = await resolveTeacher(body.homeroomTeacherMembershipId);
 
@@ -364,6 +485,74 @@ async function changeHomeroom(auth, id, { homeroomTeacherMembershipId }) {
 
     log.info(`Class ${target.name} (${target.academicYear.label}): homeroom now ${homeroom.user.fullName}`);
     return classView(await loadClass(id));
+}
+
+// Correcting a class's name or grade in an ACTIVE year (owner, 2026-09-26). The
+// grade changes only while the class has never held a student: a placement,
+// even an ended one, is history of a student sitting at that grade. That
+// condition is in the update's own where clause, so a student placed a moment
+// earlier cannot slip under it.
+async function updateClass(auth, id, body) {
+    await assertPrincipal(auth);
+
+    const target = await loadClass(id);
+    if (target.academicYear.status !== 'ACTIVE') {
+        throw conflict(`Academic year ${target.academicYear.label} is closed`);
+    }
+
+    const regrade = body.gradeLevel !== undefined && body.gradeLevel !== target.gradeLevel;
+    if (!body.name && !regrade) return classView(target);
+    if (regrade) await assertGradeExists(auth, body.gradeLevel);
+
+    let updated;
+    try {
+        updated = await prisma.class.updateMany({
+            where: { id, ...(regrade ? { memberships: { none: {} } } : {}) },
+            data: {
+                ...(body.name ? { name: body.name } : {}),
+                ...(regrade ? { gradeLevel: body.gradeLevel } : {}),
+            },
+        });
+    } catch (error) {
+        throw translateUniqueViolation(error);
+    }
+    if (updated.count === 0) {
+        throw conflict(`${target.name} has had students, so its grade can no longer change`);
+    }
+
+    log.info(`Class ${target.name} (${target.academicYear.label}) edited`);
+    return classView(await loadClass(id));
+}
+
+// Only a class made by mistake (owner, 2026-09-26): no placement ever, no
+// teaching assignment or request, no class move either way. The cascade would
+// take all of those, so emptiness is the delete's own where clause.
+async function deleteClass(auth, id) {
+    await assertPrincipal(auth);
+
+    const target = await loadClass(id);
+    if (target.academicYear.status !== 'ACTIVE') {
+        throw conflict(`Academic year ${target.academicYear.label} is closed`);
+    }
+
+    const deleted = await prisma.class.deleteMany({
+        where: {
+            id,
+            memberships: { none: {} },
+            classSubjects: { none: {} },
+            movesOut: { none: {} },
+            movesIn: { none: {} },
+        },
+    });
+    if (deleted.count === 0) {
+        throw conflict(
+            `${target.name} has had students, teaching assignments or class moves. ` +
+                'Only an empty class can be deleted'
+        );
+    }
+
+    log.info(`Class ${target.name} (${target.academicYear.label}) deleted`);
+    return { id, name: target.name };
 }
 
 // ---------------------------------------------------------------------------
@@ -1163,11 +1352,17 @@ export {
     createAcademicYear,
     listAcademicYears,
     closeAcademicYear,
+    updateAcademicYear,
+    deleteAcademicYear,
     createSemester,
+    updateSemester,
+    deleteSemester,
     createClass,
     listClasses,
     getClass,
     changeHomeroom,
+    updateClass,
+    deleteClass,
     listMoveTargets,
     requestClassMove,
     listClassMoves,

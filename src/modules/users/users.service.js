@@ -50,13 +50,16 @@ const membershipSelect = {
     studentProfile: { select: { nisn: true, birthDate: true } },
     // A guardian's own claims, each with its id (to cancel a PENDING one) and the
     // reason it was turned down. The child's name is one the guardian typed; no
-    // NISN and nothing else about the child comes back.
+    // NISN and nothing else about the child comes back. endedAt tells a link that
+    // is over - the child left the school - from one that still grants sight: an
+    // ended link keeps its ACTIVE status as history.
     guardianLinks: {
         select: {
             id: true,
             status: true,
             relationship: true,
             rejectionReason: true,
+            endedAt: true,
             studentProfile: { select: { membership: { select: { user: { select: { fullName: true } } } } } },
         },
         orderBy: { createdAt: 'asc' },
@@ -121,6 +124,7 @@ async function loadMembership(userId) {
                 status: link.status,
                 relationship: link.relationship,
                 rejectionReason: link.rejectionReason,
+                endedAt: link.endedAt,
                 student: { fullName: link.studentProfile.membership.user.fullName },
             })),
         };

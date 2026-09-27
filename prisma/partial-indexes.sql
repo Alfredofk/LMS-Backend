@@ -52,3 +52,19 @@ CREATE UNIQUE INDEX "ClassMove_one_pending_per_student"
 CREATE UNIQUE INDEX "LeaveRequest_one_pending_per_membership"
     ON "LeaveRequest" ("membershipId")
     WHERE "status" = 'PENDING';
+
+-- One live profile per NISN, NIP and NUPTK at a school (owner, 2026-09-26). An
+-- ended profile - its membership LEFT - must repeat, or a student or teacher who
+-- left could never come back to the same school. Replaced the three total
+-- @@unique indexes in 20260925183529_profile_ended_at.
+CREATE UNIQUE INDEX "StudentProfile_live_nisn_per_school"
+    ON "StudentProfile" ("schoolId", "nisn")
+    WHERE "endedAt" IS NULL;
+
+CREATE UNIQUE INDEX "TeacherProfile_live_nip_per_school"
+    ON "TeacherProfile" ("schoolId", "nip")
+    WHERE "endedAt" IS NULL;
+
+CREATE UNIQUE INDEX "TeacherProfile_live_nuptk_per_school"
+    ON "TeacherProfile" ("schoolId", "nuptk")
+    WHERE "endedAt" IS NULL;

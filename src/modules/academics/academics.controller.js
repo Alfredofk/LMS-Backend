@@ -27,6 +27,20 @@ async function closeAcademicYear(req, res) {
     return ok(res, { academicYear, message: 'Academic year closed.' });
 }
 
+async function updateAcademicYear(req, res) {
+    const academicYear = await service.updateAcademicYear(
+        req.auth,
+        req.validated.params.id,
+        req.validated.body
+    );
+    return ok(res, { academicYear, message: 'Academic year updated.' });
+}
+
+async function deleteAcademicYear(req, res) {
+    const academicYear = await service.deleteAcademicYear(req.auth, req.validated.params.id);
+    return ok(res, { academicYear, message: 'Academic year deleted.' });
+}
+
 async function createSemester(req, res) {
     const academicYear = await service.createSemester(
         req.auth,
@@ -34,6 +48,21 @@ async function createSemester(req, res) {
         req.validated.body
     );
     return ok(res, { academicYear }, 201);
+}
+
+// A semester is always answered with its whole year, as createSemester does.
+async function updateSemester(req, res) {
+    const academicYear = await service.updateSemester(
+        req.auth,
+        req.validated.params.id,
+        req.validated.body
+    );
+    return ok(res, { academicYear, message: 'Semester updated.' });
+}
+
+async function deleteSemester(req, res) {
+    const academicYear = await service.deleteSemester(req.auth, req.validated.params.id);
+    return ok(res, { academicYear, message: 'Semester deleted.' });
 }
 
 // ---- class --------------------------------------------------------------------
@@ -57,6 +86,16 @@ async function changeHomeroom(req, res) {
         req.validated.body
     );
     return ok(res, { class: target, message: 'Homeroom teacher changed.' });
+}
+
+async function updateClass(req, res) {
+    const target = await service.updateClass(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, { class: target, message: 'Class updated.' });
+}
+
+async function deleteClass(req, res) {
+    const target = await service.deleteClass(req.auth, req.validated.params.id);
+    return ok(res, { class: target, message: 'Class deleted.' });
 }
 
 // ---- subjects -----------------------------------------------------------------
@@ -192,9 +231,15 @@ export {
     createAcademicYear,
     listAcademicYears,
     closeAcademicYear,
+    updateAcademicYear,
+    deleteAcademicYear,
     createSemester,
+    updateSemester,
+    deleteSemester,
     createClass,
     listClasses,
     getClass,
     changeHomeroom,
+    updateClass,
+    deleteClass,
 };

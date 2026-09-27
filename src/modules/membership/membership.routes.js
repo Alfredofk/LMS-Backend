@@ -20,6 +20,8 @@ import {
     listQuery,
     approveBody,
     rejectBody,
+    rejectRequestBody,
+    relationshipBody,
     bulkApproveBody,
 } from './membership.schema.js';
 
@@ -87,6 +89,12 @@ router.post(
     validate({ params: linkParams }),
     controller.cancelLink
 );
+router.patch(
+    '/me/children/:linkId',
+    requireActiveMembership,
+    validate({ params: linkParams, body: relationshipBody }),
+    controller.updateLinkRelationship
+);
 // Leaving at once - only a member who needs nobody's approval, a guardian.
 router.post('/me/leave', requireActiveMembership, controller.leave);
 // A teacher or a student asks instead, with a resignation letter (ticket 17).
@@ -123,7 +131,7 @@ reviewRouter.post(
 );
 reviewRouter.post(
     '/:id/reject',
-    validate({ params: idParams, body: rejectBody }),
+    validate({ params: idParams, body: rejectRequestBody }),
     controller.reject
 );
 

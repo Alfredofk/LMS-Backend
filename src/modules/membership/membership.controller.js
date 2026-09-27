@@ -58,6 +58,15 @@ async function cancelLink(req, res) {
     return ok(res, { link, message: 'Link request cancelled.' });
 }
 
+async function updateLinkRelationship(req, res) {
+    const link = await service.updateLinkRelationship(
+        req.auth,
+        req.validated.params.linkId,
+        req.validated.body
+    );
+    return ok(res, { link, message: 'Relationship updated.' });
+}
+
 async function addRoles(req, res) {
     const membership = await service.addRoles(req.auth, req.validated.body);
     return ok(
@@ -170,6 +179,7 @@ async function get(req, res) {
 async function approve(req, res) {
     const request_ = await service.approveRequest(req.auth, req.validated.params.id, {
         classId: req.validated.body.classId,
+        roles: req.validated.body.roles,
     });
     return ok(res, { request: request_, message: 'Released.' });
 }
@@ -177,6 +187,7 @@ async function approve(req, res) {
 async function reject(req, res) {
     const request_ = await service.rejectRequest(req.auth, req.validated.params.id, {
         reason: req.validated.body.reason,
+        roles: req.validated.body.roles,
     });
     return ok(res, { request: request_, message: 'Rejected.' });
 }
@@ -202,6 +213,7 @@ export {
     cancelRole,
     linkChild,
     cancelLink,
+    updateLinkRelationship,
     leave,
     submitLeaveRequest,
     listOwnLeaveRequests,

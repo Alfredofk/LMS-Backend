@@ -616,12 +616,13 @@ async function addRoles(auth, body) {
 }
 
 // What a guardian sees of their own link: the child's name they typed, never a
-// NISN or anything else about the child.
+// NISN or anything else about the child. endedAt is set once the child has left.
 const linkSelect = {
     id: true,
     status: true,
     relationship: true,
     rejectionReason: true,
+    endedAt: true,
     studentProfile: { select: { membership: { select: { user: { select: { fullName: true } } } } } },
 };
 
@@ -630,6 +631,7 @@ const linkView = (link) => ({
     status: link.status,
     relationship: link.relationship,
     rejectionReason: link.rejectionReason,
+    endedAt: link.endedAt,
     student: { fullName: link.studentProfile.membership.user.fullName },
 });
 
@@ -892,6 +894,27 @@ async function cancelLink(auth, linkId) {
     return linkView(await prisma.guardianStudent.findFirst({ where: { id: link.id }, select: linkSelect }));
 }
 
+// A guardian correcting how they are related to a child, on a link that is still
+// live - waiting or granting sight. No second approval (owner, 2026-09-26): the
+// relationship was the guardian's own word when they claimed the child, and the
+// reviewer matched the child, not the word. Not a decision, so no audit row.
+async function updateLinkRelationship(auth, linkId, { relationship }) {
+    const updated = await prisma.guardianStudent.updateMany({
+        where: {
+            id: linkId,
+            guardianMembershipId: auth.membershipId,
+            status: { in: ['PENDING', 'ACTIVE'] },
+            endedAt: null,
+        },
+        data: { relationship },
+    });
+    // Another member's link, another school's, or one that is over: one answer.
+    if (updated.count === 0) throw notFound('No live link of yours under that id');
+
+    log.info(`Child link relationship updated at ${auth.schoolName}`);
+    return linkView(await prisma.guardianStudent.findFirst({ where: { id: linkId }, select: linkSelect }));
+}
+
 // ---------------------------------------------------------------------------
 // Leaving - access revoked, nothing deleted (ADR-0004, ticket 06)
 // ---------------------------------------------------------------------------
@@ -998,9 +1021,9 @@ async function releaseOrphanedGuardian(tx, membershipId, { actorUserId, schoolId
 // done - ticket 11's account deletion calls it too - and always inside the
 // caller's transaction and tenant scope.
 //
-// Revocation, never deletion: the StudentProfile, the ended class placement, the
-// audit trail (and, once they exist, Scores and Report Cards) stay with the
-// school. Role rows are left as they are, as history: access ends because the
+// Revocation, never deletion: the ended StudentProfile, the ended class
+// placement, the audit trail (and, once they exist, Scores and Report Cards) stay
+// with the school. Role rows are left as they are, as history: access ends because the
 // membership is no longer ACTIVE, which requireActiveMembership and
 // hasActiveRole both read. Afterwards the person may ask any school again - the
 // partial unique index only counts PENDING and ACTIVE rows.
@@ -1021,6 +1044,18 @@ async function endMembership(
         data: { status: 'LEFT', endedAt: now, endReason: reason },
     });
     if (claimed.count === 0) throw conflict('This membership has already ended');
+
+    // The profiles end with it and stay as its history (owner, 2026-09-26). NISN,
+    // NIP and NUPTK are unique among live profiles only, so a person who comes
+    // back to this school gets a new profile with the same number.
+    await tx.studentProfile.updateMany({
+        where: { membershipId, endedAt: null },
+        data: { endedAt: now },
+    });
+    await tx.teacherProfile.updateMany({
+        where: { membershipId, endedAt: null },
+        data: { endedAt: now },
+    });
 
     await tx.membershipRole.updateMany({
         where: { membershipId, status: 'PENDING' },
@@ -1753,6 +1788,30 @@ function translateUniqueViolation(error) {
     return error;
 }
 
+// The part of a request one decision covers (owner, 2026-09-26). With no roles
+// named, everything this reviewer may release - one person holding two
+// releasers' authority (a Principal who is also the child's homeroom teacher)
+// decides TEACHER and GUARDIAN together. Named, only those roles; GUARDIAN
+// brings its child links, or names a further child's links on their own. A named
+// role that is not this reviewer's to decide here is refused, never skipped, so a
+// decision never quietly covers less than was asked.
+function pickDecided(decidable, decidableLinks, roles) {
+    if (!roles) return { releasable: decidable, links: decidableLinks };
+
+    const releasable = decidable.filter((role) => roles.includes(role.role));
+    const links = roles.includes('GUARDIAN') ? decidableLinks : [];
+
+    const missing = [...new Set(roles)].filter(
+        (role) =>
+            !releasable.some((entry) => entry.role === role) &&
+            !(role === 'GUARDIAN' && links.length > 0)
+    );
+    if (missing.length > 0) {
+        throw badRequest(`Nothing waits for you to decide as ${missing.join(' + ')} on this request`);
+    }
+    return { releasable, links };
+}
+
 // Approve or reject: one function, because they differ only in what they write.
 //
 // Each role is claimed with updateMany({ status: 'PENDING' }) inside the
@@ -1761,7 +1820,7 @@ function translateUniqueViolation(error) {
 //
 // updateMany, not update, for every tenant-owned write here: the extension ANDs
 // the school onto the where clause, and update() wants a unique one.
-async function decideRequest(auth, id, { action, classId, reason }) {
+async function decideRequest(auth, id, { action, classId, reason, roles }) {
     let trimmed = null;
     if (action === 'REJECT') {
         assertRejectionReason('REJECT', reason);
@@ -1770,9 +1829,13 @@ async function decideRequest(auth, id, { action, classId, reason }) {
 
     const membership = await loadRequest(id);
     const scope = await reviewerScope(auth.membershipId);
-    const releasable = releasableRoles(scope, membership);
-    const links = releasableLinks(scope, membership, releasable);
-    if (releasable.length === 0 && links.length === 0) throw notFound('Join request not found');
+    const decidable = releasableRoles(scope, membership);
+    const decidableLinks = releasableLinks(scope, membership, decidable);
+    if (decidable.length === 0 && decidableLinks.length === 0) {
+        throw notFound('Join request not found');
+    }
+
+    const { releasable, links } = pickDecided(decidable, decidableLinks, roles);
 
     // A link with no role released beside it is a further child on an ACTIVE
     // GUARDIAN role (linkChild): decided, and audited, on its own.
@@ -1959,22 +2022,24 @@ async function decideRequest(auth, id, { action, classId, reason }) {
     return requestView(reloaded, rolesAfter, releasableLinks(scopeAfter, reloaded, rolesAfter));
 }
 
-const approveRequest = (auth, id, { classId } = {}) =>
-    decideRequest(auth, id, { action: 'APPROVE', classId });
+const approveRequest = (auth, id, { classId, roles } = {}) =>
+    decideRequest(auth, id, { action: 'APPROVE', classId, roles });
 
-const rejectRequest = (auth, id, { reason } = {}) =>
-    decideRequest(auth, id, { action: 'REJECT', reason });
+const rejectRequest = (auth, id, { reason, roles } = {}) =>
+    decideRequest(auth, id, { action: 'REJECT', reason, roles });
 
 // Bulk approve, one transaction each rather than one for all: a homeroom teacher
 // releasing thirty students should not lose twenty-nine of them because the
 // thirtieth has a NISN that is already taken. Sequential, so every failure is
-// attributable, and only expected errors are repeated back to the caller.
-async function bulkApprove(auth, { ids, classId }) {
+// attributable, and only expected errors are repeated back to the caller. Named
+// roles apply to every id; one where a named role is not this reviewer's to
+// decide fails on its own, as any other id would.
+async function bulkApprove(auth, { ids, classId, roles }) {
     const results = [];
 
     for (const id of ids) {
         try {
-            const request = await approveRequest(auth, id, { classId });
+            const request = await approveRequest(auth, id, { classId, roles });
             results.push({ id, ok: true, status: request.status });
         } catch (error) {
             results.push({
@@ -2002,6 +2067,7 @@ export {
     cancelJoinRequest,
     cancelRole,
     cancelLink,
+    updateLinkRelationship,
     endMembership,
     leaveSchool,
     removeMember,

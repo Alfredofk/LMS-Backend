@@ -174,11 +174,21 @@ const listQuery = z.object({
     status: z.enum(['PENDING', 'ACTIVE', 'REJECTED']).default('PENDING'),
 });
 
+// Which of a request's waiting roles one decision covers (owner, 2026-09-26): a
+// Principal who is also the child's homeroom teacher may release a GUARDIAN and
+// turn the TEACHER down. Left out, it covers every role the reviewer may release,
+// as before. GUARDIAN also covers a further child's link on its own.
+const decidedRoles = z
+    .array(z.enum(REQUESTABLE_ROLES))
+    .min(1, 'Pick at least one role')
+    .max(3)
+    .optional();
+
 // classId is required only when a STUDENT role is being released, and the service
 // is what knows that - it must also check the class is one the reviewer is
 // homeroom of. Optional here so a TEACHER approval needs no body at all.
 const approveBody = z
-    .object({ classId: z.string().min(1).optional() })
+    .object({ classId: z.string().min(1).optional(), roles: decidedRoles })
     .default({});
 
 // approval.js owns "a reason is required", so every rejection in the system
@@ -187,9 +197,21 @@ const rejectBody = z.object({
     reason: z.string().max(500, 'Reason is too long').optional(),
 });
 
+// A join request's rejection, which may name its roles like an approval.
+const rejectRequestBody = rejectBody.extend({ roles: decidedRoles });
+
+// A guardian correcting how they are related to a child they are linked to
+// (owner, 2026-09-26): their own word, as when they claimed the child, so it
+// takes effect at once.
+const relationshipBody = z.strictObject({
+    relationship: z.string().trim().min(3, 'State the relationship').max(50),
+});
+
+// roles, when named, covers every id alike.
 const bulkApproveBody = z.object({
     ids: z.array(z.string().min(1)).min(1, 'Pick at least one request').max(50),
     classId: z.string().min(1).optional(),
+    roles: decidedRoles,
 });
 
 export {
@@ -208,5 +230,7 @@ export {
     listQuery,
     approveBody,
     rejectBody,
+    rejectRequestBody,
+    relationshipBody,
     bulkApproveBody,
 };
