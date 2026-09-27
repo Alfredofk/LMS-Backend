@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
     "migrate": "prisma migrate dev",
     "generate": "prisma generate",
     "seed": "node prisma/seed.js",
@@ -37,7 +36,6 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "jest": "^29.7.0",
     "prisma": "^6.19.3",
     "supertest": "^7.0.0"
   }

@@ -115,6 +115,17 @@ const rejectBody = z.object({
 const deactivateBody = rejectBody;
 const reactivateBody = rejectBody;
 
+// A Platform Admin appointing a school's Principal when the one before cannot hand
+// it over (owner, 2026-09-27). The admin sees no member list, so the successor is
+// named by the email of an active teacher there. Always with a reason, audited.
+const appointPrincipalBody = z.strictObject({
+    email: z
+        .email('Enter a valid email address')
+        .max(254)
+        .transform((value) => value.trim().toLowerCase()),
+    reason: z.string().trim().min(3, 'A reason is required').max(500, 'Reason is too long'),
+});
+
 export {
     registrationBody,
     idParams,
@@ -122,4 +133,5 @@ export {
     rejectBody,
     deactivateBody,
     reactivateBody,
+    appointPrincipalBody,
 };

@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 
 import { prisma } from '../../shared/prisma.js';
-import { runUnscoped } from '../../shared/tenantContext.js';
+import { runInSchool, runUnscoped } from '../../shared/tenantContext.js';
 import { getStorage } from '../../shared/storage.js';
 import { MIME } from '../../shared/upload.js';
 import { SCHOOL_TYPES } from '../../shared/schoolType.js';
@@ -14,6 +14,7 @@ import {
 import { isPrincipal } from '../../shared/guards.js';
 import { AppError, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
+import * as membershipService from '../membership/membership.service.js';
 
 const log = createLogger('School');
 
@@ -697,6 +698,33 @@ async function rotateSchoolCode(auth) {
     return schoolView(school);
 }
 
+// A Platform Admin appointing a school's Principal (owner, 2026-09-27), keyed by
+// the registration like deactivation, because that is the row the admin screen
+// holds. Works on a deactivated school too: one restored without a Principal
+// needs this before anyone can run it.
+async function appointPrincipal(id, { adminUserId, email, reason }) {
+    const registration = await runUnscoped('a platform admin appointing a Principal', async () =>
+        await loadRegistration(id)
+    );
+    if (registration.status !== 'APPROVED' || !registration.createdSchoolId) {
+        throw conflict('Only an approved registration has a school to appoint a Principal for', {
+            status: registration.status,
+        });
+    }
+
+    const school = await prisma.school.findUnique({
+        where: { id: registration.createdSchoolId },
+        select: { id: true, name: true },
+    });
+
+    const result = await runInSchool(school.id, school.name, () =>
+        membershipService.appointPrincipal({ schoolId: school.id, email, reason, adminUserId })
+    );
+
+    log.info(`A Principal was appointed at ${school.name} by a platform admin`);
+    return { school, ...result };
+}
+
 export {
     CODE_ALPHABET,
     CODE_LENGTH,
@@ -710,5 +738,6 @@ export {
     rejectRegistration,
     deactivateSchool,
     reactivateSchool,
+    appointPrincipal,
     rotateSchoolCode,
 };

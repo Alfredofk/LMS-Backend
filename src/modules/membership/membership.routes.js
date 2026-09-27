@@ -14,6 +14,7 @@ import {
     roleParams,
     linkParams,
     removeBody,
+    handoverBody,
     leaveRequestBody,
     leaveListQuery,
     membersQuery,
@@ -147,6 +148,12 @@ membersRouter.post(
     '/:id/remove',
     validate({ params: idParams, body: removeBody }),
     controller.removeMember
+);
+// Handing the school to the teacher named here (owner, 2026-09-27).
+membersRouter.post(
+    '/:id/handover',
+    validate({ params: idParams, body: handoverBody }),
+    controller.handOverPrincipal
 );
 
 // A fourth, mounted at /api/leave-requests: the Principal deciding who may leave

@@ -151,6 +151,21 @@ const removeBody = z.strictObject({
     reason: z.string().trim().min(3, 'A reason is required').max(500, 'Reason is too long'),
 });
 
+// Handing the school to a new Principal (owner, 2026-09-27). The member named in
+// the path takes over at once; the Principal handing over says whether they stay,
+// as a teacher, or leave. Staying without the TEACHER role takes a NIP or NUPTK,
+// as adding that role always does - and naming one while leaving is refused rather
+// than ignored.
+const handoverBody = z
+    .strictObject({
+        stay: z.boolean(),
+        teacher: teacherPayload.optional(),
+    })
+    .refine((value) => value.stay || value.teacher === undefined, {
+        message: 'Teacher details are only for staying as a teacher',
+        path: ['teacher'],
+    });
+
 // A leave request (ticket 17) arrives as multipart/form-data, the letter beside
 // this one text field, so it is an object rather than strictObject: multer puts
 // only fields on req.body, and a stray one is harmless here. The reason becomes
@@ -224,6 +239,7 @@ export {
     roleParams,
     linkParams,
     removeBody,
+    handoverBody,
     leaveRequestBody,
     leaveListQuery,
     membersQuery,

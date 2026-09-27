@@ -102,4 +102,27 @@ async function rotateCode(req, res) {
     });
 }
 
-export { submit, listMine, list, get, ktp, approve, reject, deactivate, reactivate, rotateCode };
+async function appointPrincipal(req, res) {
+    const result = await service.appointPrincipal(req.validated.params.id, {
+        ...reviewer(req),
+        ...req.validated.body,
+    });
+    return ok(res, {
+        ...result,
+        message: `${result.principal.fullName} is the Principal of ${result.school.name} now.`,
+    });
+}
+
+export {
+    submit,
+    listMine,
+    list,
+    get,
+    ktp,
+    approve,
+    reject,
+    deactivate,
+    reactivate,
+    appointPrincipal,
+    rotateCode,
+};

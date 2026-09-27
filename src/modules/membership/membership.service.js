@@ -1274,6 +1274,244 @@ async function removeMember(auth, membershipId, { reason }) {
 }
 
 // ---------------------------------------------------------------------------
+// Handing the school to a new Principal (owner, 2026-09-27)
+// ---------------------------------------------------------------------------
+//
+// A school has one Principal, and until now nothing could change who. Two ways in:
+// the Principal hands over to an active teacher here, at once, and says whether
+// they stay (as a teacher) or leave; or, when that Principal cannot, a Platform
+// Admin appoints one (school.service.js). The PRINCIPAL role taken away becomes
+// ENDED on a membership that may stay ACTIVE: every check reads status ACTIVE, so
+// it grants nothing from that moment, whatever the old token still claims.
+
+const HANDED_OVER = 'Handed the school over to a new Principal';
+const NO_SUCH_TEACHER = 'No active teacher of this school uses that email';
+
+// Only one appointment at a time per school: the School row is the lock, so two
+// hand-overs or two admins cannot each leave a Principal behind.
+const lockSchool = (tx, schoolId, now) =>
+    tx.school.updateMany({ where: { id: schoolId }, data: { updatedAt: now } });
+
+// The member who takes over: ACTIVE here and holding TEACHER (owner: only a
+// teacher). A student can hold no other role, so this rules them out too.
+async function loadSuccessor(where, missing) {
+    const successor = await prisma.schoolMembership.findFirst({
+        where: { ...where, status: 'ACTIVE' },
+        select: {
+            id: true,
+            user: { select: { fullName: true } },
+            roles: { where: { status: 'ACTIVE' }, select: { role: true } },
+        },
+    });
+    if (!successor) throw notFound(missing);
+
+    const held = successor.roles.map((entry) => entry.role);
+    if (held.includes('PRINCIPAL')) throw conflict('That member is already the Principal');
+    if (!held.includes('TEACHER')) {
+        throw badRequest('The new Principal must be an active teacher at this school');
+    }
+    return successor;
+}
+
+// The PRINCIPAL role, on a row of its own or on the one an earlier term left
+// ENDED (@@unique([membershipId, role]) allows one row per role). Checked again
+// under the lock: the successor may have left since they were read.
+async function grantPrincipal(tx, { membershipId, actorUserId, now }) {
+    const still = await tx.schoolMembership.findFirst({
+        where: { id: membershipId, status: 'ACTIVE' },
+        select: { id: true },
+    });
+    if (!still) throw conflict('The new Principal is no longer a member here');
+
+    const data = {
+        status: 'ACTIVE',
+        approvedByUserId: actorUserId,
+        approvedAt: now,
+        rejectionReason: null,
+    };
+    const prior = await tx.membershipRole.findFirst({
+        where: { membershipId, role: 'PRINCIPAL' },
+        select: { id: true },
+    });
+    if (prior) {
+        await tx.membershipRole.updateMany({ where: { id: prior.id }, data });
+    } else {
+        await tx.membershipRole.create({ data: { membershipId, role: 'PRINCIPAL', ...data } });
+    }
+}
+
+// The Principal's own hand-over. At once: the successor is a teacher here the
+// Principal already knows (owner). Staying means staying as a teacher - the TEACHER
+// role is given, with its NIP or NUPTK, if the Principal did not hold it. Leaving
+// is Leaving, with its homeroom rule.
+async function handOverPrincipal(auth, membershipId, { stay, teacher }) {
+    if (!(await isPrincipal(auth.membershipId))) throw forbidden('Only the Principal can do this');
+    if (membershipId === auth.membershipId) throw badRequest('Name the member who takes over');
+
+    const successor = await loadSuccessor({ id: membershipId }, 'Member not found');
+
+    const own = await prisma.schoolMembership.findFirst({
+        where: { id: auth.membershipId },
+        select: {
+            roles: { select: { id: true, role: true, status: true } },
+            teacherProfile: { select: { id: true } },
+        },
+    });
+    const teaches = own.roles.some((entry) => entry.role === 'TEACHER' && entry.status === 'ACTIVE');
+    if (stay && !teaches && !teacher) {
+        throw badRequest('Give your NIP or NUPTK to stay as a teacher');
+    }
+    if (teaches && teacher) {
+        throw badRequest('You already teach here. Leave out the teacher details');
+    }
+
+    const now = new Date();
+
+    try {
+        await prisma.$transaction(async (tx) => {
+            await lockSchool(tx, auth.schoolId, now);
+            if (!stay) await assertNoActiveHomeroom(tx, auth.membershipId, 'You are');
+
+            // The claim: a second hand-over racing this one finds nothing to end.
+            const handed = await tx.membershipRole.updateMany({
+                where: { membershipId: auth.membershipId, role: 'PRINCIPAL', status: 'ACTIVE' },
+                data: { status: 'ENDED' },
+            });
+            if (handed.count === 0) throw conflict('You are no longer the Principal');
+
+            await grantPrincipal(tx, { membershipId: successor.id, actorUserId: auth.userId, now });
+            await recordAudit({
+                schoolId: auth.schoolId,
+                subjectType: MEMBERSHIP_SUBJECT,
+                subjectId: successor.id,
+                action: 'HANDOVER',
+                actorUserId: auth.userId,
+                client: tx,
+            });
+
+            if (stay && !teaches) {
+                const data = {
+                    status: 'ACTIVE',
+                    approvedByUserId: auth.userId,
+                    approvedAt: now,
+                    rejectionReason: null,
+                };
+                // A TEACHER row turned down or cancelled earlier is moved back, as
+                // addRoles does: one row per role.
+                const closed = own.roles.find((entry) => entry.role === 'TEACHER');
+                let roleId;
+                if (closed) {
+                    await tx.membershipRole.updateMany({ where: { id: closed.id }, data });
+                    roleId = closed.id;
+                } else {
+                    const created = await tx.membershipRole.create({
+                        data: { membershipId: auth.membershipId, role: 'TEACHER', ...data },
+                    });
+                    roleId = created.id;
+                }
+
+                const identifiers = { nip: teacher.nip ?? null, nuptk: teacher.nuptk ?? null };
+                if (own.teacherProfile) {
+                    await tx.teacherProfile.updateMany({
+                        where: { id: own.teacherProfile.id },
+                        data: identifiers,
+                    });
+                } else {
+                    await tx.teacherProfile.create({
+                        data: { membershipId: auth.membershipId, ...identifiers },
+                    });
+                }
+
+                await recordAudit({
+                    schoolId: auth.schoolId,
+                    subjectType: ROLE_SUBJECT,
+                    subjectId: roleId,
+                    action: 'APPROVE',
+                    actorUserId: auth.userId,
+                    client: tx,
+                });
+            }
+
+            if (!stay) {
+                await endMembership(tx, {
+                    membershipId: auth.membershipId,
+                    schoolId: auth.schoolId,
+                    action: 'LEAVE',
+                    actorUserId: auth.userId,
+                    reason: HANDED_OVER,
+                    now,
+                });
+            }
+        });
+    } catch (error) {
+        throw translateUniqueViolation(error);
+    }
+
+    log.info(`The Principal of ${auth.schoolName} handed over and ${stay ? 'stays as a teacher' : 'left'}`);
+    return {
+        principal: { membershipId: successor.id, fullName: successor.user.fullName },
+        you: { status: stay ? 'ACTIVE' : 'LEFT' },
+    };
+}
+
+// A Platform Admin appointing the Principal, inside the school's scope (the
+// caller opens it). For a Principal who cannot hand over - unreachable, gone, or
+// a school restored without one. Whoever held PRINCIPAL loses it; one holding
+// another role stays, one holding nothing else is removed with the admin's reason.
+async function appointPrincipal({ schoolId, email, reason, adminUserId }) {
+    // User is above tenancy; the membership lookup below is this school's alone.
+    const user = await prisma.user.findUnique({
+        where: { email },
+        select: { id: true, deletedAt: true },
+    });
+    if (!user || user.deletedAt) throw notFound(NO_SUCH_TEACHER);
+    const successor = await loadSuccessor({ userId: user.id }, NO_SUCH_TEACHER);
+
+    const now = new Date();
+    const previous = [];
+
+    await prisma.$transaction(async (tx) => {
+        await lockSchool(tx, schoolId, now);
+
+        const holders = await tx.schoolMembership.findMany({
+            where: { status: 'ACTIVE', roles: { some: { role: 'PRINCIPAL', status: 'ACTIVE' } } },
+            select: { id: true, roles: { where: { status: 'ACTIVE' }, select: { role: true } } },
+        });
+        for (const holder of holders) {
+            await tx.membershipRole.updateMany({
+                where: { membershipId: holder.id, role: 'PRINCIPAL', status: 'ACTIVE' },
+                data: { status: 'ENDED' },
+            });
+            const keeps = holder.roles.some((entry) => entry.role !== 'PRINCIPAL');
+            if (!keeps) {
+                await endMembership(tx, {
+                    membershipId: holder.id,
+                    schoolId,
+                    action: 'REMOVE',
+                    actorUserId: adminUserId,
+                    reason,
+                    now,
+                });
+            }
+            previous.push({ membershipId: holder.id, status: keeps ? 'ACTIVE' : 'LEFT' });
+        }
+
+        await grantPrincipal(tx, { membershipId: successor.id, actorUserId: adminUserId, now });
+        await recordAudit({
+            schoolId,
+            subjectType: MEMBERSHIP_SUBJECT,
+            subjectId: successor.id,
+            action: 'HANDOVER',
+            actorUserId: adminUserId,
+            reason,
+            client: tx,
+        });
+    });
+
+    return { principal: { membershipId: successor.id, fullName: successor.user.fullName }, previous };
+}
+
+// ---------------------------------------------------------------------------
 // Leave requests - a teacher or a student asking the Principal (ticket 17)
 // ---------------------------------------------------------------------------
 
@@ -2082,6 +2320,8 @@ export {
     endMembership,
     leaveSchool,
     removeMember,
+    handOverPrincipal,
+    appointPrincipal,
     submitLeaveRequest,
     listOwnLeaveRequests,
     cancelLeaveRequest,

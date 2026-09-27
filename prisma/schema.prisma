@@ -54,6 +54,12 @@ enum ApprovalStatus {
     /// Taken back by the person who asked, before anybody decided (owner, 2026-09-23).
     /// Not REJECTED: nobody turned it down, and it never counts against a retry cap.
     CANCELLED
+    /// A role taken off a membership that stays ACTIVE - so far only PRINCIPAL, when the
+    /// school is handed to a new Principal (owner, 2026-09-27). Every check reads
+    /// status ACTIVE, so an ended role grants nothing without anyone having to know
+    /// about this value. A role of a LEFT membership is not ENDED: it keeps its status
+    /// as history, and the membership's status is what ends its access.
+    ENDED
 }
 
 enum MembershipStatus {
@@ -104,6 +110,8 @@ enum ApprovalAction {
     REACTIVATE
     /// The person who asked taking a PENDING request back.
     CANCEL
+    /// The school handed to a new Principal, by the one before or by a Platform Admin.
+    HANDOVER
 }
 
 // ---------------------------------------------------------------------------

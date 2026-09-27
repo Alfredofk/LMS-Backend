@@ -240,9 +240,9 @@ async function confirmIdentity(user, { password, googleIdToken }) {
 // What the person belongs to goes first, in the same transaction:
 // - a join request still waiting is cancelled, as if they had taken it back;
 // - an ACTIVE membership leaves through endMembership, the one Leaving function -
-//   refused for a Principal, and for a teacher or student while their school is
-//   in operation (they send a leave request instead). At a deactivated school
-//   nobody could approve that request, so they leave here (owner, 2026-09-27);
+//   refused, while the school is in operation, for a Principal and for a teacher
+//   or student (who send a leave request instead). At a deactivated school
+//   nobody could approve that request, so anyone leaves here (owner, 2026-09-27);
 // - a school registration still under review is closed, and its KTP deleted.
 async function deleteAccount(userId, body) {
     const user = await loadUser(userId);
@@ -260,14 +260,17 @@ async function deleteAccount(userId, body) {
         })
     );
 
-    if (membership?.status === 'ACTIVE') {
+    // Only a school in operation holds anyone back. A deactivated one can take no
+    // leave request and needs no Principal while it is off; if it is restored
+    // without one, the Platform Admin appoints another (owner, 2026-09-27).
+    if (membership?.status === 'ACTIVE' && !membership.school.deactivatedAt) {
         const held = membership.roles.map((entry) => entry.role);
         if (held.includes('PRINCIPAL')) {
             throw conflict(
                 'A school cannot be left without its Principal, so this account cannot be deleted yet'
             );
         }
-        if (!membership.school.deactivatedAt && held.some((role) => NEEDS_LEAVE_REQUEST.includes(role))) {
+        if (held.some((role) => NEEDS_LEAVE_REQUEST.includes(role))) {
             throw conflict(
                 'A teacher or a student leaves with the Principal’s approval. Send a leave request ' +
                     'with your resignation letter first, then delete your account.'

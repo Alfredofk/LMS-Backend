@@ -13,6 +13,7 @@ import {
     rejectBody,
     deactivateBody,
     reactivateBody,
+    appointPrincipalBody,
 } from './school.schema.js';
 
 // Two routers, because two different people use them.
@@ -68,6 +69,13 @@ adminRouter.post(
     '/:id/reactivate',
     validate({ params: idParams, body: reactivateBody }),
     controller.reactivate
+);
+// Appointing the school's Principal when the one before cannot hand it over
+// (owner, 2026-09-27). The successor is named by email: the admin sees no roster.
+adminRouter.post(
+    '/:id/principal',
+    validate({ params: idParams, body: appointPrincipalBody }),
+    controller.appointPrincipal
 );
 
 // A third router, for the school's own people, mounted at /api/school. The
