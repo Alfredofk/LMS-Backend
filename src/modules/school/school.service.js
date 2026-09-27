@@ -700,6 +700,7 @@ async function rotateSchoolCode(auth) {
 export {
     CODE_ALPHABET,
     CODE_LENGTH,
+    discardKtp,
     submitRegistration,
     listMine,
     listRegistrations,

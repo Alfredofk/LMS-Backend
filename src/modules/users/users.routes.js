@@ -3,12 +3,12 @@ import { Router } from 'express';
 import { requireAuth } from '../../shared/auth.js';
 import { validate } from '../../shared/validate.js';
 import * as controller from './users.controller.js';
-import { updateMeBody, changePasswordBody } from './users.schema.js';
+import { updateMeBody, changePasswordBody, deleteMeBody } from './users.schema.js';
 
 // requireAuth on the router rather than route by route, so a handler added later
 // cannot be left open by omission.
 //
-// A token issued to someone with no active membership reaches all three of these
+// A token issued to someone with no active membership reaches all four of these
 // and nothing else - requireAuth opens no school scope for it (auth.js:103), so
 // any tenant-owned query it could trigger throws. That is ticket 03's "Done
 // when", enforced by the extension rather than by a check anyone can forget.
@@ -23,5 +23,8 @@ router.post(
     validate({ body: changePasswordBody }),
     controller.changePassword
 );
+// Deleting one's own account (ticket 11, ADR-0007). No requireActiveMembership:
+// a person who belongs nowhere, or only asked to, may delete theirs too.
+router.delete('/me', validate({ body: deleteMeBody }), controller.deleteMe);
 
 export default router;

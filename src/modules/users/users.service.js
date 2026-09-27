@@ -1,7 +1,9 @@
 import { prisma } from '../../shared/prisma.js';
-import { runUnscoped } from '../../shared/tenantContext.js';
+import { runInSchool, runUnscoped } from '../../shared/tenantContext.js';
 import { hashPassword, verifyPassword } from '../../shared/auth.js';
-import { AppError, notFound, unauthorized } from '../../shared/errors.js';
+import { googleVerifier } from '../../shared/google.js';
+import { recordAudit } from '../../shared/approval.js';
+import { AppError, badRequest, conflict, notFound, unauthorized } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
 import {
     publicUser,
@@ -9,6 +11,8 @@ import {
     revokeAllRefreshTokens,
     authResponse,
 } from '../auth/auth.service.js';
+import { cancelPendingMembership, endMembership } from '../membership/membership.service.js';
+import { discardKtp } from '../school/school.service.js';
 
 const log = createLogger('Users');
 
@@ -195,4 +199,185 @@ async function changePassword(userId, { currentPassword, newPassword }, { rememb
     return authResponse(updated, token, { rememberMe });
 }
 
-export { loadMembership, getMe, updateMe, changePassword };
+// ---------------------------------------------------------------------------
+// Deleting one's own account (ticket 11, ADR-0007)
+// ---------------------------------------------------------------------------
+
+// Leaving as a TEACHER or a STUDENT needs the Principal's approval (ADR-0006), so
+// at a school still in operation they send a leave request first.
+const NEEDS_LEAVE_REQUEST = ['TEACHER', 'STUDENT'];
+
+const ENDED_BY_DELETION = 'Account deleted';
+const ENDED_AT_DEACTIVATED_SCHOOL = 'Account deleted while the school was deactivated';
+const REGISTRATION_CLOSED = 'The applicant deleted their account';
+
+// The person proves it again: a stolen access token must not be enough to erase
+// somebody. An account with a password gives it; one without (made through
+// Google, ADR-0005) gives a fresh Google ID token for the account linked here.
+async function confirmIdentity(user, { password, googleIdToken }) {
+    if (user.passwordHash) {
+        if (!password) throw badRequest('Confirm with your password');
+        if (!(await verifyPassword(password, user.passwordHash))) {
+            throw unauthorized('Password is incorrect');
+        }
+        return;
+    }
+
+    if (!googleIdToken) throw badRequest('This account has no password. Confirm with Google');
+    const google = await googleVerifier.verify(googleIdToken);
+    if (!user.googleSub || google.sub !== user.googleSub) {
+        throw unauthorized('That Google account is not the one linked to this account');
+    }
+}
+
+// Deleting an account removes the person's sign-in identity and keeps every
+// school record. The User row stays - memberships, audit rows and, later, scores
+// point at it - with the email released, Google unlinked, the password gone and
+// every session ended. fullName stays, so a school's records still name who they
+// are about. The same address, or the same Google account, can then register as
+// a new User.
+//
+// What the person belongs to goes first, in the same transaction:
+// - a join request still waiting is cancelled, as if they had taken it back;
+// - an ACTIVE membership leaves through endMembership, the one Leaving function -
+//   refused for a Principal, and for a teacher or student while their school is
+//   in operation (they send a leave request instead). At a deactivated school
+//   nobody could approve that request, so they leave here (owner, 2026-09-27);
+// - a school registration still under review is closed, and its KTP deleted.
+async function deleteAccount(userId, body) {
+    const user = await loadUser(userId);
+    await confirmIdentity(user, body);
+
+    const membership = await runUnscoped('finding what an account being deleted belongs to', async () =>
+        await prisma.schoolMembership.findFirst({
+            where: { userId, status: { in: ['PENDING', 'ACTIVE'] } },
+            select: {
+                id: true,
+                status: true,
+                roles: { where: { status: 'ACTIVE' }, select: { role: true } },
+                school: { select: { id: true, name: true, deactivatedAt: true } },
+            },
+        })
+    );
+
+    if (membership?.status === 'ACTIVE') {
+        const held = membership.roles.map((entry) => entry.role);
+        if (held.includes('PRINCIPAL')) {
+            throw conflict(
+                'A school cannot be left without its Principal, so this account cannot be deleted yet'
+            );
+        }
+        if (!membership.school.deactivatedAt && held.some((role) => NEEDS_LEAVE_REQUEST.includes(role))) {
+            throw conflict(
+                'A teacher or a student leaves with the Principal’s approval. Send a leave request ' +
+                    'with your resignation letter first, then delete your account.'
+            );
+        }
+    }
+
+    const registration = await prisma.schoolRegistration.findFirst({
+        where: { applicantUserId: userId, status: 'PENDING' },
+        select: { id: true, ktpStoragePath: true },
+    });
+
+    const now = new Date();
+
+    const write = () =>
+        prisma.$transaction(async (tx) => {
+            if (membership?.status === 'PENDING') {
+                await cancelPendingMembership(tx, {
+                    membershipId: membership.id,
+                    schoolId: membership.school.id,
+                    userId,
+                    now,
+                });
+            }
+            if (membership?.status === 'ACTIVE') {
+                await endMembership(tx, {
+                    membershipId: membership.id,
+                    schoolId: membership.school.id,
+                    action: 'LEAVE',
+                    actorUserId: userId,
+                    reason: membership.school.deactivatedAt
+                        ? ENDED_AT_DEACTIVATED_SCHOOL
+                        : ENDED_BY_DELETION,
+                    now,
+                });
+            }
+
+            // Unscoped even inside a school's scope: a registration predates any
+            // school, and its audit row must not be stamped with this one.
+            if (registration) {
+                await runUnscoped('closing the school registration of an account being deleted', async () => {
+                    const claimed = await tx.schoolRegistration.updateMany({
+                        where: { id: registration.id, status: 'PENDING' },
+                        data: {
+                            status: 'REJECTED',
+                            rejectionReason: REGISTRATION_CLOSED,
+                            reviewedAt: now,
+                            ktpStoragePath: null,
+                        },
+                    });
+                    if (claimed.count === 0) {
+                        throw conflict('Your school registration was decided meanwhile. Try again.');
+                    }
+
+                    await recordAudit({
+                        subjectType: 'SchoolRegistration',
+                        subjectId: registration.id,
+                        action: 'CANCEL',
+                        actorUserId: userId,
+                        reason: REGISTRATION_CLOSED,
+                        client: tx,
+                    });
+                });
+            }
+
+            // .invalid is a reserved TLD: the address can never receive mail, and
+            // the id keeps it unique.
+            const released = await tx.user.updateMany({
+                where: { id: userId, deletedAt: null },
+                data: {
+                    email: `deleted+${userId}@deleted.invalid`,
+                    googleSub: null,
+                    passwordHash: null,
+                    deletedAt: now,
+                },
+            });
+            if (released.count === 0) throw conflict('This account is already deleted');
+
+            await tx.refreshToken.updateMany({
+                where: { userId, revokedAt: null },
+                data: { revokedAt: now },
+            });
+            await tx.emailVerificationToken.updateMany({
+                where: { userId, usedAt: null },
+                data: { usedAt: now },
+            });
+            await tx.passwordResetToken.updateMany({
+                where: { userId, usedAt: null },
+                data: { usedAt: now },
+            });
+        });
+
+    await (membership ? runInSchool(membership.school.id, membership.school.name, write) : write());
+
+    // After the commit, as the admin's decision does it: a file that fails to go
+    // is logged for a human, and cannot undo the deletion.
+    if (registration) await discardKtp(registration.ktpStoragePath, registration.id);
+
+    log.info(`Account ${userId} deleted`);
+
+    return {
+        deleted: true,
+        membership: membership
+            ? {
+                school: { name: membership.school.name },
+                status: membership.status === 'PENDING' ? 'CANCELLED' : 'LEFT',
+            }
+            : null,
+        schoolRegistrationClosed: Boolean(registration),
+    };
+}
+
+export { loadMembership, getMe, updateMe, changePassword, deleteAccount };

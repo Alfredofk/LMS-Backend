@@ -23,4 +23,17 @@ async function changePassword(req, res) {
     });
 }
 
-export { getMe, updateMe, changePassword };
+// What was kept is said in the answer itself (UU PDP Pasal 45): the person is told
+// that deletion happened, and that their name stays on the school's records.
+async function deleteMe(req, res) {
+    const result = await service.deleteAccount(req.auth.userId, req.validated.body);
+    return ok(res, {
+        ...result,
+        message:
+            'Your account is deleted and you are signed out everywhere. Your sign-in details are ' +
+            'gone and the email address is free to register again. Your name stays on the ' +
+            'records of any school you belonged to, which keeps them.',
+    });
+}
+
+export { getMe, updateMe, changePassword, deleteMe };

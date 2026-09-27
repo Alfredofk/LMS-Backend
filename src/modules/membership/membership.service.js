@@ -755,40 +755,50 @@ async function cancelJoinRequest(userId) {
     );
     if (!pending) throw notFound('You have no join request waiting');
 
-    const now = new Date();
-
     await runInSchool(pending.school.id, pending.school.name, async () => {
-        await prisma.$transaction(async (tx) => {
-            // The claim is also the lock: decideRequest updates this same row first.
-            const claimed = await tx.schoolMembership.updateMany({
-                where: { id: pending.id, status: 'PENDING' },
-                data: { status: 'CANCELLED', endedAt: now },
-            });
-            if (claimed.count === 0) throw conflict('This join request has already been decided');
-
-            await tx.membershipRole.updateMany({
-                where: { membershipId: pending.id, status: 'PENDING' },
-                data: { status: 'CANCELLED' },
-            });
-            await tx.guardianStudent.updateMany({
-                where: { guardianMembershipId: pending.id, status: 'PENDING' },
-                data: { status: 'CANCELLED', endedAt: now },
-            });
-
-            await recordAudit({
+        await prisma.$transaction((tx) =>
+            cancelPendingMembership(tx, {
+                membershipId: pending.id,
                 schoolId: pending.school.id,
-                subjectType: MEMBERSHIP_SUBJECT,
-                subjectId: pending.id,
-                action: 'CANCEL',
-                actorUserId: userId,
-                client: tx,
-            });
-        });
+                userId,
+                now: new Date(),
+            })
+        );
 
         log.info(`Join request cancelled at ${pending.school.name}`);
     });
 
     return { id: pending.id, status: 'CANCELLED', school: { name: pending.school.name } };
+}
+
+// The cancellation itself, inside the caller's transaction and school scope. Its
+// own function because deleting an account (ticket 11) takes a waiting join
+// request back in exactly this way, in the same transaction as the rest.
+async function cancelPendingMembership(tx, { membershipId, schoolId, userId, now }) {
+    // The claim is also the lock: decideRequest updates this same row first.
+    const claimed = await tx.schoolMembership.updateMany({
+        where: { id: membershipId, status: 'PENDING' },
+        data: { status: 'CANCELLED', endedAt: now },
+    });
+    if (claimed.count === 0) throw conflict('This join request has already been decided');
+
+    await tx.membershipRole.updateMany({
+        where: { membershipId, status: 'PENDING' },
+        data: { status: 'CANCELLED' },
+    });
+    await tx.guardianStudent.updateMany({
+        where: { guardianMembershipId: membershipId, status: 'PENDING' },
+        data: { status: 'CANCELLED', endedAt: now },
+    });
+
+    await recordAudit({
+        schoolId,
+        subjectType: MEMBERSHIP_SUBJECT,
+        subjectId: membershipId,
+        action: 'CANCEL',
+        actorUserId: userId,
+        client: tx,
+    });
 }
 
 // One PENDING role on an ACTIVE membership, asked for through /me/roles. The
@@ -2065,6 +2075,7 @@ export {
     addRoles,
     linkChild,
     cancelJoinRequest,
+    cancelPendingMembership,
     cancelRole,
     cancelLink,
     updateLinkRelationship,
