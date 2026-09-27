@@ -42,6 +42,7 @@ const membershipSelect = {
             durationYears: true,
             latitude: true,
             longitude: true,
+            timeZone: true,
             deactivatedAt: true,
             deactivationReason: true,
         },
@@ -82,7 +83,8 @@ const membershipSelect = {
 //
 // The school's point follows the same split (teaching-and-learning ticket 01):
 // every member learns whether one is set - without it there is no self check-in -
-// and only the Principal, who corrects it, sees the coordinates.
+// and only the Principal, who corrects it, sees the coordinates. The time zone is
+// every member's: the frontend shows the school's times in it (ticket 07).
 function schoolForMember(school, roles) {
     const principal = roles.some((role) => role.role === 'PRINCIPAL' && role.status === 'ACTIVE');
     return {
@@ -90,6 +92,7 @@ function schoolForMember(school, roles) {
         name: school.name,
         schoolType: school.schoolType,
         durationYears: school.durationYears,
+        timeZone: school.timeZone,
         hasLocation: school.latitude !== null && school.longitude !== null,
         location: principal && school.latitude !== null
             ? {

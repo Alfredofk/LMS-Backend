@@ -107,6 +107,11 @@ async function updateLocation(req, res) {
     return ok(res, { school, message: 'School location updated.' });
 }
 
+async function updateTimeZone(req, res) {
+    const school = await service.updateSchoolTimeZone(req.auth, req.validated.body);
+    return ok(res, { school, message: 'School time zone updated.' });
+}
+
 async function appointPrincipal(req, res) {
     const result = await service.appointPrincipal(req.validated.params.id, {
         ...reviewer(req),
@@ -131,4 +136,5 @@ export {
     appointPrincipal,
     rotateCode,
     updateLocation,
+    updateTimeZone,
 };

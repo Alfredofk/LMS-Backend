@@ -15,6 +15,7 @@ import {
     reactivateBody,
     appointPrincipalBody,
     locationBody,
+    timeZoneBody,
 } from './school.schema.js';
 
 // Two routers, because two different people use them.
@@ -90,6 +91,8 @@ memberRouter.use(requireAuth, requireActiveMembership, requireRole('PRINCIPAL'))
 memberRouter.post('/code/rotate', controller.rotateCode);
 // Correcting the school's point (teaching-and-learning ticket 01).
 memberRouter.patch('/location', validate({ body: locationBody }), controller.updateLocation);
+// The zone the school's timetable is written in (teaching-and-learning ticket 07).
+memberRouter.patch('/time-zone', validate({ body: timeZoneBody }), controller.updateTimeZone);
 
 export default router;
 export { adminRouter, memberRouter };

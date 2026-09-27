@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { SCHOOL_TYPES, SCHOOL_TYPE_NAMES, isValidDurationYears } from '../../shared/schoolType.js';
+import { TIME_ZONES } from '../../shared/timeZone.js';
 
 // The registration arrives as multipart/form-data, because the KTP rides along
 // with it, so every field here starts life as a string.
@@ -38,6 +39,11 @@ const coordinate = (name, min, max) =>
 const latitude = coordinate('Latitude', -11, 6);
 const longitude = coordinate('Longitude', 95, 141);
 
+// The zone the school's timetable is written in (teaching-and-learning ticket 07).
+// Chosen, never guessed from the point: the WIB/WITA line follows provinces, not
+// a meridian (West and Central Kalimantan are WIB, South and East are WITA).
+const timeZone = z.enum(TIME_ZONES, 'Choose WIB, WITA or WIT');
+
 const registrationBody = z
     .object({
         npsn,
@@ -46,6 +52,7 @@ const registrationBody = z
         city: z.string().trim().min(2, 'City is required').max(100),
         latitude,
         longitude,
+        timeZone,
         applicantPhone,
         durationYears: z.preprocess(blankToUndefined, z.coerce.number().int().optional()),
     })
@@ -139,6 +146,10 @@ const reactivateBody = rejectBody;
 // registration. Both fields, always: half a point is not a place.
 const locationBody = z.strictObject({ latitude, longitude });
 
+// The Principal changing the zone - refused once the school has Sessions (the
+// service's rule, from ticket 02 on).
+const timeZoneBody = z.strictObject({ timeZone });
+
 // A Platform Admin appointing a school's Principal when the one before cannot hand
 // it over (owner, 2026-09-27). The admin sees no member list, so the successor is
 // named by the email of an active teacher there. Always with a reason, audited.
@@ -159,4 +170,5 @@ export {
     reactivateBody,
     appointPrincipalBody,
     locationBody,
+    timeZoneBody,
 };

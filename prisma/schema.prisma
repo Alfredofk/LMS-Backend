@@ -36,6 +36,15 @@ enum SchoolType {
     SMK
 }
 
+/// Indonesia's three time zones, each a fixed offset - there is no daylight saving:
+/// WIB UTC+7, WITA UTC+8, WIT UTC+9. A school's schedule is written in its own
+/// (teaching-and-learning ticket 07); src/shared/timeZone.js converts.
+enum SchoolTimeZone {
+    WIB
+    WITA
+    WIT
+}
+
 /// No value is ever named WALI: Indonesian shortens both wali kelas (homeroom
 /// teacher) and wali murid (guardian) to "wali", and they are different people
 /// with different access. Homeroom teacher is not a role at all - it is
@@ -114,6 +123,8 @@ enum ApprovalAction {
     HANDOVER
     /// The Principal correcting the school's point on the map (teaching-and-learning 01).
     UPDATE_LOCATION
+    /// The Principal changing the school's time zone (teaching-and-learning 07).
+    UPDATE_TIME_ZONE
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +241,8 @@ model SchoolRegistration {
     /// ticket 01). Required of new registrations; null on ones filed before it.
     latitude        Float?
     longitude       Float?
+    /// Carried to School on approval (teaching-and-learning ticket 07).
+    timeZone        SchoolTimeZone?
     applicantPhone  String?
     ktpStoragePath  String?
     status          RegistrationStatus @default(PENDING)
@@ -263,6 +276,9 @@ model School {
     /// until set - self check-in is then unavailable. The Principal may correct it.
     latitude      Float?
     longitude     Float?
+    /// The zone its schedule is written in (teaching-and-learning ticket 07). Null
+    /// for a school founded before it; a schedule needs one.
+    timeZone      SchoolTimeZone?
     /// Opaque, regenerable. Locates a school; grants nothing (ADR-0002).
     schoolCode    String     @unique
     // Access withdrawn by a platform admin, with the data left where it is.

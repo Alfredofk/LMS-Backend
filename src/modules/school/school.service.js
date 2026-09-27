@@ -62,6 +62,7 @@ const schoolView = (school) => ({
     schoolCode: school.schoolCode,
     latitude: school.latitude ?? null,
     longitude: school.longitude ?? null,
+    timeZone: school.timeZone ?? null,
     deactivatedAt: school.deactivatedAt ?? null,
     deactivationReason: school.deactivationReason ?? null,
 });
@@ -76,6 +77,7 @@ const adminView = (registration) => ({
     city: registration.city,
     latitude: registration.latitude,
     longitude: registration.longitude,
+    timeZone: registration.timeZone,
     applicantPhone: registration.applicantPhone,
     status: registration.status,
     hasKtp: Boolean(registration.ktpStoragePath),
@@ -106,6 +108,7 @@ const applicantView = (registration) => ({
     city: registration.city,
     latitude: registration.latitude,
     longitude: registration.longitude,
+    timeZone: registration.timeZone,
     applicantPhone: registration.applicantPhone,
     status: registration.status,
     rejectionReason: registration.rejectionReason,
@@ -122,6 +125,7 @@ const createdSchoolSelect = {
         schoolCode: true,
         latitude: true,
         longitude: true,
+        timeZone: true,
         deactivatedAt: true,
         deactivationReason: true,
     },
@@ -226,6 +230,7 @@ async function submitRegistration(userId, body, file) {
                         city: body.city,
                         latitude: body.latitude,
                         longitude: body.longitude,
+                        timeZone: body.timeZone,
                         applicantPhone: body.applicantPhone,
                         ktpStoragePath: key,
                     },
@@ -438,6 +443,7 @@ async function approveRegistration(id, { adminId, adminUserId }) {
                     city: registration.city,
                     latitude: registration.latitude,
                     longitude: registration.longitude,
+                    timeZone: registration.timeZone,
                     schoolCode,
                 },
             });
@@ -749,6 +755,44 @@ async function updateSchoolLocation(auth, { latitude, longitude }) {
     return schoolView(school);
 }
 
+// The Principal changing the school's time zone (teaching-and-learning ticket 07).
+// Audited with the zone before. Once Sessions exist this must be refused: every
+// one of them was placed in UTC from the old zone, and a schedule is fixed once
+// its semester starts. Session arrives with ticket 02, which adds that refusal
+// here.
+async function updateSchoolTimeZone(auth, { timeZone }) {
+    if (!(await isPrincipal(auth.membershipId))) throw forbidden('Only the Principal can do this');
+
+    const school = await prisma.$transaction(async (tx) => {
+        const before = await tx.school.findUnique({
+            where: { id: auth.schoolId },
+            select: { timeZone: true },
+        });
+        const claimed = await tx.school.updateMany({
+            where: { id: auth.schoolId, deactivatedAt: null },
+            data: { timeZone },
+        });
+        if (!before || claimed.count === 0) throw notFound('School not found');
+
+        if (before.timeZone !== timeZone) {
+            await recordAudit({
+                schoolId: auth.schoolId,
+                subjectType: SCHOOL_SUBJECT,
+                subjectId: auth.schoolId,
+                action: 'UPDATE_TIME_ZONE',
+                actorUserId: auth.userId,
+                reason: before.timeZone ? `Was ${before.timeZone}` : 'No time zone before',
+                client: tx,
+            });
+        }
+
+        return tx.school.findUnique({ where: { id: auth.schoolId }, ...createdSchoolSelect });
+    });
+
+    log.info(`School time zone set to ${timeZone} for ${school.name}`);
+    return schoolView(school);
+}
+
 // A Platform Admin appointing a school's Principal (owner, 2026-09-27), keyed by
 // the registration like deactivation, because that is the row the admin screen
 // holds. Works on a deactivated school too: one restored without a Principal
@@ -792,4 +836,5 @@ export {
     appointPrincipal,
     rotateSchoolCode,
     updateSchoolLocation,
+    updateSchoolTimeZone,
 };
