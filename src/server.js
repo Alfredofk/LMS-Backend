@@ -61,10 +61,12 @@ app.get('/health', (_req, res) =>
 //   lookup + join request                joinSchoolLimiter    (mounted)
 //   POST /api/school-registrations       registrationLimiter  (mounted)
 //
-// joinSchoolLimiter and registrationLimiter key on req.auth.userId, so they MUST
-// be mounted after requireAuth. Mounted before it, req.auth is still empty when
-// the key is computed, the key silently falls back to the IP, and a whole school
-// shares one budget again - with no error to tell you.
+// joinSchoolLimiter and registrationLimiter key on the user, so they are mounted
+// after requireAuth. generalLimiter above cannot be - it guards every route,
+// anonymous ones included - so it reads the user from the access token itself
+// (tokenUserId in rateLimit.js). Before that, it keyed on req.auth, which is
+// always empty at this point: every request fell back to the IP, and two
+// accounts on one Wi-Fi shared the anonymous 300.
 //
 // The auth routes above are the exception, and deliberately so: they run before
 // anyone has a token, so their limiters key on the address or the network.

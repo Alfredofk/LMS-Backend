@@ -1,5 +1,7 @@
 import rateLimit from 'express-rate-limit';
 
+import { readBearer, verifyAccessToken } from './auth.js';
+
 // Rate limiting is one of the four things that make the School Code model
 // defensible (ADR-0002). It does not stand alone - the human approval gate is
 // the real control - but it raises the cost of guessing codes or bulk-creating
@@ -46,8 +48,34 @@ function ipKey(req) {
     return `${expandV6(address).slice(0, 4).join(':')}::/64`;
 }
 
+// Who a request belongs to, read from its access token without waiting for
+// requireAuth. generalLimiter runs before any router (server.js), so req.auth is
+// still empty there - reading req.auth alone made every request fall back to the
+// IP, and a whole school Wi-Fi shared one anonymous budget.
+//
+// Only the signature and expiry are checked, never the database: this picks a
+// bucket, it grants nothing. A token cannot be forged to land in someone else's
+// bucket without JWT_ACCESS_SECRET. A missing, expired or broken token is simply
+// anonymous. The answer is kept on req so the token is verified once.
+function tokenUserId(req) {
+    if (req.limitUserId !== undefined) return req.limitUserId;
+
+    let userId = null;
+    const token = readBearer(req);
+    if (token) {
+        try {
+            userId = verifyAccessToken(token).sub ?? null;
+        } catch {
+            userId = null;
+        }
+    }
+
+    req.limitUserId = userId;
+    return userId;
+}
+
 // Limit the person when we know who they are; only fall back to the network.
-const byUserThenIp = (req) => req.auth?.userId ?? ipKey(req);
+const byUserThenIp = (req) => req.auth?.userId ?? tokenUserId(req) ?? ipKey(req);
 
 // Brute force attacks ONE account, so the bucket belongs to that account.
 //
@@ -145,6 +173,11 @@ const registrationLimiter = build({
 // normal use. Anonymous traffic is a different animal: only /auth/* and the code
 // lookup reach here unauthenticated.
 //
+// Mounted in server.js before every router, so "signed in" is read from the
+// token by tokenUserId(), not from req.auth. Two accounts on one laptop, or a
+// class on one Wi-Fi, are separate budgets; only anonymous requests share the
+// network's 300.
+//
 // Register and the two link-click endpoints carry no limiter of their own and
 // lean on this ceiling alone. That is deliberate. Guessing a token is not a
 // threat worth a limiter - the values are 256 bits of crypto.randomBytes
@@ -157,7 +190,7 @@ const registrationLimiter = build({
 // anonymous requests.
 const generalLimiter = build({
     windowMs: 15 * 60 * 1000,
-    limit: (req) => (req.auth?.userId ? 1000 : 300),
+    limit: (req) => ((req.auth?.userId ?? tokenUserId(req)) ? 1000 : 300),
     keyGenerator: byUserThenIp,
     message: 'Too many requests.',
 });

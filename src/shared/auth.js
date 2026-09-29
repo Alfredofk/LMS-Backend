@@ -170,6 +170,7 @@ export {
     signRefreshToken,
     verifyAccessToken,
     verifyRefreshToken,
+    readBearer,
     requireAuth,
     requireRole,
     requireActiveMembership,

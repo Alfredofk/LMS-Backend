@@ -141,6 +141,12 @@ const overrideBody = z.strictObject({ ...slot, teacherMembershipId: id });
 // while a teacher's own list shows everything they ever asked for.
 const classSubjectListQuery = z.object({
     status: z.enum(['PENDING', 'ACTIVE', 'REJECTED', 'CANCELLED']).optional(),
+    // A Vice Principal teaches too (ADR-0009): mine=true answers with their own
+    // requests instead of the queue they review.
+    mine: z
+        .enum(['true', 'false'])
+        .optional()
+        .transform((value) => value === 'true'),
 });
 
 // Left loose on purpose: approval.js owns the "at least 3 characters" rule.

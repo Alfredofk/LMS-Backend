@@ -174,8 +174,40 @@ function assertYearOpen(year) {
     if (year.status !== 'ACTIVE') throw conflict(`Academic year ${year.label} is closed`);
 }
 
+// "2026/2027" runs from a day in 2026 to a day in 2027. Nothing downstream reads
+// the label - semesters, sessions and holidays run on the dates - but it is what
+// every screen and report card shows, it is unique per school, and a closed
+// year's label can no longer be corrected. So a label that disagrees with its
+// dates is refused rather than left to mislead. The dates are day values
+// (midnight UTC), so the UTC year is the calendar year.
+function assertYearMatchesLabel(label, startDate, endDate) {
+    const first = Number(label.slice(0, 4));
+    const second = Number(label.slice(5));
+
+    if (startDate.getUTCFullYear() !== first || endDate.getUTCFullYear() !== second) {
+        throw badRequest(`Academic year ${label} must start in ${first} and end in ${second}`);
+    }
+}
+
+// Two years of one school never share a day, whatever their labels: the label
+// check alone still lets 2026/2027 and 2027/2028 both claim the spring of 2027.
+// The same overlap test as assertSemesterFits. Closed years count too.
+async function assertNoYearOverlap(startDate, endDate, exceptId) {
+    const other = await prisma.academicYear.findFirst({
+        where: {
+            ...(exceptId ? { id: { not: exceptId } } : {}),
+            startDate: { lt: endDate },
+            endDate: { gt: startDate },
+        },
+        select: { label: true },
+    });
+    if (other) throw conflict(`The dates overlap academic year ${other.label}`);
+}
+
 async function createAcademicYear(auth, body) {
     await assertPrincipalOrVice(auth);
+    assertYearMatchesLabel(body.label, body.startDate, body.endDate);
+    await assertNoYearOverlap(body.startDate, body.endDate);
 
     try {
         const created = await prisma.academicYear.create({
@@ -221,6 +253,8 @@ async function updateAcademicYear(auth, id, body) {
     const startDate = body.startDate ?? year.startDate;
     const endDate = body.endDate ?? year.endDate;
     if (startDate >= endDate) throw badRequest('The year must end after it starts');
+    assertYearMatchesLabel(body.label ?? year.label, startDate, endDate);
+    await assertNoYearOverlap(startDate, endDate, id);
 
     const outside = year.semesters.find(
         (semester) => semester.startDate < startDate || semester.endDate > endDate
@@ -1218,8 +1252,11 @@ async function requestClassSubject(auth, body) {
 
 // The Principal's queue (PENDING unless asked otherwise, oldest first), or a
 // teacher's own requests, every status unless one is asked for.
-async function listClassSubjects(auth, { status }) {
-    const principal = await isPrincipalOrVice(auth.membershipId);
+//
+// A Vice Principal is also a teacher, and would otherwise only ever see the
+// queue: `mine` asks for the teacher's answer whoever is asking.
+async function listClassSubjects(auth, { status, mine }) {
+    const principal = !mine && (await isPrincipalOrVice(auth.membershipId));
 
     const rows = await prisma.classSubject.findMany({
         where: principal
