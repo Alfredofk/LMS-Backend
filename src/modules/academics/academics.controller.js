@@ -154,6 +154,29 @@ async function rejectClassSubject(req, res) {
     return ok(res, { classSubject, message: 'Rejected.' });
 }
 
+async function endClassSubject(req, res) {
+    const classSubject = await service.endClassSubject(
+        req.auth,
+        req.validated.params.id,
+        req.validated.body
+    );
+    return ok(res, {
+        classSubject,
+        message: req.validated.body.subjectStops
+            ? 'Assignment ended. The subject stops and its coming sessions are cancelled.'
+            : 'Assignment ended. Its coming sessions wait for the next teacher.',
+    });
+}
+
+async function replaceClassSubject(req, res) {
+    const result = await service.replaceClassSubject(
+        req.auth,
+        req.validated.params.id,
+        req.validated.body
+    );
+    return ok(res, { ...result, message: 'Teacher replaced.' });
+}
+
 // Always 200, like the membership bulk approve: an answer per request.
 async function bulkApproveClassSubjects(req, res) {
     const results = await service.bulkApproveClassSubjects(req.auth, req.validated.body);
@@ -226,6 +249,8 @@ export {
     approveClassSubject,
     rejectClassSubject,
     bulkApproveClassSubjects,
+    endClassSubject,
+    replaceClassSubject,
     overrideClassSubject,
     listTeachers,
     createAcademicYear,

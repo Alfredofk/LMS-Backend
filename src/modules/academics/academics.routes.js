@@ -21,6 +21,8 @@ import {
     classSubjectListQuery,
     rejectBody,
     bulkApproveBody,
+    endBody,
+    replaceBody,
 } from './academics.schema.js';
 
 // Mounted at /api/academics. Every caller holds an ACTIVE membership, and the
@@ -189,6 +191,20 @@ router.post(
     teacher,
     validate({ params: idParams }),
     controller.cancelClassSubject
+);
+// An ACTIVE assignment ended or handed to another teacher while its teacher stays
+// (teaching-and-learning 10).
+router.post(
+    '/class-subjects/:id/end',
+    principalOrVice,
+    validate({ params: idParams, body: endBody }),
+    controller.endClassSubject
+);
+router.post(
+    '/class-subjects/:id/replace',
+    principalOrVice,
+    validate({ params: idParams, body: replaceBody }),
+    controller.replaceClassSubject
 );
 
 export default router;

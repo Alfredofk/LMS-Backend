@@ -134,6 +134,9 @@ enum ApprovalAction {
     WITHDRAW
     /// The Principal switching whether the school observes joint leave.
     UPDATE_JOINT_LEAVE
+    /// A teaching assignment ended, or replaced, while its teacher stays in the school
+    /// (teaching-and-learning 10). Not REMOVE, which is a member leaving the school.
+    END
 }
 
 // ---------------------------------------------------------------------------
@@ -745,9 +748,13 @@ model ClassSubject {
     rejectionReason     String?
     /// True when a principal created this after the registration deadline.
     createdViaOverride  Boolean        @default(false)
-    /// Set when the teacher leaves the school (ticket 08): the row stays as history,
-    /// and the partial unique index frees the slot for someone else.
+    /// Set when the teacher leaves the school (ticket 08), or when the Principal or a
+    /// Vice Principal ends or replaces the assignment (teaching-and-learning 10): the
+    /// row stays as history, and the partial unique index frees the slot.
     endedAt             DateTime?
+    /// Why it was ended or replaced (t&l 10), shown to its teacher. Null when the
+    /// teacher left the school.
+    endReason           String?
     createdAt           DateTime       @default(now())
     updatedAt           DateTime       @updatedAt
 
@@ -778,6 +785,9 @@ enum SessionCancelReason {
     /// A Session created in the past that its teacher says never took place
     /// (teaching-and-learning ticket 09).
     NOT_HELD
+    /// Its teaching assignment was ended and the subject stops in that Class
+    /// (teaching-and-learning ticket 10).
+    ASSIGNMENT_ENDED
 }
 
 /// One weekly slot of a ClassSubject's timetable (teaching-and-learning ticket 02):

@@ -158,6 +158,19 @@ const bulkApproveBody = z.strictObject({
     ids: z.array(id).min(1, 'Pick at least one request').max(100),
 });
 
+// Ending or replacing an ACTIVE assignment (teaching-and-learning 10). The reason
+// is required, but its "at least 3 characters" is approval.js's, as for rejectBody.
+const reason = z.string().max(500, 'Reason is too long').optional();
+
+// No default for subjectStops: whether the Sessions ahead wait for a successor or
+// are cancelled is chosen every time (owner, 2026-09-29).
+const endBody = z.strictObject({
+    reason,
+    subjectStops: z.boolean({ message: 'Say whether the subject stops (true) or a successor follows (false)' }),
+});
+
+const replaceBody = z.strictObject({ reason, teacherMembershipId: id });
+
 export {
     academicYearBody,
     semesterBody,
@@ -176,4 +189,6 @@ export {
     classSubjectListQuery,
     rejectBody,
     bulkApproveBody,
+    endBody,
+    replaceBody,
 };

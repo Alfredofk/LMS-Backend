@@ -11,6 +11,7 @@ import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.j
 import { createLogger } from '../../lib/helpers.js';
 import {
     inheritSchedule,
+    stopSessionsAhead,
     assertSemesterDatesMayChange,
     regenerateSemester,
 } from '../sessions/sessions.service.js';
@@ -1035,6 +1036,7 @@ const classSubjectSelect = {
     rejectionReason: true,
     createdViaOverride: true,
     endedAt: true,
+    endReason: true,
     class: { select: { id: true, name: true, gradeLevel: true } },
     subject: { select: { id: true, code: true, name: true } },
     semester: { select: { id: true, ordinal: true, academicYear: { select: { label: true } } } },
@@ -1049,6 +1051,7 @@ const classSubjectView = (row) => ({
     rejectionReason: row.rejectionReason,
     createdViaOverride: row.createdViaOverride,
     endedAt: row.endedAt,
+    endReason: row.endReason,
     class: row.class,
     subject: row.subject,
     semester: {
@@ -1430,6 +1433,146 @@ async function overrideClassSubject(auth, body) {
     return classSubjectView(await loadClassSubject(created.id));
 }
 
+// ---------------------------------------------------------------------------
+// Ending or replacing an assignment while its teacher stays (t&l ticket 10)
+// ---------------------------------------------------------------------------
+//
+// Owner's decisions, 2026-09-29:
+// - the Principal or a Vice Principal, never a Vice Principal on their own
+//   assignment or naming themselves; the teacher cannot give one up;
+// - a reason always, which the teacher sees;
+// - at once, as a leave is: a Session under way or past stays with the old row.
+// The old row ends the way a leaver's does - endedAt, kept as history, the slot
+// freed - and is audited END, not REMOVE, which is a member leaving the school.
+
+// An assignment that can still be ended: ACTIVE, not ended, in an OPEN Semester of
+// an ACTIVE year. PENDING, ended, or another school's is the same 404.
+async function loadLiveAssignment(id) {
+    const row = await prisma.classSubject.findFirst({
+        where: { id, status: 'ACTIVE', endedAt: null },
+        select: {
+            ...classSubjectSelect,
+            semester: {
+                select: {
+                    id: true,
+                    ordinal: true,
+                    status: true,
+                    academicYear: { select: { label: true, status: true } },
+                },
+            },
+        },
+    });
+    if (!row) throw notFound('No active teaching assignment under that id');
+    if (row.semester.academicYear.status !== 'ACTIVE') {
+        throw conflict(`Academic year ${row.semester.academicYear.label} is closed`);
+    }
+    if (row.semester.status !== 'OPEN') throw conflict(`Semester ${row.semester.ordinal} is not open`);
+    return row;
+}
+
+// Claimed with updateMany on endedAt null, so it ends exactly once; audited END
+// with its reason.
+async function endAssignment(tx, auth, id, reason, now) {
+    const claimed = await tx.classSubject.updateMany({
+        where: { id, status: 'ACTIVE', endedAt: null },
+        data: { endedAt: now, endReason: reason },
+    });
+    if (claimed.count === 0) throw conflict('This teaching assignment has already ended');
+
+    await recordAudit({
+        schoolId: auth.schoolId,
+        subjectType: CLASS_SUBJECT,
+        subjectId: id,
+        action: 'END',
+        actorUserId: auth.userId,
+        reason,
+        client: tx,
+    });
+}
+
+// "Replace with teacher X": the old row ends and the new one starts ACTIVE in one
+// transaction, so the class is never without a teacher. The new row comes in the
+// override's way - flagged, audited OVERRIDE, whatever the deadline - and
+// inherits the timetable and every Session still ahead.
+async function replaceClassSubject(auth, id, { teacherMembershipId, reason }) {
+    await assertPrincipalOrVice(auth);
+    assertRejectionReason('END', reason);
+    const trimmed = reason.trim();
+
+    const row = await loadLiveAssignment(id);
+    await assertNotDecidingForSelf(auth, row.teacher.id);
+    const teacher = await resolveTeacher(teacherMembershipId, 'The new teacher');
+    if (teacher.id === row.teacher.id) throw badRequest('That teacher already teaches it');
+    await assertNotDecidingForSelf(auth, teacher.id);
+    const now = new Date();
+
+    const slot = { classId: row.class.id, subjectId: row.subject.id, semesterId: row.semester.id };
+    let created;
+    try {
+        created = await prisma.$transaction(async (tx) => {
+            await endAssignment(tx, auth, id, trimmed, now);
+
+            const next = await tx.classSubject.create({
+                data: {
+                    ...slot,
+                    teacherMembershipId: teacher.id,
+                    status: 'ACTIVE',
+                    decidedByUserId: auth.userId,
+                    decidedAt: now,
+                    createdViaOverride: true,
+                },
+                select: { id: true },
+            });
+            await recordAudit({
+                schoolId: auth.schoolId,
+                subjectType: CLASS_SUBJECT,
+                subjectId: next.id,
+                action: 'OVERRIDE',
+                actorUserId: auth.userId,
+                client: tx,
+            });
+            await inheritSchedule(tx, { id: next.id, ...slot }, now);
+            return next;
+        });
+    } catch (error) {
+        throw translateSlotTaken(error);
+    }
+
+    log.info(
+        `${row.subject.code} in ${row.class.name} handed from ${row.teacher.user.fullName} ` +
+            `to ${teacher.user.fullName}`
+    );
+    return {
+        ended: classSubjectView(await loadClassSubject(id)),
+        classSubject: classSubjectView(await loadClassSubject(created.id)),
+    };
+}
+
+// "End only". With a successor to follow, nothing else changes: the Sessions
+// ahead wait on the ended row, as a leaver's do, until an override or an approval
+// in the slot inherits them. When the subject stops, they are cancelled and the
+// timetable put away (stopSessionsAhead).
+async function endClassSubject(auth, id, { reason, subjectStops }) {
+    await assertPrincipalOrVice(auth);
+    assertRejectionReason('END', reason);
+    const trimmed = reason.trim();
+
+    const row = await loadLiveAssignment(id);
+    await assertNotDecidingForSelf(auth, row.teacher.id);
+    const now = new Date();
+
+    const cancelled = await prisma.$transaction(async (tx) => {
+        await endAssignment(tx, auth, id, trimmed, now);
+        return subjectStops ? stopSessionsAhead(tx, id, now) : 0;
+    });
+
+    log.info(
+        `${row.subject.code} in ${row.class.name} ended for ${row.teacher.user.fullName}` +
+            (subjectStops ? `, the subject stops (${cancelled} session(s) cancelled)` : ', a successor to follow')
+    );
+    return classSubjectView(await loadClassSubject(id));
+}
+
 export {
     listTeachers,
     createAcademicYear,
@@ -1462,4 +1605,6 @@ export {
     rejectClassSubject,
     bulkApproveClassSubjects,
     overrideClassSubject,
+    replaceClassSubject,
+    endClassSubject,
 };

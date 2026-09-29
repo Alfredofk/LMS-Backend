@@ -52,12 +52,13 @@ function assertDecidable(currentStatus, subjectType) {
 // is withdrawn has a Principal who will ask why, and "no reason given" is not an
 // answer anybody can act on. Only the wording differs, because a school being
 // switched off has not been rejected.
+//
+// END too (teaching-and-learning 10): a teacher taken off a class they still
+// teach is owed the reason, the same way (owner, 2026-09-29).
 function assertRejectionReason(action, reason) {
-    if (action !== 'REJECT' && action !== 'DEACTIVATE') return;
+    if (action !== 'REJECT' && action !== 'DEACTIVATE' && action !== 'END') return;
     if (!reason || reason.trim().length < 3) {
-        throw badRequest(
-            action === 'DEACTIVATE' ? 'A reason is required' : 'A rejection reason is required'
-        );
+        throw badRequest(action === 'REJECT' ? 'A rejection reason is required' : 'A reason is required');
     }
 }
 

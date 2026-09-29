@@ -26,7 +26,9 @@ const log = createLogger('Sessions');
 //   no other number changes. One taken back after the start re-plans from tomorrow,
 //   so its day has Sessions again (owner, 2026-09-29).
 // - A teacher who leaves mid-semester hands the rest to whoever takes the slot:
-//   the successor's ClassSubject inherits the schedule and the future Sessions.
+//   the successor's ClassSubject inherits the schedule and the future Sessions. So
+//   does an assignment ended or replaced while its teacher stays (ticket 10),
+//   unless the subject stops: then the Sessions ahead are cancelled.
 // - A timetable set for the first time after the start, or a start date moved back,
 //   plans the Semester from its first day all the same. Each Session that lands
 //   before tomorrow needs completion: its teacher answers that it happened, or that
@@ -625,6 +627,28 @@ async function inheritSchedule(tx, { id, classId, subjectId, semesterId }, now =
     return true;
 }
 
+// A ClassSubject was just ended and the subject stops in its Class (ticket 10,
+// owner 2026-09-29). Every Session still ahead is CANCELLED, and the timetable is
+// stamped replaced, so nothing is left for a successor to inherit: a later
+// teacher in the slot starts with a timetable of their own. Past Sessions and one
+// already under way stay as they are. Runs inside the caller's transaction.
+async function stopSessionsAhead(tx, classSubjectId, now = new Date()) {
+    await tx.classSubjectSchedule.updateMany({
+        where: { classSubjectId, replacedAt: null },
+        data: { replacedAt: now },
+    });
+    const cancelled = await tx.session.updateMany({
+        where: { classSubjectId, status: 'SCHEDULED', startsAt: { gt: now } },
+        data: {
+            status: 'CANCELLED',
+            cancelReason: 'ASSIGNMENT_ENDED',
+            cancelledAt: now,
+            needsCompletion: false,
+        },
+    });
+    return cancelled.count;
+}
+
 // The holiday calendar changed on these days (ticket 08), at these schools - or,
 // for a national holiday, at every school. Before a Semester starts its Sessions
 // are planned again, as if the calendar had always been so (owner, 2026-09-28).
@@ -819,6 +843,7 @@ export {
     completeSession,
     markNotHeld,
     inheritSchedule,
+    stopSessionsAhead,
     onCalendarChanged,
     assertSemesterDatesMayChange,
     regenerateSemester,
