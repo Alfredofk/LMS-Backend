@@ -423,6 +423,8 @@ model School {
     approvalAudits ApprovalAudit[]
     schoolHolidays SchoolHoliday[]
     jointLeaveChoices SchoolJointLeaveChoice[]
+    scheduleSlots  ClassSubjectSchedule[]
+    sessions       Session[]
 
     @@index([deactivatedAt])
 }
@@ -754,10 +756,85 @@ model ClassSubject {
     subject  Subject          @relation(fields: [subjectId], references: [id])
     semester Semester         @relation(fields: [semesterId], references: [id], onDelete: Cascade)
     teacher  SchoolMembership @relation("AssignedTeacher", fields: [teacherMembershipId], references: [id])
+    scheduleSlots ClassSubjectSchedule[]
+    sessions      Session[]
 
     @@index([schoolId, status])
     @@index([teacherMembershipId, status])
     @@index([classId, semesterId])
+}
+
+enum SessionStatus {
+    SCHEDULED
+    CANCELLED
+}
+
+enum SessionCancelReason {
+    /// A holiday that started counting after the Semester had started.
+    HOLIDAY
+    /// A number the schedule no longer reaches, after a change to the timetable, the
+    /// Semester's dates or the school's time zone.
+    SCHEDULE_CHANGED
+    /// A Session created in the past that its teacher says never took place
+    /// (teaching-and-learning ticket 09).
+    NOT_HELD
+}
+
+/// One weekly slot of a ClassSubject's timetable (teaching-and-learning ticket 02):
+/// a day and a time in the SCHOOL's own zone (School.timeZone), set by the Principal
+/// or a Vice Principal. A schedule is replaced whole; the old slots are stamped
+/// replacedAt and kept, never deleted.
+model ClassSubjectSchedule {
+    id             String    @id @default(cuid())
+    schoolId       String
+    classSubjectId String
+    /// ISO: 1 Monday ... 7 Sunday.
+    dayOfWeek      Int
+    /// Minutes after local midnight, so an overlap is plain arithmetic.
+    startMinute    Int
+    endMinute      Int
+    replacedAt     DateTime?
+    createdAt      DateTime  @default(now())
+
+    school       School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    classSubject ClassSubject @relation(fields: [classSubjectId], references: [id], onDelete: Cascade)
+
+    @@index([classSubjectId, replacedAt])
+}
+
+/// One meeting of a ClassSubject - "Pertemuan ke-N" (CONTEXT.md; handoff #10).
+/// Generated from the schedule across the Semester, skipping holidays. Never deleted:
+/// a number the schedule no longer reaches, or a day that became a holiday after
+/// the start, is CANCELLED. Past Sessions stay with the ClassSubject that taught them;
+/// a successor teacher's ClassSubject takes over the future ones.
+///
+/// A Session created already in the past - a first timetable set after the start, or a
+/// start date moved back - needs completion (ticket 09): its teacher answers that it
+/// happened (completedAt) or that it never did (CANCELLED, NOT_HELD).
+model Session {
+    id              String               @id @default(cuid())
+    schoolId        String
+    classSubjectId  String
+    number          Int
+    startsAt        DateTime
+    endsAt          DateTime
+    status          SessionStatus        @default(SCHEDULED)
+    cancelReason    SessionCancelReason?
+    cancelledAt     DateTime?
+    /// Created before tomorrow, after the fact; waits for its teacher's answer.
+    needsCompletion Boolean              @default(false)
+    /// When its teacher answered that it happened. Counts as a meeting that happened.
+    completedAt     DateTime?
+    topic           String?
+    createdAt       DateTime             @default(now())
+    updatedAt       DateTime             @updatedAt
+
+    school       School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    classSubject ClassSubject @relation(fields: [classSubjectId], references: [id], onDelete: Cascade)
+
+    @@unique([classSubjectId, number])
+    @@index([schoolId, startsAt])
+    @@index([classSubjectId, startsAt])
 }
 
 /// A student moved from one class to another inside the school (ticket 16). The

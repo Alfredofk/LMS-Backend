@@ -5,6 +5,15 @@ import { recordAudit } from '../../shared/approval.js';
 import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
 import { holidaySource } from './holidays.source.js';
+import {
+    toDate,
+    toDay,
+    observedFor,
+    choicesFor,
+    holidayDatesBetween,
+    daysBetween,
+} from './holidays.calendar.js';
+import { onCalendarChanged } from '../sessions/sessions.service.js';
 
 const log = createLogger('Holidays');
 
@@ -20,18 +29,16 @@ const log = createLogger('Holidays');
 //
 // Nothing is deleted: a day taken back is WITHDRAWN, or gets withdrawnAt.
 //
-// Owed to ticket 02: a holiday that starts counting after a Semester has started
-// must cancel the Sessions on it (no other number changing). Session does not
-// exist yet; confirmNational, addNational, addSchoolHoliday, setJointLeave and
-// setJointLeaveDay are where that call goes.
+// Every change here tells the sessions module which days changed and where
+// (onCalendarChanged, tickets 02 and 09): before a Semester starts its Sessions are
+// planned again; after it starts, a day that now counts as a holiday cancels the
+// Sessions on it, and one taken back from tomorrow on is taught again. It runs after
+// the change is committed, and is safe to run again.
 
 const NATIONAL_SUBJECT = 'NationalHoliday';
 const SCHOOL_HOLIDAY_SUBJECT = 'SchoolHoliday';
 const SCHOOL_SUBJECT = 'School';
 
-// Dates are @db.Date: stored as midnight UTC, read back as the calendar day.
-const toDate = (day) => new Date(`${day}T00:00:00Z`);
-const toDay = (value) => value.toISOString().slice(0, 10);
 const yearRange = (year) => ({ gte: toDate(`${year}-01-01`), lte: toDate(`${year}-12-31`) });
 
 const nationalView = (row) => ({
@@ -123,6 +130,8 @@ async function addNational({ date, name, kind }, { adminId, adminUserId }) {
         actorUserId: adminUserId,
     });
 
+    await onCalendarChanged(null, [date]);
+
     log.info(`National holiday added: ${date} ${name}`);
     return nationalView(created);
 }
@@ -174,13 +183,21 @@ async function confirmNational(ids, { adminId, adminUserId }) {
         confirmed.push(id);
     }
 
+    if (confirmed.length > 0) {
+        const rows = await prisma.nationalHoliday.findMany({
+            where: { id: { in: confirmed } },
+            select: { date: true },
+        });
+        await onCalendarChanged(null, rows.map((row) => toDay(row.date)));
+    }
+
     log.info(`National holidays confirmed: ${confirmed.length}, skipped ${skipped.length}`);
     return { confirmed, skipped };
 }
 
-// A draft or a confirmed day taken back. It stays on file as WITHDRAWN, and a
-// Session a confirmed one already kept from being generated does not come back:
-// a schedule is fixed once its Semester has started (ticket 02).
+// A draft or a confirmed day taken back. It stays on file as WITHDRAWN. If the day
+// is tomorrow or later, the Sessions it kept away come back (owner, 2026-09-29);
+// today's and past ones stay cancelled.
 async function withdrawNational(id, { adminUserId }) {
     const claimed = await prisma.nationalHoliday.updateMany({
         where: { id, status: { in: ['DRAFT', 'CONFIRMED'] } },
@@ -198,7 +215,9 @@ async function withdrawNational(id, { adminUserId }) {
         actorUserId: adminUserId,
     });
 
-    return nationalView(await prisma.nationalHoliday.findUnique({ where: { id } }));
+    const withdrawn = await prisma.nationalHoliday.findUnique({ where: { id } });
+    await onCalendarChanged(null, [toDay(withdrawn.date)]);
+    return nationalView(withdrawn);
 }
 
 // ---------------------------------------------------------------------------
@@ -209,23 +228,6 @@ async function assertPrincipalOrVice(auth) {
     if (!(await isPrincipalOrVice(auth.membershipId))) {
         throw forbidden('Only the Principal or a Vice Principal can do this');
     }
-}
-
-// Whether a school is off on a confirmed national day. A national holiday always;
-// a joint-leave day by the school's choice for that day, or - with none made, or
-// set back to null - by the school's default (owner, 2026-09-27: a Principal may
-// take some joint-leave days and not others).
-const observedFor = (kind, choice, schoolDefault) =>
-    kind === 'NATIONAL' || (choice ?? schoolDefault);
-
-// This school's per-day choices for the given national days, by holiday id.
-async function choicesFor(holidayIds) {
-    if (holidayIds.length === 0) return new Map();
-    const rows = await prisma.schoolJointLeaveChoice.findMany({
-        where: { nationalHolidayId: { in: holidayIds } },
-        select: { nationalHolidayId: true, observed: true },
-    });
-    return new Map(rows.map((row) => [row.nationalHolidayId, row.observed]));
 }
 
 // What every member of the school reads for a year: the confirmed national days,
@@ -292,6 +294,8 @@ async function addSchoolHoliday(auth, { startDate, endDate, name }) {
         return row;
     });
 
+    await onCalendarChanged([auth.schoolId], daysBetween(startDate, endDate));
+
     log.info(`School holiday added at ${auth.schoolName}: ${startDate}..${endDate} ${name}`);
     return schoolHolidayView(created);
 }
@@ -317,14 +321,19 @@ async function withdrawSchoolHoliday(auth, id) {
         });
     });
 
-    return schoolHolidayView(await prisma.schoolHoliday.findFirst({ where: { id } }));
+    const withdrawn = await prisma.schoolHoliday.findFirst({ where: { id } });
+    await onCalendarChanged(
+        [auth.schoolId],
+        daysBetween(toDay(withdrawn.startDate), toDay(withdrawn.endDate))
+    );
+    return schoolHolidayView(withdrawn);
 }
 
 // The Principal's switch for joint leave. Audited only when it changes.
 async function setJointLeave(auth, { observesJointLeave }) {
     await assertPrincipalOrVice(auth);
 
-    await prisma.$transaction(async (tx) => {
+    const changed = await prisma.$transaction(async (tx) => {
         const before = await tx.school.findUnique({
             where: { id: auth.schoolId },
             select: { observesJointLeave: true },
@@ -346,7 +355,17 @@ async function setJointLeave(auth, { observesJointLeave }) {
                 client: tx,
             });
         }
+        return before.observesJointLeave !== observesJointLeave;
     });
+
+    // Every joint-leave day this default decides may have changed.
+    if (changed) {
+        const jointLeave = await prisma.nationalHoliday.findMany({
+            where: { status: 'CONFIRMED', kind: 'JOINT_LEAVE' },
+            select: { date: true },
+        });
+        await onCalendarChanged([auth.schoolId], jointLeave.map((row) => toDay(row.date)));
+    }
 
     log.info(`Joint leave ${observesJointLeave ? 'observed' : 'not observed'} at ${auth.schoolName}`);
     return { observesJointLeave };
@@ -403,6 +422,8 @@ async function setJointLeaveDay(auth, holidayId, { observed }) {
         }
     });
 
+    await onCalendarChanged([auth.schoolId], [toDay(holiday.date)]);
+
     const school = await prisma.school.findUnique({
         where: { id: auth.schoolId },
         select: { observesJointLeave: true },
@@ -415,44 +436,6 @@ async function setJointLeaveDay(auth, holidayId, { observed }) {
         choice: observed,
         observed: observedFor(holiday.kind, observed, school.observesJointLeave),
     };
-}
-
-// ---------------------------------------------------------------------------
-// For ticket 02: which days a school is off
-// ---------------------------------------------------------------------------
-
-// Every day from `from` to `to` ('YYYY-MM-DD', inclusive) the school is off, as a
-// Set of 'YYYY-MM-DD'. Confirmed national holidays always; a joint-leave day by the
-// school's choice for it, else its default; the school's own standing holidays.
-// Runs inside the school's scope - SchoolHoliday and the choices are tenant-owned.
-async function holidayDatesBetween(schoolId, from, to) {
-    const school = await prisma.school.findUnique({
-        where: { id: schoolId },
-        select: { observesJointLeave: true },
-    });
-    const national = await prisma.nationalHoliday.findMany({
-        where: { status: 'CONFIRMED', date: { gte: toDate(from), lte: toDate(to) } },
-        select: { id: true, date: true, kind: true },
-    });
-    const choices = await choicesFor(national.map((row) => row.id));
-    const own = await prisma.schoolHoliday.findMany({
-        where: { withdrawnAt: null, startDate: { lte: toDate(to) }, endDate: { gte: toDate(from) } },
-        select: { startDate: true, endDate: true },
-    });
-
-    const days = new Set(
-        national
-            .filter((row) => observedFor(row.kind, choices.get(row.id) ?? null, school.observesJointLeave))
-            .map((row) => toDay(row.date))
-    );
-    const DAY = 24 * 60 * 60 * 1000;
-    for (const { startDate, endDate } of own) {
-        for (let at = startDate.getTime(); at <= endDate.getTime(); at += DAY) {
-            const day = toDay(new Date(at));
-            if (day >= from && day <= to) days.add(day);
-        }
-    }
-    return days;
 }
 
 export {

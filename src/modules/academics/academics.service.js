@@ -9,6 +9,11 @@ import {
 } from '../../shared/approval.js';
 import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
+import {
+    inheritSchedule,
+    assertSemesterDatesMayChange,
+    regenerateSemester,
+} from '../sessions/sessions.service.js';
 
 const log = createLogger('Academics');
 
@@ -336,10 +341,20 @@ async function updateSemester(auth, id, body) {
             : body.classSubjectRegistrationDeadline;
     assertSemesterFits(year, { ordinal: semester.ordinal, startDate, endDate, deadline });
 
+    // Its dates stay changeable after the start, within the limits sessions sets,
+    // and every timetable in it follows the new dates (teaching-and-learning
+    // tickets 02 and 09).
+    const startMoved = startDate.getTime() !== semester.startDate.getTime();
+    const datesChange = startMoved || endDate.getTime() !== semester.endDate.getTime();
+    if (datesChange) {
+        await assertSemesterDatesMayChange(auth.schoolId, { id, ...semester }, { startDate, endDate });
+    }
+
     await prisma.semester.updateMany({
         where: { id },
         data: { startDate, endDate, classSubjectRegistrationDeadline: deadline },
     });
+    if (datesChange) await regenerateSemester(auth.schoolId, id, { startMoved });
 
     log.info(`Semester ${semester.ordinal} of ${year.label} edited`);
     return loadYear(year.id);
@@ -1188,6 +1203,8 @@ async function requestClassSubject(auth, body) {
                     actorUserId: auth.userId,
                     client: tx,
                 });
+                // Taking over a slot whose teacher left: the timetable comes along.
+                await inheritSchedule(tx, { id: row.id, ...body }, now);
             }
             return row;
         });
@@ -1279,6 +1296,19 @@ async function decideClassSubject(auth, id, { action, reason }) {
             reason: trimmed,
             client: tx,
         });
+
+        if (action === 'APPROVE') {
+            await inheritSchedule(
+                tx,
+                {
+                    id,
+                    classId: row.class.id,
+                    subjectId: row.subject.id,
+                    semesterId: row.semester.id,
+                },
+                now
+            );
+        }
     });
 
     log.info(`Teaching request ${action === 'APPROVE' ? 'approved' : 'rejected'}`);
@@ -1352,6 +1382,7 @@ async function overrideClassSubject(auth, body) {
                 actorUserId: auth.userId,
                 client: tx,
             });
+            await inheritSchedule(tx, { id: row.id, ...body }, now);
             return row;
         });
     } catch (error) {

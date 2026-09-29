@@ -20,6 +20,7 @@ import membershipRoutes, {
 } from './modules/membership/membership.routes.js';
 import academicsRoutes from './modules/academics/academics.routes.js';
 import holidayRoutes, { adminRouter as adminHolidayRoutes } from './modules/holidays/holidays.routes.js';
+import sessionRoutes from './modules/sessions/sessions.routes.js';
 import { generalLimiter } from './shared/rateLimit.js';
 import { verifyTransport } from './shared/mailer.js';
 import { createLogger } from './lib/helpers.js';
@@ -84,6 +85,7 @@ app.use('/api/leave-requests', leaveRequestRoutes);
 app.use('/api/academics', academicsRoutes);
 app.use('/api/admin/holidays', adminHolidayRoutes);
 app.use('/api/holidays', holidayRoutes);
+app.use('/api/sessions', sessionRoutes);
 
 // Catch 404
 app.use((_req, _res, next) => next(notFound('Route not found')));

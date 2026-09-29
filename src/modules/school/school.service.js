@@ -15,6 +15,7 @@ import { isPrincipal } from '../../shared/guards.js';
 import { AppError, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
 import * as membershipService from '../membership/membership.service.js';
+import { onTimeZoneChanged } from '../sessions/sessions.service.js';
 
 const log = createLogger('School');
 
@@ -756,13 +757,14 @@ async function updateSchoolLocation(auth, { latitude, longitude }) {
 }
 
 // The Principal changing the school's time zone (teaching-and-learning ticket 07).
-// Audited with the zone before. Once Sessions exist this must be refused: every
-// one of them was placed in UTC from the old zone, and a schedule is fixed once
-// its semester starts. Session arrives with ticket 02, which adds that refusal
-// here.
+// Audited with the zone before. It stays changeable once the school has Sessions
+// (ticket 09, owner 2026-09-28): those from tomorrow keep their wall-clock time in
+// the new zone, and past ones and today's stay where they were - in the same
+// transaction, so the zone and the Sessions never disagree.
 async function updateSchoolTimeZone(auth, { timeZone }) {
     if (!(await isPrincipal(auth.membershipId))) throw forbidden('Only the Principal can do this');
 
+    let moved = 0;
     const school = await prisma.$transaction(async (tx) => {
         const before = await tx.school.findUnique({
             where: { id: auth.schoolId },
@@ -774,6 +776,9 @@ async function updateSchoolTimeZone(auth, { timeZone }) {
         });
         if (!before || claimed.count === 0) throw notFound('School not found');
 
+        if (before.timeZone && before.timeZone !== timeZone) {
+            moved = await onTimeZoneChanged(tx, auth.schoolId, before.timeZone, timeZone);
+        }
         if (before.timeZone !== timeZone) {
             await recordAudit({
                 schoolId: auth.schoolId,
@@ -789,7 +794,7 @@ async function updateSchoolTimeZone(auth, { timeZone }) {
         return tx.school.findUnique({ where: { id: auth.schoolId }, ...createdSchoolSelect });
     });
 
-    log.info(`School time zone set to ${timeZone} for ${school.name}`);
+    log.info(`School time zone set to ${timeZone} for ${school.name}; ${moved} session(s) moved`);
     return schoolView(school);
 }
 
