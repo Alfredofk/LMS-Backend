@@ -14,7 +14,9 @@ import { scheduleBody, idParams, sessionsQuery } from './sessions.schema.js';
 // and answers 404 to anyone else.
 //
 // A Session created already past needs completion (ticket 09): its teacher finds it
-// on the to-do list and answers that it happened or that it never did. The school's
+// on the to-do list and answers that it never happened here, or that it did by
+// confirming its attendance (POST /api/attendance/sessions/:id/confirm, t&l 03 -
+// the old /:id/complete, which asked for no attendance, is gone). The school's
 // leaders read the whole school's list.
 
 const router = Router();
@@ -38,12 +40,6 @@ router.get(
     '/needs-completion',
     requireRole('TEACHER', 'PRINCIPAL', 'VICE_PRINCIPAL'),
     controller.listNeedingCompletion
-);
-router.post(
-    '/:id/complete',
-    requireRole('TEACHER'),
-    validate({ params: idParams }),
-    controller.completeSession
 );
 router.post('/:id/not-held', requireRole('TEACHER'), validate({ params: idParams }), controller.markNotHeld);
 

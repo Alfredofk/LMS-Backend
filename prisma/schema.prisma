@@ -428,6 +428,8 @@ model School {
     jointLeaveChoices SchoolJointLeaveChoice[]
     scheduleSlots  ClassSubjectSchedule[]
     sessions       Session[]
+    attendances       Attendance[]
+    attendanceChanges AttendanceChange[]
 
     @@index([deactivatedAt])
 }
@@ -528,6 +530,7 @@ model StudentProfile {
     classMemberships ClassMembership[]
     classMoves       ClassMove[]
     guardianLinks    GuardianStudent[]
+    attendances      Attendance[]
 
     @@index([schoolId])
 }
@@ -833,18 +836,79 @@ model Session {
     cancelledAt     DateTime?
     /// Created before tomorrow, after the fact; waits for its teacher's answer.
     needsCompletion Boolean              @default(false)
-    /// When its teacher answered that it happened. Counts as a meeting that happened.
-    completedAt     DateTime?
+    /// When its teacher confirmed its attendance (teaching-and-learning 03): the
+    /// meeting happened. Counts as a meeting that happened, like a check-in does.
+    completedAt       DateTime?
+    completedByUserId String?
     topic           String?
     createdAt       DateTime             @default(now())
     updatedAt       DateTime             @updatedAt
 
     school       School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
     classSubject ClassSubject @relation(fields: [classSubjectId], references: [id], onDelete: Cascade)
+    attendances  Attendance[]
 
     @@unique([classSubjectId, number])
     @@index([schoolId, startsAt])
     @@index([classSubjectId, startsAt])
+}
+
+enum AttendanceStatus {
+    /// Hadir
+    PRESENT
+    /// Sakit
+    SICK
+    /// Izin
+    EXCUSED
+    /// Alpa
+    ABSENT
+}
+
+/// One student at one Session (teaching-and-learning 03). Made by the student's
+/// check-in, or by the teacher's confirmation for everyone who did not check in.
+/// The device's location decides the two flags and is never stored - no
+/// coordinates, no distance (UU PDP Pasal 16, 25).
+model Attendance {
+    id               String           @id @default(cuid())
+    schoolId         String
+    sessionId        String
+    studentProfileId String
+    status           AttendanceStatus
+    checkedInAt      DateTime?
+    /// Checked in farther than 150 m from the school's point.
+    outsideSchool    Boolean          @default(false)
+    /// Checked in more than 30 minutes after the Session started.
+    late             Boolean          @default(false)
+    createdAt        DateTime         @default(now())
+    updatedAt        DateTime         @updatedAt
+
+    school         School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    session        Session            @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+    studentProfile StudentProfile     @relation(fields: [studentProfileId], references: [id], onDelete: Cascade)
+    changes        AttendanceChange[]
+
+    @@unique([sessionId, studentProfileId])
+    @@index([schoolId, sessionId])
+    @@index([studentProfileId])
+}
+
+/// A teacher's change to an Attendance status, at confirmation or after it
+/// (teaching-and-learning 03). Append-only: written, never updated or deleted.
+model AttendanceChange {
+    id              String           @id @default(cuid())
+    schoolId        String
+    attendanceId    String
+    fromStatus      AttendanceStatus
+    toStatus        AttendanceStatus
+    note            String?
+    changedByUserId String
+    createdAt       DateTime         @default(now())
+
+    school     School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    attendance Attendance @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+
+    @@index([attendanceId, createdAt])
+    @@index([schoolId])
 }
 
 /// A student moved from one class to another inside the school (ticket 16). The

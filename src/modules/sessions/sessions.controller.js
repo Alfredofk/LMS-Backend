@@ -21,12 +21,8 @@ async function listNeedingCompletion(req, res) {
     return ok(res, { sessions: await service.listNeedingCompletion(req.auth) });
 }
 
-async function completeSession(req, res) {
-    return ok(res, { session: await service.completeSession(req.auth, req.validated.params.id) });
-}
-
 async function markNotHeld(req, res) {
     return ok(res, { session: await service.markNotHeld(req.auth, req.validated.params.id) });
 }
 
-export { setSchedule, getSchedule, listSessions, listNeedingCompletion, completeSession, markNotHeld };
+export { setSchedule, getSchedule, listSessions, listNeedingCompletion, markNotHeld };

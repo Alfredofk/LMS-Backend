@@ -31,8 +31,9 @@ const log = createLogger('Sessions');
 //   unless the subject stops: then the Sessions ahead are cancelled.
 // - A timetable set for the first time after the start, or a start date moved back,
 //   plans the Semester from its first day all the same. Each Session that lands
-//   before tomorrow needs completion: its teacher answers that it happened, or that
-//   it never did (ticket 09, owner 2026-09-29).
+//   before tomorrow needs completion: its teacher answers that it never happened, or
+//   that it did by confirming its attendance (ticket 09, owner 2026-09-29; ticket 03,
+//   owner 2026-09-30). A successor answers for what an ended ClassSubject left.
 
 const MINUTES_PER_HOUR = 60;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -298,12 +299,36 @@ async function assertPrincipalOrVice(auth) {
     }
 }
 
+// Who answers for a ClassSubject's Sessions - confirms their attendance, or says
+// one never happened: its teacher while it is live. Once it has ended (the teacher
+// left, or the assignment was ended or replaced), the teacher of the live
+// ClassSubject in the same slot, the successor (owner, 2026-09-29, built in
+// teaching-and-learning 03). With no successor yet, nobody does. A PENDING or
+// REJECTED one never had Sessions.
+async function answeringTeacherOf(classSubject) {
+    if (classSubject.status !== 'ACTIVE') return null;
+    if (classSubject.endedAt === null) return classSubject.teacherMembershipId;
+
+    const successor = await prisma.classSubject.findFirst({
+        where: {
+            classId: classSubject.classId,
+            subjectId: classSubject.subjectId,
+            semesterId: classSubject.semesterId,
+            status: 'ACTIVE',
+            endedAt: null,
+        },
+        select: { teacherMembershipId: true },
+    });
+    return successor?.teacherMembershipId ?? null;
+}
+
 // Who reads a ClassSubject's timetable and Sessions: the Principal and Vice
-// Principals, its teacher, the Class's homeroom teacher, and the students placed
-// in the Class. Anyone else - another school included - gets the same 404.
+// Principals, the teacher who answers for it (its own, or a successor for an ended
+// one), the Class's homeroom teacher, and the students placed in the Class. Anyone
+// else - another school included - gets the same 404.
 async function assertCanRead(auth, classSubject) {
     if (await isPrincipalOrVice(auth.membershipId)) return;
-    if (classSubject.teacherMembershipId === auth.membershipId && classSubject.endedAt === null) return;
+    if ((await answeringTeacherOf(classSubject)) === auth.membershipId) return;
     if (await isHomeroomOf(auth.membershipId, classSubject.classId)) return;
 
     const placed = await prisma.classMembership.findFirst({
@@ -464,26 +489,40 @@ async function listSessions(auth, classSubjectId, { status }) {
 // ---------------------------------------------------------------------------
 
 // The to-do list: Sessions created already past that still wait for their
-// teacher's answer. A teacher sees their own; the Principal and Vice Principals see
-// the school's. Nothing is emailed - the mailer stays verification and reset only.
-// Only a live ClassSubject's count: its teacher is the one who can answer.
+// teacher's answer. A teacher sees the ones they answer for: their own, and those
+// left on an ended ClassSubject in a slot they now teach (the successor answers,
+// teaching-and-learning 03). The Principal and Vice Principals see the school's,
+// including those waiting for a successor who is not there yet (answeredBy null).
+// Nothing is emailed - the mailer stays verification and reset only.
 async function listNeedingCompletion(auth) {
     const leader = await isPrincipalOrVice(auth.membershipId);
+
+    let slots = null;
+    if (!leader) {
+        slots = await prisma.classSubject.findMany({
+            where: { teacherMembershipId: auth.membershipId, status: 'ACTIVE', endedAt: null },
+            select: { classId: true, subjectId: true, semesterId: true },
+        });
+        if (slots.length === 0) return [];
+    }
+
     const rows = await prisma.session.findMany({
         where: {
             status: 'SCHEDULED',
             needsCompletion: true,
-            classSubject: {
-                status: 'ACTIVE',
-                endedAt: null,
-                ...(leader ? {} : { teacherMembershipId: auth.membershipId }),
-            },
+            classSubject: { status: 'ACTIVE', ...(slots ? { OR: slots } : {}) },
         },
         orderBy: [{ startsAt: 'asc' }, { number: 'asc' }],
         include: {
             classSubject: {
                 select: {
                     id: true,
+                    status: true,
+                    endedAt: true,
+                    classId: true,
+                    subjectId: true,
+                    semesterId: true,
+                    teacherMembershipId: true,
                     class: { select: { name: true } },
                     subject: { select: { code: true, name: true } },
                     semester: {
@@ -494,21 +533,42 @@ async function listNeedingCompletion(auth) {
             },
         },
     });
+
+    // Who answers each, worked out once per ClassSubject.
+    const answerer = new Map();
+    for (const { classSubject } of rows) {
+        if (!answerer.has(classSubject.id)) {
+            answerer.set(classSubject.id, await answeringTeacherOf(classSubject));
+        }
+    }
+    const people = await prisma.schoolMembership.findMany({
+        where: { id: { in: [...new Set([...answerer.values()].filter(Boolean))] } },
+        select: { id: true, user: { select: { fullName: true } } },
+    });
+    const nameOf = new Map(people.map((person) => [person.id, person.user.fullName]));
+
     const zone = await zoneOf(auth.schoolId);
-    return rows.map(({ classSubject, ...row }) => ({
-        ...sessionView(row, zone),
-        classSubject: {
-            id: classSubject.id,
-            class: classSubject.class.name,
-            subject: classSubject.subject,
-            semester: {
-                id: classSubject.semester.id,
-                ordinal: classSubject.semester.ordinal,
-                academicYear: classSubject.semester.academicYear.label,
-            },
-            teacher: { membershipId: classSubject.teacher.id, fullName: classSubject.teacher.user.fullName },
-        },
-    }));
+    return rows
+        .filter((row) => leader || answerer.get(row.classSubject.id) === auth.membershipId)
+        .map(({ classSubject, ...row }) => {
+            const answeredBy = answerer.get(classSubject.id);
+            return {
+                ...sessionView(row, zone),
+                classSubject: {
+                    id: classSubject.id,
+                    class: classSubject.class.name,
+                    subject: classSubject.subject,
+                    semester: {
+                        id: classSubject.semester.id,
+                        ordinal: classSubject.semester.ordinal,
+                        academicYear: classSubject.semester.academicYear.label,
+                    },
+                    teacher: { membershipId: classSubject.teacher.id, fullName: classSubject.teacher.user.fullName },
+                    ended: classSubject.endedAt !== null,
+                },
+                answeredBy: answeredBy ? { membershipId: answeredBy, fullName: nameOf.get(answeredBy) } : null,
+            };
+        });
 }
 
 // A Session waiting for completion, as its teacher answers for it. Whoever may not
@@ -531,32 +591,14 @@ async function loadForAnswer(auth, sessionId, now) {
     const classSubject = await loadClassSubject(session.classSubjectId);
     await assertCanRead(auth, classSubject);
 
-    const isTeacher =
-        classSubject.teacherMembershipId === auth.membershipId &&
-        classSubject.status === 'ACTIVE' &&
-        classSubject.endedAt === null;
-    if (!isTeacher) throw forbidden('Only the teacher of this class subject answers for its Sessions');
+    if ((await answeringTeacherOf(classSubject)) !== auth.membershipId) {
+        throw forbidden('Only the teacher of this class subject answers for its Sessions');
+    }
     if (session.status !== 'SCHEDULED' || !session.needsCompletion) {
         throw conflict(`Pertemuan ke-${session.number} is not waiting for completion`);
     }
     if (session.startsAt > now) throw conflict(`Pertemuan ke-${session.number} has not begun yet`);
     return { session, classSubject };
-}
-
-// "It happened." Until ticket 03 this only clears the mark; ticket 03 may ask for
-// the attendance first. It counts as a meeting that happened, which fixes the
-// Semester's start date.
-async function completeSession(auth, sessionId) {
-    const now = new Date();
-    const { session, classSubject } = await loadForAnswer(auth, sessionId, now);
-    const claimed = await prisma.session.updateMany({
-        where: { id: session.id, status: 'SCHEDULED', needsCompletion: true },
-        data: { needsCompletion: false, completedAt: now },
-    });
-    if (claimed.count === 0) throw conflict(`Pertemuan ke-${session.number} was answered already`);
-
-    log.info(`${describeSession(session, classSubject)} completed`);
-    return sessionOf(auth, session.id);
 }
 
 // "It never happened" - the subject had not started yet, say. CANCELLED as
@@ -762,8 +804,8 @@ async function lacksSessionOn(classSubject, days, zone) {
 
 // A Semester's dates stay changeable after its start (ticket 09, owner 2026-09-28),
 // within two limits once it has Sessions. Its start date moves only while no
-// meeting in it has happened - so far, a Session its teacher answered as held;
-// ticket 03 adds a check-in or a confirmation. Its end date never moves to before
+// meeting in it has happened - a Session whose attendance was confirmed, or one a
+// student checked in to (ticket 03). Its end date never moves to before
 // today. A start moved to a day already past is allowed: it is a correction, and
 // the Sessions it makes in the past wait for their teacher. Called by academics
 // before it updates the dates.
@@ -772,10 +814,15 @@ async function assertSemesterDatesMayChange(schoolId, semester, { startDate, end
     if (sessions === 0) return;
 
     if (startDate.getTime() !== semester.startDate.getTime()) {
-        const held = await prisma.session.count({
+        // A meeting happened: its attendance was confirmed, or a student checked in
+        // to it (teaching-and-learning 03 closes the lock ticket 09 left open).
+        const confirmed = await prisma.session.count({
             where: { classSubject: { semesterId: semester.id }, completedAt: { not: null } },
         });
-        if (held > 0) {
+        const checkedIn = await prisma.attendance.count({
+            where: { checkedInAt: { not: null }, session: { classSubject: { semesterId: semester.id } } },
+        });
+        if (confirmed + checkedIn > 0) {
             throw conflict('A meeting in this Semester has already happened, so its start date is fixed');
         }
     }
@@ -840,8 +887,8 @@ export {
     getSchedule,
     listSessions,
     listNeedingCompletion,
-    completeSession,
     markNotHeld,
+    answeringTeacherOf,
     inheritSchedule,
     stopSessionsAhead,
     onCalendarChanged,
