@@ -3,7 +3,7 @@ import { Router } from 'express';
 import { requireAuth, requireActiveMembership, requireRole } from '../../shared/auth.js';
 import { validate } from '../../shared/validate.js';
 import * as controller from './sessions.controller.js';
-import { scheduleBody, idParams, sessionsQuery } from './sessions.schema.js';
+import { scheduleBody, idParams, sessionsQuery, mineQuery } from './sessions.schema.js';
 
 // Mounted at /api/sessions (teaching-and-learning tickets 02 and 09).
 //
@@ -18,6 +18,10 @@ import { scheduleBody, idParams, sessionsQuery } from './sessions.schema.js';
 // confirming its attendance (POST /api/attendance/sessions/:id/confirm, t&l 03 -
 // the old /:id/complete, which asked for no attendance, is gone). The school's
 // leaders read the whole school's list.
+//
+// A student finds the day's Sessions of their own Class, with their own
+// attendance, through /mine - without it no Session id is in their reach to
+// check in to.
 
 const router = Router();
 
@@ -35,6 +39,8 @@ router.get(
     validate({ params: idParams, query: sessionsQuery }),
     controller.listSessions
 );
+
+router.get('/mine', requireRole('STUDENT'), validate({ query: mineQuery }), controller.listMine);
 
 router.get(
     '/needs-completion',

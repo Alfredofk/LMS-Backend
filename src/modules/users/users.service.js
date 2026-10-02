@@ -54,7 +54,22 @@ const membershipSelect = {
     // The member's own identifiers - a teacher reading back their NIP, a student
     // their NISN. Their own row only, so nothing about anybody else comes along.
     teacherProfile: { select: { nip: true, nuptk: true } },
-    studentProfile: { select: { nisn: true, birthDate: true } },
+    // A student's Class too: the open placement, at most one by the partial index.
+    studentProfile: {
+        select: {
+            nisn: true,
+            birthDate: true,
+            classMemberships: {
+                where: { endedAt: null },
+                select: {
+                    class: {
+                        select: { id: true, name: true, gradeLevel: true, academicYear: { select: { label: true } } },
+                    },
+                },
+                take: 1,
+            },
+        },
+    },
     // A guardian's own claims, each with its id (to cancel a PENDING one) and the
     // reason it was turned down. The child's name is one the guardian typed; no
     // NISN and nothing else about the child comes back. endedAt tells a link that
@@ -105,6 +120,25 @@ function schoolForMember(school, roles) {
     };
 }
 
+// A student's own identifiers and the Class they are in now, null between
+// placements (a new academic year before the move, say).
+function studentForMember(profile) {
+    if (!profile) return null;
+    const placement = profile.classMemberships[0];
+    return {
+        nisn: profile.nisn,
+        birthDate: profile.birthDate,
+        class: placement
+            ? {
+                id: placement.class.id,
+                name: placement.class.name,
+                gradeLevel: placement.class.gradeLevel,
+                academicYear: placement.class.academicYear.label,
+            }
+            : null,
+    };
+}
+
 async function loadMembership(userId) {
     return runUnscoped('reading a user own membership status', async () => {
         const membership = await prisma.schoolMembership.findFirst({
@@ -138,7 +172,7 @@ async function loadMembership(userId) {
             school: schoolForMember(decided.school, decided.roles),
             roles: decided.roles,
             teacher: decided.teacherProfile,
-            student: decided.studentProfile,
+            student: studentForMember(decided.studentProfile),
             children: decided.guardianLinks.map((link) => ({
                 id: link.id,
                 status: link.status,

@@ -485,6 +485,89 @@ async function listSessions(auth, classSubjectId, { status }) {
 }
 
 // ---------------------------------------------------------------------------
+// A student's day
+// ---------------------------------------------------------------------------
+
+// A student's Sessions on one day of the school's calendar, today by default: those
+// of every ClassSubject of their current Class. An ended ClassSubject's count too,
+// since a Session between an ending and a successor still takes check-ins
+// (teaching-and-learning 03). A number cancelled because a plan stopped reaching it
+// keeps a stale date (firstNumberFrom), so it is left out; one cancelled for a
+// holiday, as never held or as its subject stopped is shown, cancelled.
+//
+// Each carries the student's own attendance, and canCheckIn: whether a check-in
+// would be taken now, by the server's clock - the window
+// POST /api/attendance/sessions/:id/check-in enforces.
+const ownAttendanceView = (row) => ({
+    id: row.id,
+    status: row.status,
+    checkedInAt: row.checkedInAt,
+    outsideSchool: row.outsideSchool,
+    late: row.late,
+});
+
+async function listMine(auth, { date }) {
+    // School is above tenancy, so this reads without a scope.
+    const school = await prisma.school.findUnique({
+        where: { id: auth.schoolId },
+        select: { timeZone: true, latitude: true, longitude: true },
+    });
+    const zone = school?.timeZone ?? null;
+    const now = new Date();
+    const day = date ?? (zone ? utcToLocal(now, zone).date : null);
+
+    const placement = await prisma.classMembership.findFirst({
+        where: { endedAt: null, studentProfile: { membershipId: auth.membershipId, endedAt: null } },
+        select: { studentProfileId: true, class: { select: { id: true, name: true } } },
+    });
+    // With no time zone there is no timetable, so no Session either.
+    if (!placement || !zone) {
+        return { date: day, timeZone: zone, class: placement?.class ?? null, sessions: [] };
+    }
+
+    const rows = await prisma.session.findMany({
+        where: {
+            classSubject: { classId: placement.class.id, status: 'ACTIVE' },
+            startsAt: { gte: midnightOf(day, zone), lt: midnightOf(nextDay(day), zone) },
+            OR: [{ status: 'SCHEDULED' }, { cancelReason: { not: 'SCHEDULE_CHANGED' } }],
+        },
+        include: { classSubject: { select: { id: true, subject: { select: { code: true, name: true } } } } },
+        orderBy: { startsAt: 'asc' },
+    });
+    const own = await prisma.attendance.findMany({
+        where: { studentProfileId: placement.studentProfileId, sessionId: { in: rows.map((row) => row.id) } },
+        select: { id: true, sessionId: true, status: true, checkedInAt: true, outsideSchool: true, late: true },
+    });
+    const ownBySession = new Map(own.map((row) => [row.sessionId, row]));
+
+    const hasPoint = school.latitude !== null && school.longitude !== null;
+    const canCheckIn = (row, attendance) =>
+        hasPoint &&
+        !attendance &&
+        row.status === 'SCHEDULED' &&
+        row.completedAt === null &&
+        now >= row.startsAt &&
+        now < row.endsAt;
+
+    return {
+        date: day,
+        timeZone: zone,
+        class: placement.class,
+        sessions: rows.map((row) => {
+            const found = ownBySession.get(row.id);
+            const attendance = found ? ownAttendanceView(found) : null;
+            return {
+                ...sessionView(row, zone),
+                classSubjectId: row.classSubject.id,
+                subject: row.classSubject.subject,
+                attendance,
+                canCheckIn: canCheckIn(row, attendance),
+            };
+        }),
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Sessions that need completion (ticket 09)
 // ---------------------------------------------------------------------------
 
@@ -886,6 +969,7 @@ export {
     setSchedule,
     getSchedule,
     listSessions,
+    listMine,
     listNeedingCompletion,
     markNotHeld,
     answeringTeacherOf,

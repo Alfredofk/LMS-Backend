@@ -44,4 +44,18 @@ const idParams = z.object({ id: z.string().min(1) });
 
 const sessionsQuery = z.object({ status: z.enum(['SCHEDULED', 'CANCELLED']).optional() });
 
-export { scheduleBody, idParams, sessionsQuery };
+// A day of the school's calendar, 'YYYY-MM-DD'. A date that does not exist is
+// refused, not rolled over (the same check as holidays.schema.js).
+const realDay = (value) => {
+    const parsed = new Date(`${value}T00:00:00Z`);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+};
+const mineQuery = z.object({
+    date: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use the form YYYY-MM-DD')
+        .refine(realDay, 'That date does not exist')
+        .optional(),
+});
+
+export { scheduleBody, idParams, sessionsQuery, mineQuery };

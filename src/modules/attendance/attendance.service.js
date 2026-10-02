@@ -175,8 +175,18 @@ async function checkIn(auth, sessionId, { latitude, longitude }) {
             },
         });
     } catch (error) {
-        if (error?.code === 'P2002') throw conflict('You have already checked in');
-        throw error;
+        if (error?.code !== 'P2002') throw error;
+        // The row is there already: the student's own check-in, or an Alpa the
+        // teacher's confirmation wrote since the checks above.
+        const existing = await prisma.attendance.findFirst({
+            where: { sessionId: session.id, studentProfileId: placement.studentProfileId },
+            select: { checkedInAt: true },
+        });
+        throw conflict(
+            existing?.checkedInAt
+                ? 'You have already checked in'
+                : 'The teacher has already confirmed this attendance'
+        );
     }
     // Ticket 05: attendance.checked_in.
 
@@ -296,8 +306,8 @@ async function correct(auth, attendanceId, { status, note }) {
 // ---------------------------------------------------------------------------
 
 // A Session's roster: every student placed at its start, and anyone else with a
-// row (a check-in before a class move, say). Before confirmation a student who has
-// not checked in has no status yet.
+// row - a student moved into the Class after it began, who then checked in. Before
+// confirmation a student who has not checked in has no status yet.
 async function rosterView(auth, sessionId) {
     const session = await loadSession(sessionId);
     await assertCanRead(auth, session);
@@ -362,20 +372,20 @@ async function history(auth, attendanceId) {
     };
 }
 
-// A student's own attendance in their current Class, oldest Session first.
+// A student's own attendance, oldest Session first: every record of theirs at
+// this school, whatever Class it was taken in. A class move or a new academic year
+// does not hide the old ones (owner, 2026-10-02); each Session names its Class.
 async function mine(auth, { classSubjectId }) {
-    const placement = await currentPlacement(auth.membershipId);
-    if (!placement) return [];
+    const profile = await prisma.studentProfile.findFirst({
+        where: { membershipId: auth.membershipId, endedAt: null },
+        select: { id: true },
+    });
+    if (!profile) return [];
 
     const rows = await prisma.attendance.findMany({
         where: {
-            studentProfileId: placement.studentProfileId,
-            session: {
-                classSubject: {
-                    classId: placement.classId,
-                    ...(classSubjectId ? { id: classSubjectId } : {}),
-                },
-            },
+            studentProfileId: profile.id,
+            ...(classSubjectId ? { session: { classSubjectId } } : {}),
         },
         include: { session: { select: sessionSelect } },
         orderBy: { session: { startsAt: 'asc' } },
