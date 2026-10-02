@@ -485,19 +485,26 @@ async function listSessions(auth, classSubjectId, { status }) {
 }
 
 // ---------------------------------------------------------------------------
-// A student's day
+// A student's calendar
 // ---------------------------------------------------------------------------
 
-// A student's Sessions on one day of the school's calendar, today by default: those
-// of every ClassSubject of their current Class. An ended ClassSubject's count too,
-// since a Session between an ending and a successor still takes check-ins
-// (teaching-and-learning 03). A number cancelled because a plan stopped reaching it
-// keeps a stale date (firstNumberFrom), so it is left out; one cancelled for a
-// holiday, as never held or as its subject stopped is shown, cancelled.
+// A student's Sessions over days of the school's calendar: one day, a range of up to
+// six weeks for a calendar, or today (owner, 2026-10-02).
 //
-// Each carries the student's own attendance, and canCheckIn: whether a check-in
-// would be taken now, by the server's clock - the window
-// POST /api/attendance/sessions/:id/check-in enforces.
+// - Whose: the Sessions of the Class the student was placed in AT THE TIME, read
+//   from their placements. After a move from 7A to 7B, September shows 7A's with
+//   its attendance, not 7B's they never sat in. A Session that overlaps two
+//   placements on the day of a move is shown for both Classes, as check-in and the
+//   roster each allow.
+// - An ended ClassSubject's Sessions count too, since a Session between an ending
+//   and a successor still takes check-ins (teaching-and-learning 03).
+// - A number cancelled because a plan stopped reaching it keeps a stale date
+//   (firstNumberFrom), so it is left out. One cancelled for a holiday, as never held
+//   or as its subject stopped is shown, cancelled. The holidays themselves are
+//   GET /api/holidays, which every member reads.
+// - Each carries the student's own attendance, and canCheckIn: whether a check-in
+//   would be taken now, by the server's clock - the window
+//   POST /api/attendance/sessions/:id/check-in enforces, current Class included.
 const ownAttendanceView = (row) => ({
     id: row.id,
     status: row.status,
@@ -506,7 +513,7 @@ const ownAttendanceView = (row) => ({
     late: row.late,
 });
 
-async function listMine(auth, { date }) {
+async function listMine(auth, { date, from, to }) {
     // School is above tenancy, so this reads without a scope.
     const school = await prisma.school.findUnique({
         where: { id: auth.schoolId },
@@ -514,28 +521,60 @@ async function listMine(auth, { date }) {
     });
     const zone = school?.timeZone ?? null;
     const now = new Date();
-    const day = date ?? (zone ? utcToLocal(now, zone).date : null);
+    const today = zone ? utcToLocal(now, zone).date : null;
+    const first = from ?? date ?? today;
+    const last = to ?? date ?? today;
 
-    const placement = await prisma.classMembership.findFirst({
-        where: { endedAt: null, studentProfile: { membershipId: auth.membershipId, endedAt: null } },
-        select: { studentProfileId: true, class: { select: { id: true, name: true } } },
+    const profile = await prisma.studentProfile.findFirst({
+        where: { membershipId: auth.membershipId, endedAt: null },
+        select: {
+            id: true,
+            classMemberships: {
+                select: { classId: true, startedAt: true, endedAt: true, class: { select: { id: true, name: true } } },
+            },
+        },
     });
+    const placements = profile?.classMemberships ?? [];
+    const current = placements.find((placement) => placement.endedAt === null) ?? null;
+    const empty = { from: first, to: last, timeZone: zone, class: current?.class ?? null, sessions: [] };
     // With no time zone there is no timetable, so no Session either.
-    if (!placement || !zone) {
-        return { date: day, timeZone: zone, class: placement?.class ?? null, sessions: [] };
-    }
+    if (!profile || !zone) return empty;
+
+    const rangeStart = midnightOf(first, zone);
+    const rangeEnd = midnightOf(nextDay(last), zone);
+    const inRange = placements.filter(
+        (placement) => placement.startedAt < rangeEnd && (placement.endedAt === null || placement.endedAt > rangeStart)
+    );
+    if (inRange.length === 0) return empty;
 
     const rows = await prisma.session.findMany({
         where: {
-            classSubject: { classId: placement.class.id, status: 'ACTIVE' },
-            startsAt: { gte: midnightOf(day, zone), lt: midnightOf(nextDay(day), zone) },
-            OR: [{ status: 'SCHEDULED' }, { cancelReason: { not: 'SCHEDULE_CHANGED' } }],
+            startsAt: { gte: rangeStart, lt: rangeEnd },
+            AND: [
+                {
+                    OR: inRange.map((placement) => ({
+                        classSubject: { classId: placement.classId, status: 'ACTIVE' },
+                        endsAt: { gt: placement.startedAt },
+                        ...(placement.endedAt ? { startsAt: { lt: placement.endedAt } } : {}),
+                    })),
+                },
+                { OR: [{ status: 'SCHEDULED' }, { cancelReason: { not: 'SCHEDULE_CHANGED' } }] },
+            ],
         },
-        include: { classSubject: { select: { id: true, subject: { select: { code: true, name: true } } } } },
+        include: {
+            classSubject: {
+                select: {
+                    id: true,
+                    classId: true,
+                    class: { select: { name: true } },
+                    subject: { select: { code: true, name: true } },
+                },
+            },
+        },
         orderBy: { startsAt: 'asc' },
     });
     const own = await prisma.attendance.findMany({
-        where: { studentProfileId: placement.studentProfileId, sessionId: { in: rows.map((row) => row.id) } },
+        where: { studentProfileId: profile.id, sessionId: { in: rows.map((row) => row.id) } },
         select: { id: true, sessionId: true, status: true, checkedInAt: true, outsideSchool: true, late: true },
     });
     const ownBySession = new Map(own.map((row) => [row.sessionId, row]));
@@ -544,21 +583,21 @@ async function listMine(auth, { date }) {
     const canCheckIn = (row, attendance) =>
         hasPoint &&
         !attendance &&
+        row.classSubject.classId === current?.classId &&
         row.status === 'SCHEDULED' &&
         row.completedAt === null &&
         now >= row.startsAt &&
         now < row.endsAt;
 
     return {
-        date: day,
-        timeZone: zone,
-        class: placement.class,
+        ...empty,
         sessions: rows.map((row) => {
             const found = ownBySession.get(row.id);
             const attendance = found ? ownAttendanceView(found) : null;
             return {
                 ...sessionView(row, zone),
                 classSubjectId: row.classSubject.id,
+                class: row.classSubject.class.name,
                 subject: row.classSubject.subject,
                 attendance,
                 canCheckIn: canCheckIn(row, attendance),

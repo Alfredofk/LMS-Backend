@@ -19,9 +19,9 @@ import { scheduleBody, idParams, sessionsQuery, mineQuery } from './sessions.sch
 // the old /:id/complete, which asked for no attendance, is gone). The school's
 // leaders read the whole school's list.
 //
-// A student finds the day's Sessions of their own Class, with their own
-// attendance, through /mine - without it no Session id is in their reach to
-// check in to.
+// A student finds their Sessions through /mine - a day, or up to six weeks for a
+// calendar - with their own attendance. Without it no Session id is in their reach
+// to check in to.
 
 const router = Router();
 

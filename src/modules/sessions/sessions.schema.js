@@ -50,12 +50,36 @@ const realDay = (value) => {
     const parsed = new Date(`${value}T00:00:00Z`);
     return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 };
-const mineQuery = z.object({
-    date: z
-        .string()
-        .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use the form YYYY-MM-DD')
-        .refine(realDay, 'That date does not exist')
-        .optional(),
-});
+const day = z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use the form YYYY-MM-DD')
+    .refine(realDay, 'That date does not exist');
+
+// A student's Sessions: one day (date), a range (from and to, both included), or
+// today with neither. A range is at most six weeks, a month as a calendar grid
+// shows it (owner, 2026-10-02).
+const MAX_RANGE_DAYS = 42;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const mineQuery = z
+    .object({ date: day.optional(), from: day.optional(), to: day.optional() })
+    .superRefine((value, ctx) => {
+        if (value.date && (value.from || value.to)) {
+            ctx.addIssue({ code: 'custom', path: ['date'], message: 'Give a date, or a from and a to - not both' });
+            return;
+        }
+        if (Boolean(value.from) !== Boolean(value.to)) {
+            ctx.addIssue({ code: 'custom', path: [value.from ? 'to' : 'from'], message: 'Give both from and to' });
+            return;
+        }
+        if (!value.from) return;
+        if (value.to < value.from) {
+            ctx.addIssue({ code: 'custom', path: ['to'], message: 'to must not be before from' });
+            return;
+        }
+        const days = (new Date(value.to).getTime() - new Date(value.from).getTime()) / DAY_MS + 1;
+        if (days > MAX_RANGE_DAYS) {
+            ctx.addIssue({ code: 'custom', path: ['to'], message: `At most ${MAX_RANGE_DAYS} days at once` });
+        }
+    });
 
 export { scheduleBody, idParams, sessionsQuery, mineQuery };
