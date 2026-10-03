@@ -157,6 +157,10 @@ async function listMembers(req, res) {
     return ok(res, { members: await service.listMembers(req.auth, req.validated.query) });
 }
 
+async function getMember(req, res) {
+    return ok(res, { member: await service.getMember(req.auth, req.validated.params.id) });
+}
+
 // The new Principal's token names their old roles until it is refreshed; the
 // services read PRINCIPAL from the database, so they may act as soon as it is.
 async function handOverPrincipal(req, res) {
@@ -252,6 +256,7 @@ export {
     approveLeaveRequest,
     rejectLeaveRequest,
     listMembers,
+    getMember,
     removeMember,
     handOverPrincipal,
     appointVicePrincipal,

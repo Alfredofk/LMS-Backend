@@ -225,21 +225,28 @@ async function loadUser(userId) {
 // The account, whether it is a Platform Admin - read from the table as
 // requirePlatformAdmin reads it, so the frontend knows to offer the admin's screens
 // (2026-10-03) - and the membership.
+//
+// The phone number (ticket 23) is added here rather than to publicUser, so the
+// sign-in responses keep their shape, as they did for isPlatformAdmin.
 async function meOf(user) {
     const admin = await prisma.platformAdmin.findUnique({ where: { userId: user.id }, select: { id: true } });
-    return { user: publicUser(user), isPlatformAdmin: Boolean(admin), membership: await loadMembership(user.id) };
+    return {
+        user: { ...publicUser(user), phone: user.phone },
+        isPlatformAdmin: Boolean(admin),
+        membership: await loadMembership(user.id),
+    };
 }
 
 async function getMe(userId) {
     return meOf(await loadUser(userId));
 }
 
-async function updateMe(userId, { fullName }) {
+async function updateMe(userId, { fullName, phone }) {
     await loadUser(userId);
 
     const user = await prisma.user.update({
         where: { id: userId },
-        data: { fullName },
+        data: { fullName, phone },
     });
 
     return meOf(user);
@@ -425,13 +432,15 @@ async function deleteAccount(userId, body) {
             }
 
             // .invalid is a reserved TLD: the address can never receive mail, and
-            // the id keeps it unique.
+            // the id keeps it unique. The phone number goes with it (ticket 23):
+            // nothing keeps a way to reach a person who asked to be deleted.
             const released = await tx.user.updateMany({
                 where: { id: userId, deletedAt: null },
                 data: {
                     email: `deleted+${userId}@deleted.invalid`,
                     googleSub: null,
                     passwordHash: null,
+                    phone: null,
                     deletedAt: now,
                 },
             });

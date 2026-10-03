@@ -30,8 +30,8 @@ async function deleteMe(req, res) {
     return ok(res, {
         ...result,
         message:
-            'Your account is deleted and you are signed out everywhere. Your sign-in details are ' +
-            'gone and the email address is free to register again. Your name stays on the ' +
+            'Your account is deleted and you are signed out everywhere. Your sign-in details and ' +
+            'phone number are gone and the email address is free to register again. Your name stays on the ' +
             'records of any school you belonged to, which keeps them.',
     });
 }

@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { SCHOOL_TYPES, SCHOOL_TYPE_NAMES, isValidDurationYears } from '../../shared/schoolType.js';
 import { TIME_ZONES } from '../../shared/timeZone.js';
+import { phone } from '../auth/auth.schema.js';
 
 // The registration arrives as multipart/form-data, because the KTP rides along
 // with it, so every field here starts life as a string.
@@ -12,14 +13,9 @@ const blankToUndefined = (value) => (value === '' ? undefined : value);
 // NPSN is 8 digits. Whether it is REAL is the platform admin's call, made by hand.
 const npsn = z.string().trim().regex(/^\d{8}$/, 'NPSN must be exactly 8 digits');
 
-// Spaces and dashes are how people write phone numbers, so they are dropped
-// before checking. Beyond "digits, an optional leading +, 8 to 15 of them"
-// nothing is assumed: operator prefixes change, and a wrong rule here would
-// refuse a real applicant.
-const applicantPhone = z.preprocess(
-    (value) => (typeof value === 'string' ? value.replace(/[\s-]/g, '') : value),
-    z.string().regex(/^\+?\d{8,15}$/, 'Enter a valid phone number')
-);
+// The founder's number, checked by the one rule every phone number here follows
+// (auth.schema.js).
+const applicantPhone = phone;
 
 // The school's point, for a student's check-in (teaching-and-learning ticket 01).
 // Checked against Indonesia's extent rather than the whole globe: a point in the

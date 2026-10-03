@@ -137,10 +137,10 @@ reviewRouter.post(
 );
 
 // A third router, mounted at /api/members: the school's people (ticket 06).
-// A Vice Principal reads the list (ticket 19); everything that changes who is in
-// the school - taking one out, the hand-over, appointing or revoking a Vice
-// Principal - is the Principal's alone. Since ticket 16 a homeroom teacher moves a
-// student to another class instead of removing them.
+// A Vice Principal reads the list (ticket 19) and one member's detail (ticket 22);
+// everything that changes who is in the school - taking one out, the hand-over,
+// appointing or revoking a Vice Principal - is the Principal's alone. Since ticket
+// 16 a homeroom teacher moves a student to another class instead of removing them.
 const membersRouter = Router();
 
 const principalOnly = requireRole('PRINCIPAL');
@@ -148,6 +148,7 @@ const principalOnly = requireRole('PRINCIPAL');
 membersRouter.use(requireAuth, requireActiveMembership, requireRole('PRINCIPAL', 'VICE_PRINCIPAL'));
 
 membersRouter.get('/', validate({ query: membersQuery }), controller.listMembers);
+membersRouter.get('/:id', validate({ params: idParams }), controller.getMember);
 membersRouter.post(
     '/:id/remove',
     principalOnly,

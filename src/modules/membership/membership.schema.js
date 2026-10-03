@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { phone } from '../auth/auth.schema.js';
+
 // Join by School Code (ticket 05, ADR-0002).
 //
 // Everything here arrives as JSON, unlike the school registration, which is
@@ -76,6 +78,13 @@ const guardianPayload = z.strictObject({
     relationship: z.string().trim().min(3, 'State the relationship').max(50),
 });
 
+// Asking for the GUARDIAN role also brings a phone number the school can reach
+// them on (ticket 23, owner 2026-10-04). Optional here, because an account that
+// already holds one need not send it again - the service, which knows the
+// account, refuses a guardian with none. A further child (addChildBody) keeps the
+// plain payload: strict, so a phone sent there is refused.
+const guardianRequestPayload = guardianPayload.extend({ phone: phone.optional() });
+
 // Every requested role must bring its payload, and a payload for a role that was
 // not requested is refused rather than ignored - the same strictness ticket 04
 // applies to an SMA that sends a duration it may not choose.
@@ -112,7 +121,7 @@ const requestBody = z
         roles: z.array(z.enum(REQUESTABLE_ROLES)).min(1, 'Pick at least one role').max(3),
         teacher: teacherPayload.optional(),
         student: studentPayload.optional(),
-        guardian: guardianPayload.optional(),
+        guardian: guardianRequestPayload.optional(),
     })
     .superRefine(
         requirePayloadPerRole({ TEACHER: 'teacher', STUDENT: 'student', GUARDIAN: 'guardian' })
@@ -130,7 +139,7 @@ const addRolesBody = z
     .strictObject({
         roles: z.array(z.enum(ADDABLE_ROLES)).min(1, 'Pick at least one role').max(2),
         teacher: teacherPayload.optional(),
-        guardian: guardianPayload.optional(),
+        guardian: guardianRequestPayload.optional(),
     })
     .superRefine(requirePayloadPerRole({ TEACHER: 'teacher', GUARDIAN: 'guardian' }));
 

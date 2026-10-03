@@ -1,11 +1,25 @@
 import { z } from 'zod';
 
-import { fullName, password } from '../auth/auth.schema.js';
+import { fullName, password, phone } from '../auth/auth.schema.js';
 
 // Email is deliberately absent. Changing it is an identity change, not a profile
 // edit: it would need re-verification of the new address and a way back if the
 // old one is lost. Out of scope for ticket 03.
-const updateMeBody = z.object({ fullName });
+//
+// The phone number (ticket 23) is asked of a guardian when they join; afterwards
+// only the person changes it, here. Either field alone, or both.
+//
+// Having none is allowed (owner, 2026-10-04): an SD child has no phone, and the
+// number is the person's own to remove. null or a blank field clears it - a form
+// emptied by hand sends "". Only a GUARDIAN request asks for one again.
+const optionalPhone = z.preprocess((value) => (value === '' ? null : value), phone.nullable()).optional();
+
+const updateMeBody = z
+    .object({ fullName: fullName.optional(), phone: optionalPhone })
+    .refine((value) => value.fullName !== undefined || value.phone !== undefined, {
+        message: 'Give a full name or a phone number to change',
+        path: ['fullName'],
+    });
 
 const changePasswordBody = z.object({
     // Not shape-checked: an existing password that predates a rule change must

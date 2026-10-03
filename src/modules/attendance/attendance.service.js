@@ -367,4 +367,77 @@ async function mine(auth, { classSubjectId }) {
     return rows.map(({ session, ...row }) => ({ ...attendanceView(row), session: sessionView(session) }));
 }
 
-export { checkIn, confirm, correct, rosterView, history, mine };
+// ---------------------------------------------------------------------------
+// One student's summary, for the school's leaders
+// ---------------------------------------------------------------------------
+
+const STATUS_COUNT = { PRESENT: 'present', SICK: 'sick', EXCUSED: 'excused', ABSENT: 'absent' };
+
+// A student's counts over one academic year, a row per Semester
+// (registration-and-membership ticket 22, owner 2026-10-04). Called by
+// membership's member detail; the caller has already decided who may read it.
+//
+// - A Session counts under its ClassSubject's Semester, not under a Class: a
+//   student who moved Class during the year keeps the weeks in the first one.
+// - Confirmed Sessions only. A check-in writes PRESENT at once, but ABSENT is
+//   written only at confirmation, so an unconfirmed Session would overstate the
+//   rate. A Session cancelled after the fact - NOT_HELD after a check-in, say -
+//   is left out, whatever rows it carries.
+// - late and outsideSchool are counted on PRESENT rows only: a check-in the
+//   teacher corrected to another status no longer counts as late.
+//
+// The student's own numbers, with nothing to compare them against: no class
+// average, no rank (handoff #21).
+async function attendanceSummary(studentProfileId, academicYearId) {
+    const [semesters, rows] = await Promise.all([
+        prisma.semester.findMany({
+            where: { academicYearId },
+            select: { id: true, ordinal: true },
+            orderBy: { ordinal: 'asc' },
+        }),
+        prisma.attendance.findMany({
+            where: {
+                studentProfileId,
+                session: {
+                    status: 'SCHEDULED',
+                    completedAt: { not: null },
+                    classSubject: { semester: { academicYearId } },
+                },
+            },
+            select: {
+                status: true,
+                late: true,
+                outsideSchool: true,
+                session: { select: { classSubject: { select: { semesterId: true } } } },
+            },
+        }),
+    ]);
+
+    const bySemester = new Map(
+        semesters.map((semester) => [
+            semester.id,
+            {
+                semesterId: semester.id,
+                ordinal: semester.ordinal,
+                counted: 0,
+                present: 0,
+                sick: 0,
+                excused: 0,
+                absent: 0,
+                late: 0,
+                outsideSchool: 0,
+            },
+        ])
+    );
+    for (const row of rows) {
+        const counts = bySemester.get(row.session.classSubject.semesterId);
+        if (!counts) continue;
+        counts.counted += 1;
+        counts[STATUS_COUNT[row.status]] += 1;
+        if (row.status === 'PRESENT' && row.late) counts.late += 1;
+        if (row.status === 'PRESENT' && row.outsideSchool) counts.outsideSchool += 1;
+    }
+    return [...bySemester.values()];
+}
+
+export { checkIn, confirm, correct, rosterView, history, mine, attendanceSummary };

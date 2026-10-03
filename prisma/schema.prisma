@@ -153,6 +153,11 @@ model User {
     /// Google's stable account id (the ID token's `sub`), never its email (ADR-0005).
     googleSub       String?   @unique
     fullName        String
+    /// The person's own number, the same whichever school they are at
+    /// (registration-and-membership ticket 23). Asked of a guardian, changed only
+    /// by them, read by the Principal and the Vice Principals; null once the
+    /// account is deleted.
+    phone           String?
     emailVerifiedAt DateTime?
     createdAt       DateTime  @default(now())
     updatedAt       DateTime  @updatedAt

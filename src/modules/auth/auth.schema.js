@@ -43,6 +43,16 @@ const fullName = z
     .min(2, 'Full name is too short')
     .max(120, 'Full name is too long');
 
+// Spaces and dashes are how people write phone numbers, so they are dropped
+// before checking. Beyond "digits, an optional leading +, 8 to 15 of them"
+// nothing is assumed: operator prefixes change, and a wrong rule here would
+// refuse a real person. Stored as typed otherwise - 08... is not rewritten to
+// +628... Shared by a school's founder (ticket 04) and a guardian (ticket 23).
+const phone = z.preprocess(
+    (value) => (typeof value === 'string' ? value.replace(/[\s-]/g, '') : value),
+    z.string().regex(/^\+?\d{8,15}$/, 'Enter a valid phone number')
+);
+
 // The web page the email links to reads the token from its own URL and passes
 // it on as a query string.
 const tokenQuery = z.object({
@@ -88,6 +98,7 @@ export {
     password,
     email,
     fullName,
+    phone,
     tokenQuery,
     registerBody,
     loginBody,

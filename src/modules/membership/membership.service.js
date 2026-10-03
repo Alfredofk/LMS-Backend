@@ -12,6 +12,7 @@ import {
 } from '../../shared/approval.js';
 import { AppError, badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
+import { attendanceSummary } from '../attendance/attendance.service.js';
 
 const log = createLogger('Membership');
 
@@ -195,7 +196,7 @@ async function resolveSchool(schoolCode) {
 async function assertEligibleApplicant(userId) {
     const user = await prisma.user.findUnique({
         where: { id: userId },
-        select: { fullName: true, emailVerifiedAt: true, deletedAt: true },
+        select: { fullName: true, phone: true, emailVerifiedAt: true, deletedAt: true },
     });
     if (!user || user.deletedAt) throw notFound('Account not found');
     if (!user.emailVerifiedAt) {
@@ -227,6 +228,24 @@ async function assertEligibleApplicant(userId) {
 async function lookupSchool(userId, { schoolCode }) {
     await assertEligibleApplicant(userId);
     return publicSchoolView(await resolveSchool(schoolCode));
+}
+
+// A guardian gives a phone number the school can reach them on (ticket 23, owner
+// 2026-10-04), unless their account holds one already. The number is the person's
+// own (User.phone), so one sent with the request replaces the old, and is kept
+// whatever the school decides. Checked before the child is resolved, so a request
+// missing it costs no NISN guess.
+const MISSING_PHONE = 'Give a phone number the school can reach you on';
+
+function assertGuardianPhone(roles, guardian, account) {
+    if (!roles.includes('GUARDIAN') || guardian?.phone || account.phone) return;
+    throw badRequest(MISSING_PHONE, [{ path: 'guardian.phone', message: MISSING_PHONE, code: 'custom' }]);
+}
+
+// Written in the caller's transaction, so a request that fails changes nothing.
+async function saveGuardianPhone(tx, userId, guardian) {
+    if (!guardian?.phone) return;
+    await tx.user.update({ where: { id: userId }, data: { phone: guardian.phone } });
 }
 
 // The child a guardian claims. Runs inside the school's scope, so a NISN that
@@ -276,9 +295,10 @@ async function resolveChild({ childNisn, childFullName }) {
 // and StudentProfile is unique on (schoolId, nisn), so writing one now would let a
 // stranger reserve a real child's NISN forever.
 async function requestJoin(userId, body) {
-    await assertEligibleApplicant(userId);
+    const account = await assertEligibleApplicant(userId);
     const school = await resolveSchool(body.schoolCode);
     const roles = assertRoleCombinationAllowed(body.roles);
+    assertGuardianPhone(roles, body.guardian, account);
 
     // The grade has to exist at this type of school: there is no grade 7 at an SD.
     if (roles.includes('STUDENT')) {
@@ -327,6 +347,7 @@ async function requestJoin(userId, body) {
                             relationship: body.guardian.relationship,
                         },
                     });
+                    await saveGuardianPhone(tx, userId, body.guardian);
                 }
 
                 await recordAudit({
@@ -439,7 +460,7 @@ async function addRoles(auth, body) {
         where: { id: auth.membershipId, status: 'ACTIVE' },
         select: {
             id: true,
-            user: { select: { fullName: true } },
+            user: { select: { fullName: true, phone: true } },
             roles: { select: { id: true, role: true, status: true } },
             joinRequest: { select: { id: true } },
             teacherProfile: { select: { id: true } },
@@ -463,6 +484,7 @@ async function addRoles(auth, body) {
 
     // STUDENT stays exclusive: a student can add nothing, and nothing can be added to one.
     assertRoleCombinationAllowed([...held.map((role) => role.role), ...requested]);
+    assertGuardianPhone(requested, body.guardian, membership.user);
 
     const principal = held.some((role) => role.role === 'PRINCIPAL' && role.status === 'ACTIVE');
     const child = requested.includes('GUARDIAN') ? await resolveChild(body.guardian) : null;
@@ -591,6 +613,7 @@ async function addRoles(auth, body) {
                     userId: auth.userId,
                     now,
                 });
+                await saveGuardianPhone(tx, auth.userId, body.guardian);
 
                 if (ownHomeroomChild) {
                     await notifyGuardianLinked(tx, {
@@ -1946,6 +1969,127 @@ async function listMembers(auth, { status, role }) {
     }));
 }
 
+// A deleted account keeps its row with a placeholder address (ADR-0007), which
+// is not one anybody can be reached at.
+const emailOf = (user) => (user.deletedAt ? null : user.email);
+
+const placementSelect = {
+    startedAt: true,
+    endedAt: true,
+    class: {
+        select: { id: true, name: true, gradeLevel: true, academicYear: { select: { id: true, label: true } } },
+    },
+};
+
+// The phone is ticket 23's: a guardian's, asked when they join; null for most
+// others, and for a deleted account.
+const contactSelect = { select: { fullName: true, email: true, phone: true, deletedAt: true } };
+
+const memberDetailSelect = {
+    id: true,
+    status: true,
+    approvedAt: true,
+    endedAt: true,
+    endReason: true,
+    user: contactSelect,
+    roles: { where: { status: 'ACTIVE' }, select: { role: true }, orderBy: { role: 'asc' } },
+    teacherProfile: { select: { nip: true, nuptk: true } },
+    studentProfile: {
+        select: {
+            id: true,
+            nisn: true,
+            birthDate: true,
+            classMemberships: { select: placementSelect },
+            // Live links only (owner, 2026-10-04): a PENDING claim stays in the
+            // review queue, and endMembership ends every link of a guardian who
+            // left, and of a student who left.
+            guardianLinks: {
+                where: { status: 'ACTIVE', endedAt: null },
+                select: {
+                    relationship: true,
+                    guardianMembership: { select: { id: true, user: contactSelect } },
+                },
+                orderBy: { createdAt: 'asc' },
+            },
+        },
+    },
+};
+
+const placementView = (placement) => ({
+    id: placement.class.id,
+    name: placement.class.name,
+    gradeLevel: placement.class.gradeLevel,
+    academicYear: placement.class.academicYear.label,
+});
+
+// The Class they sit in now - at most one open placement, by the partial index -
+// or, with none open, the one they sat in last: a student who LEFT, or one between
+// two academic years. The attendance summary covers that Class's year.
+async function studentDetail(profile) {
+    const placements = profile.classMemberships;
+    const open = placements.find((placement) => placement.endedAt === null) ?? null;
+    const last = open ? null : ([...placements].sort((a, b) => b.startedAt - a.startedAt)[0] ?? null);
+    const year = (open ?? last)?.class.academicYear ?? null;
+
+    return {
+        studentProfileId: profile.id,
+        birthDate: profile.birthDate,
+        class: open ? placementView(open) : null,
+        lastClass: last ? placementView(last) : null,
+        guardians: profile.guardianLinks.map((link) => ({
+            membershipId: link.guardianMembership.id,
+            fullName: link.guardianMembership.user.fullName,
+            email: emailOf(link.guardianMembership.user),
+            phone: link.guardianMembership.user.phone,
+            relationship: link.relationship,
+        })),
+        attendance: year
+            ? {
+                academicYear: year.label,
+                semesters: await attendanceSummary(profile.id, year.id),
+            }
+            : null,
+    };
+}
+
+// One member, for the Principal and the Vice Principals (ticket 22, owner
+// 2026-10-04): what the list says of them, their email, and for a student the
+// birth date, the Class, the guardians and an attendance summary.
+//
+// ACTIVE and LEFT only, as the list. A PENDING or REJECTED membership is the
+// review queue's, and is 404 here like another school's.
+//
+// It gives the leaders no sight they lack: they read every Session's roster
+// already (attendance's canRead), and the review queue shows them an applicant's
+// email and birth date.
+async function getMember(auth, membershipId) {
+    if (!(await isPrincipalOrVice(auth.membershipId))) {
+        throw forbidden('Only the Principal or a Vice Principal can do this');
+    }
+
+    const member = await prisma.schoolMembership.findFirst({
+        where: { id: membershipId, status: { in: ['ACTIVE', 'LEFT'] } },
+        select: memberDetailSelect,
+    });
+    if (!member) throw notFound('Member not found');
+
+    return {
+        membershipId: member.id,
+        status: member.status,
+        fullName: member.user.fullName,
+        email: emailOf(member.user),
+        phone: member.user.phone,
+        roles: member.roles.map((entry) => entry.role),
+        nisn: member.studentProfile?.nisn ?? null,
+        nip: member.teacherProfile?.nip ?? null,
+        nuptk: member.teacherProfile?.nuptk ?? null,
+        joinedAt: member.approvedAt,
+        endedAt: member.endedAt,
+        endReason: member.endReason,
+        student: member.studentProfile ? await studentDetail(member.studentProfile) : null,
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Reviewer
 // ---------------------------------------------------------------------------
@@ -2451,6 +2595,7 @@ export {
     approveLeaveRequest,
     rejectLeaveRequest,
     listMembers,
+    getMember,
     listRequests,
     getRequest,
     approveRequest,
