@@ -346,6 +346,47 @@ async function assertCanRead(auth, classSubject) {
 }
 
 // ---------------------------------------------------------------------------
+// One Session, as attendance and content read it
+// ---------------------------------------------------------------------------
+
+// A Session's ClassSubject as its readers need it: the slot and teacher that
+// answeringTeacherOf reads, and the Class's name and academic year to say which
+// Class it was - two years may each have a 7A. The calendars below read it too.
+const sessionClassSubjectSelect = {
+    id: true,
+    status: true,
+    endedAt: true,
+    classId: true,
+    subjectId: true,
+    semesterId: true,
+    teacherMembershipId: true,
+    class: { select: { name: true, academicYear: { select: { label: true } } } },
+    subject: { select: { code: true, name: true } },
+};
+
+const sessionSelect = {
+    id: true,
+    number: true,
+    status: true,
+    cancelReason: true,
+    startsAt: true,
+    endsAt: true,
+    needsCompletion: true,
+    completedAt: true,
+    classSubject: { select: sessionClassSubjectSelect },
+};
+
+async function loadSession(id) {
+    const session = await prisma.session.findFirst({ where: { id }, select: sessionSelect });
+    if (!session) throw notFound('Session not found');
+    return session;
+}
+
+// "Pertemuan ke-3 of MAT in 7A", for messages and log lines.
+const describeSession = (session) =>
+    `Pertemuan ke-${session.number} of ${session.classSubject.subject.code} in ${session.classSubject.class.name}`;
+
+// ---------------------------------------------------------------------------
 // Views
 // ---------------------------------------------------------------------------
 
@@ -487,8 +528,30 @@ async function listSessions(auth, classSubjectId, { status }) {
 }
 
 // ---------------------------------------------------------------------------
-// A student's calendar
+// Calendars: a student's (/mine) and a teacher's (/teaching)
 // ---------------------------------------------------------------------------
+
+// The days a calendar asks for, in the school's zone: one date, a from-to range of
+// up to six weeks (the schema's limit), or today.
+function daysAsked(zone, { date, from, to }, now) {
+    const today = zone ? utcToLocal(now, zone).date : null;
+    return { first: from ?? date ?? today, last: to ?? date ?? today };
+}
+
+// A number cancelled because a plan stopped reaching it keeps a stale date
+// (firstNumberFrom), so no calendar shows it. One cancelled for a holiday, as never
+// held or as its subject stopped is shown, cancelled.
+const SHOWN_ON_CALENDAR = { OR: [{ status: 'SCHEDULED' }, { cancelReason: { not: 'SCHEDULE_CHANGED' } }] };
+
+// Which Class and subject a calendar's Session is. The Class by id and academic
+// year as well as by name: two years may each have a 7A (2026-10-03).
+const calendarFields = (classSubject) => ({
+    classSubjectId: classSubject.id,
+    classId: classSubject.classId,
+    class: classSubject.class.name,
+    academicYear: classSubject.class.academicYear.label,
+    subject: classSubject.subject,
+});
 
 // A student's Sessions over days of the school's calendar: one day, a range of up to
 // six weeks for a calendar, or today (owner, 2026-10-02).
@@ -500,9 +563,7 @@ async function listSessions(auth, classSubjectId, { status }) {
 //   roster each allow.
 // - An ended ClassSubject's Sessions count too, since a Session between an ending
 //   and a successor still takes check-ins (teaching-and-learning 03).
-// - A number cancelled because a plan stopped reaching it keeps a stale date
-//   (firstNumberFrom), so it is left out. One cancelled for a holiday, as never held
-//   or as its subject stopped is shown, cancelled. The holidays themselves are
+// - Cancelled numbers as SHOWN_ON_CALENDAR says. The holidays themselves are
 //   GET /api/holidays, which every member reads.
 // - Each carries the student's own attendance, and canCheckIn: whether a check-in
 //   would be taken now, by the server's clock - the window
@@ -523,9 +584,7 @@ async function listMine(auth, { date, from, to }) {
     });
     const zone = school?.timeZone ?? null;
     const now = new Date();
-    const today = zone ? utcToLocal(now, zone).date : null;
-    const first = from ?? date ?? today;
-    const last = to ?? date ?? today;
+    const { first, last } = daysAsked(zone, { date, from, to }, now);
 
     const profile = await prisma.studentProfile.findFirst({
         where: { membershipId: auth.membershipId, endedAt: null },
@@ -560,19 +619,10 @@ async function listMine(auth, { date, from, to }) {
                         ...(placement.endedAt ? { startsAt: { lt: placement.endedAt } } : {}),
                     })),
                 },
-                { OR: [{ status: 'SCHEDULED' }, { cancelReason: { not: 'SCHEDULE_CHANGED' } }] },
+                SHOWN_ON_CALENDAR,
             ],
         },
-        include: {
-            classSubject: {
-                select: {
-                    id: true,
-                    classId: true,
-                    class: { select: { name: true } },
-                    subject: { select: { code: true, name: true } },
-                },
-            },
-        },
+        include: { classSubject: { select: sessionClassSubjectSelect } },
         orderBy: { startsAt: 'asc' },
     });
     const own = await prisma.attendance.findMany({
@@ -598,13 +648,59 @@ async function listMine(auth, { date, from, to }) {
             const attendance = found ? ownAttendanceView(found) : null;
             return {
                 ...sessionView(row, zone),
-                classSubjectId: row.classSubject.id,
-                class: row.classSubject.class.name,
-                subject: row.classSubject.subject,
+                ...calendarFields(row.classSubject),
                 attendance,
                 canCheckIn: canCheckIn(row, attendance),
             };
         }),
+    };
+}
+
+// A teacher's Sessions over the same days a student's calendar takes (2026-10-03):
+// the ones they answer for - their live ClassSubjects', and what an ended one left
+// in a slot they now teach (answeringTeacherOf, as attendance and content decide).
+// A teacher whose assignment ended no longer sees its Sessions; the successor does.
+// confirmed: its attendance is confirmed (POST /api/attendance/sessions/:id/confirm).
+async function listTeaching(auth, { date, from, to }) {
+    const zone = await zoneOf(auth.schoolId);
+    const { first, last } = daysAsked(zone, { date, from, to }, new Date());
+    const empty = { from: first, to: last, timeZone: zone, sessions: [] };
+    // With no time zone there is no timetable, so no Session either.
+    if (!zone) return empty;
+
+    const slots = await prisma.classSubject.findMany({
+        where: { teacherMembershipId: auth.membershipId, status: 'ACTIVE', endedAt: null },
+        select: { classId: true, subjectId: true, semesterId: true },
+    });
+    if (slots.length === 0) return empty;
+
+    const rows = await prisma.session.findMany({
+        where: {
+            startsAt: { gte: midnightOf(first, zone), lt: midnightOf(nextDay(last), zone) },
+            classSubject: { status: 'ACTIVE', OR: slots },
+            ...SHOWN_ON_CALENDAR,
+        },
+        include: { classSubject: { select: sessionClassSubjectSelect } },
+        orderBy: { startsAt: 'asc' },
+    });
+
+    // Who answers each, worked out once per ClassSubject.
+    const answerer = new Map();
+    for (const { classSubject } of rows) {
+        if (!answerer.has(classSubject.id)) {
+            answerer.set(classSubject.id, await answeringTeacherOf(classSubject));
+        }
+    }
+
+    return {
+        ...empty,
+        sessions: rows
+            .filter((row) => answerer.get(row.classSubject.id) === auth.membershipId)
+            .map((row) => ({
+                ...sessionView(row, zone),
+                ...calendarFields(row.classSubject),
+                confirmed: row.completedAt !== null,
+            })),
     };
 }
 
@@ -741,12 +837,9 @@ async function markNotHeld(auth, sessionId) {
     });
     if (claimed.count === 0) throw conflict(`Pertemuan ke-${session.number} was answered already`);
 
-    log.info(`${describeSession(session, classSubject)} marked not held`);
+    log.info(`${describeSession({ ...session, classSubject })} marked not held`);
     return sessionOf(auth, session.id);
 }
-
-const describeSession = (session, classSubject) =>
-    `Pertemuan ke-${session.number} of ${classSubject.subject.code} in ${classSubject.class.name}`;
 
 async function sessionOf(auth, sessionId) {
     const row = await prisma.session.findFirst({ where: { id: sessionId } });
@@ -1015,9 +1108,13 @@ export {
     getSchedule,
     listSessions,
     listMine,
+    listTeaching,
     listNeedingCompletion,
     markNotHeld,
     answeringTeacherOf,
+    sessionSelect,
+    loadSession,
+    describeSession,
     inheritSchedule,
     stopSessionsAhead,
     onCalendarChanged,

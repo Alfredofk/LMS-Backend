@@ -29,8 +29,9 @@ import {
 // token's school is the only school in reach - there is no school id in any path.
 //
 // requireRole is the coarse filter only: a STUDENT or GUARDIAN has no business
-// here. The service re-reads PRINCIPAL (or VICE_PRINCIPAL) from the database for every write, and
-// decides which classes a teacher may read, because homeroom teaching is a
+// here, but for a student's own subjects (/me/class-subjects, 2026-10-03). The
+// service re-reads PRINCIPAL (or VICE_PRINCIPAL) from the database for every write,
+// and decides which classes a teacher may read, because homeroom teaching is a
 // property of a class (Class.homeroomTeacherMembershipId), not a role.
 
 const router = Router();
@@ -156,6 +157,8 @@ router.get(
     validate({ query: classSubjectListQuery }),
     controller.listClassSubjects
 );
+// A student's own: the subjects of the Class they are in now, and their teachers.
+router.get('/me/class-subjects', requireRole('STUDENT'), controller.listOwnClassSubjects);
 router.post(
     '/class-subjects',
     teacher,

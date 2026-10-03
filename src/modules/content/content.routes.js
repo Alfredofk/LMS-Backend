@@ -12,8 +12,9 @@ import { idParams, createBody, fileBody, patchBody, orderBody } from './content.
 // The teacher who answers for a Session adds its Content, edits, orders, publishes
 // and deletes it. The school's leaders and the Class's homeroom teacher read it all;
 // the Class's students read what is published, and download a file through
-// /:id/file. requireRole is the coarse filter; the service decides whose Session
-// it is and answers 404 to anyone it does not concern.
+// /:id/file. requireRole('TEACHER') is the coarse filter on the writes only; the two
+// reads have none. The service decides whose Session it is and answers 404 to
+// anyone it does not concern - a guardian reading included.
 
 const router = Router();
 

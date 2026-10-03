@@ -22,6 +22,10 @@ import { scheduleBody, idParams, sessionsQuery, mineQuery } from './sessions.sch
 // A student finds their Sessions through /mine - a day, or up to six weeks for a
 // calendar - with their own attendance. Without it no Session id is in their reach
 // to check in to.
+//
+// A teacher finds theirs through /teaching, over the same days: the Sessions they
+// answer for, across all their ClassSubjects, each saying whether its attendance is
+// confirmed (2026-10-03).
 
 const router = Router();
 
@@ -41,6 +45,7 @@ router.get(
 );
 
 router.get('/mine', requireRole('STUDENT'), validate({ query: mineQuery }), controller.listMine);
+router.get('/teaching', requireRole('TEACHER'), validate({ query: mineQuery }), controller.listTeaching);
 
 router.get(
     '/needs-completion',

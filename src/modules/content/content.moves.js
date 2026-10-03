@@ -11,10 +11,24 @@
 // - Only a HOLIDAY cancellation moves Content. A number brought back later returns
 //   empty: what moved on does not move back.
 
+// A Session's live Content in the order it is shown. content.service.js reads both
+// helpers too; they live here because sessions.service.js imports this file, and
+// content.service.js imports sessions.service.js.
+const CONTENT_ORDER = [{ order: 'asc' }, { createdAt: 'asc' }];
+
+// The highest order among a Session's live Content, 0 when it has none.
+async function lastOrderOf(client, sessionId) {
+    const last = await client.content.aggregate({
+        where: { sessionId, deletedAt: null },
+        _max: { order: true },
+    });
+    return last._max.order ?? 0;
+}
+
 const liveContentOf = (tx, sessionId) =>
     tx.content.findMany({
         where: { sessionId, deletedAt: null },
-        orderBy: [{ order: 'asc' }, { createdAt: 'asc' }],
+        orderBy: CONTENT_ORDER,
         select: { id: true },
     });
 
@@ -35,31 +49,26 @@ async function receivingSession(tx, classSubjectId, cancelled) {
 
 // `cancelled`: the Sessions just cancelled, each { id, startsAt }, already CANCELLED
 // in `tx`. Taken in date order, so a week of them lands on the next taught day in
-// the order it was planned. Returns how many Content moved.
+// the order it was planned.
 async function moveContentOffHoliday(tx, classSubjectId, cancelled) {
-    let moved = 0;
     const inOrder = [...cancelled].sort((a, b) => a.startsAt - b.startsAt);
 
     for (const session of inOrder) {
         const items = await liveContentOf(tx, session.id);
         if (items.length === 0) continue;
 
-        // No SCHEDULED Session left at all: it stays, and students still open it.
+        // No SCHEDULED Session left at all: it stays, and students still open it. If
+        // this number is brought back later it returns with its Content, the one
+        // exception to "returns empty" (review 2026-10-03, ticket 04).
         const target = await receivingSession(tx, classSubjectId, session);
         if (!target) continue;
 
-        const last = await tx.content.aggregate({
-            where: { sessionId: target.id, deletedAt: null },
-            _max: { order: true },
-        });
-        let order = last._max.order ?? 0;
+        let order = await lastOrderOf(tx, target.id);
         for (const item of items) {
             order += 1;
             await tx.content.updateMany({ where: { id: item.id }, data: { sessionId: target.id, order } });
         }
-        moved += items.length;
     }
-    return moved;
 }
 
-export { moveContentOffHoliday };
+export { CONTENT_ORDER, lastOrderOf, moveContentOffHoliday };

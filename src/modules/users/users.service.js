@@ -38,6 +38,7 @@ const membershipSelect = {
         select: {
             id: true,
             name: true,
+            schoolCode: true,
             schoolType: true,
             durationYears: true,
             latitude: true,
@@ -100,11 +101,14 @@ const membershipSelect = {
 // every member learns whether one is set - without it there is no self check-in -
 // and only the Principal, who corrects it, sees the coordinates. The time zone is
 // every member's: the frontend shows the school's times in it (ticket 07).
-function schoolForMember(school, roles) {
+//
+// The School Code goes to whoever readsSchoolCode says, and is null for the rest.
+function schoolForMember(school, roles, { readsCode }) {
     const principal = roles.some((role) => role.role === 'PRINCIPAL' && role.status === 'ACTIVE');
     return {
         id: school.id,
         name: school.name,
+        schoolCode: readsCode ? school.schoolCode : null,
         schoolType: school.schoolType,
         durationYears: school.durationYears,
         timeZone: school.timeZone,
@@ -118,6 +122,33 @@ function schoolForMember(school, roles) {
         deactivatedAt: school.deactivatedAt,
         deactivationReason: principal ? school.deactivationReason : null,
     };
+}
+
+// Who reads the School Code (owner, 2026-10-03): those who hand it to whoever should
+// join - the Principal, a Vice Principal, and the homeroom teacher of a Class in an
+// ACTIVE academic year, who releases that Class's students and guardians
+// (ADR-0002). The code only finds the school; rotating it stays the Principal's.
+//
+// Only on an ACTIVE membership of a school still active: a LEFT member's roles keep
+// their ACTIVE status as history (guards.js). This runs unscoped, under
+// loadMembership, so the Class is looked up by its schoolId by hand.
+async function readsSchoolCode(membership) {
+    if (membership.status !== 'ACTIVE' || membership.school.deactivatedAt) return false;
+
+    const leader = membership.roles.some(
+        (role) => (role.role === 'PRINCIPAL' || role.role === 'VICE_PRINCIPAL') && role.status === 'ACTIVE'
+    );
+    if (leader) return true;
+
+    const homeroom = await prisma.class.findFirst({
+        where: {
+            schoolId: membership.school.id,
+            homeroomTeacherMembershipId: membership.id,
+            academicYear: { status: 'ACTIVE' },
+        },
+        select: { id: true },
+    });
+    return Boolean(homeroom);
 }
 
 // A student's own identifiers and the Class they are in now, null between
@@ -169,7 +200,7 @@ async function loadMembership(userId) {
             approvedAt: decided.approvedAt,
             endedAt: decided.endedAt,
             endReason: decided.endReason,
-            school: schoolForMember(decided.school, decided.roles),
+            school: schoolForMember(decided.school, decided.roles, { readsCode: await readsSchoolCode(decided) }),
             roles: decided.roles,
             teacher: decided.teacherProfile,
             student: studentForMember(decided.studentProfile),
@@ -191,9 +222,16 @@ async function loadUser(userId) {
     return user;
 }
 
+// The account, whether it is a Platform Admin - read from the table as
+// requirePlatformAdmin reads it, so the frontend knows to offer the admin's screens
+// (2026-10-03) - and the membership.
+async function meOf(user) {
+    const admin = await prisma.platformAdmin.findUnique({ where: { userId: user.id }, select: { id: true } });
+    return { user: publicUser(user), isPlatformAdmin: Boolean(admin), membership: await loadMembership(user.id) };
+}
+
 async function getMe(userId) {
-    const user = await loadUser(userId);
-    return { user: publicUser(user), membership: await loadMembership(userId) };
+    return meOf(await loadUser(userId));
 }
 
 async function updateMe(userId, { fullName }) {
@@ -204,7 +242,7 @@ async function updateMe(userId, { fullName }) {
         data: { fullName },
     });
 
-    return { user: publicUser(user), membership: await loadMembership(userId) };
+    return meOf(user);
 }
 
 // Changing a password signs out every device, then signs this one back in.

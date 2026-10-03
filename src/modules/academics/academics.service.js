@@ -1272,6 +1272,36 @@ async function listClassSubjects(auth, { status, mine }) {
     return rows.map(classSubjectView);
 }
 
+// A student's own subjects (2026-10-03): the live ClassSubjects of the Class they
+// are placed in now (teaching-and-learning spec, invariant 6), every semester of
+// its academic year, and who teaches each. Nothing PENDING, and none of the staff's
+// bookkeeping - when it was asked for or decided, an override. No placement, no
+// subjects.
+async function listOwnClassSubjects(auth) {
+    const placement = await prisma.classMembership.findFirst({
+        where: { endedAt: null, studentProfile: { membershipId: auth.membershipId, endedAt: null } },
+        select: { classId: true },
+    });
+    if (!placement) return [];
+
+    const rows = await prisma.classSubject.findMany({
+        where: { classId: placement.classId, status: 'ACTIVE', endedAt: null },
+        select: classSubjectSelect,
+        orderBy: [{ semester: { ordinal: 'asc' } }, { subject: { code: 'asc' } }],
+    });
+    return rows.map((row) => ({
+        id: row.id,
+        class: { id: row.class.id, name: row.class.name },
+        subject: row.subject,
+        semester: {
+            id: row.semester.id,
+            ordinal: row.semester.ordinal,
+            academicYear: row.semester.academicYear.label,
+        },
+        teacher: { fullName: row.teacher.user.fullName },
+    }));
+}
+
 // A teacher taking their own PENDING request back (the cancellation pattern of
 // ticket 05). Anyone else's, or a decided one, is the same 404.
 async function cancelClassSubject(auth, id) {
@@ -1600,6 +1630,7 @@ export {
     subjectBoard,
     requestClassSubject,
     listClassSubjects,
+    listOwnClassSubjects,
     cancelClassSubject,
     approveClassSubject,
     rejectClassSubject,

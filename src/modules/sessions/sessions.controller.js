@@ -21,6 +21,10 @@ async function listMine(req, res) {
     return ok(res, await service.listMine(req.auth, req.validated.query));
 }
 
+async function listTeaching(req, res) {
+    return ok(res, await service.listTeaching(req.auth, req.validated.query));
+}
+
 async function listNeedingCompletion(req, res) {
     return ok(res, { sessions: await service.listNeedingCompletion(req.auth) });
 }
@@ -29,4 +33,4 @@ async function markNotHeld(req, res) {
     return ok(res, { session: await service.markNotHeld(req.auth, req.validated.params.id) });
 }
 
-export { setSchedule, getSchedule, listSessions, listMine, listNeedingCompletion, markNotHeld };
+export { setSchedule, getSchedule, listSessions, listMine, listTeaching, listNeedingCompletion, markNotHeld };

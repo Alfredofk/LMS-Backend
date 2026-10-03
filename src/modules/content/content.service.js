@@ -6,7 +6,8 @@ import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.j
 import { getStorage } from '../../shared/storage.js';
 import { MIME } from '../../shared/upload.js';
 import { createLogger } from '../../lib/helpers.js';
-import { answeringTeacherOf } from '../sessions/sessions.service.js';
+import { answeringTeacherOf, loadSession, describeSession } from '../sessions/sessions.service.js';
+import { CONTENT_ORDER, lastOrderOf } from './content.moves.js';
 
 const log = createLogger('Content');
 
@@ -27,7 +28,9 @@ const log = createLogger('Content');
 //   player (ticket 05 tracks how far it was watched); another site's is kept as a
 //   link.
 // - TEXT: HTML from the teacher's editor, sanitised before it is stored - it is
-//   shown to children. No scripts, no styles, links and images https only.
+//   shown to children. No scripts, no styles; a link is https or mailto, an image
+//   https. sanitize-html judges only an address that names a scheme, so a relative
+//   one ("/x") stays - it can reach nothing but the page's own site.
 // - LINK: an https link.
 // - Deleting is soft (handoff #26): deletedAt, and a FILE's bytes stay.
 // - A Session cancelled for a holiday hands its Content on: content.moves.js, called
@@ -39,37 +42,6 @@ const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const FILE_TYPES = ['pdf', 'jpg', 'png', 'docx', 'pptx'];
 // What a browser shows itself; the rest it downloads.
 const INLINE_TYPES = new Set(['pdf', 'jpg', 'png']);
-
-const sessionSelect = {
-    id: true,
-    number: true,
-    status: true,
-    cancelReason: true,
-    startsAt: true,
-    endsAt: true,
-    classSubject: {
-        select: {
-            id: true,
-            status: true,
-            endedAt: true,
-            classId: true,
-            subjectId: true,
-            semesterId: true,
-            teacherMembershipId: true,
-            class: { select: { name: true } },
-            subject: { select: { code: true, name: true } },
-        },
-    },
-};
-
-const describe = (session) =>
-    `Pertemuan ke-${session.number} of ${session.classSubject.subject.code} in ${session.classSubject.class.name}`;
-
-async function loadSession(id) {
-    const session = await prisma.session.findFirst({ where: { id }, select: sessionSelect });
-    if (!session) throw notFound('Session not found');
-    return session;
-}
 
 async function loadContent(id) {
     const row = await prisma.content.findFirst({ where: { id, deletedAt: null } });
@@ -83,14 +55,14 @@ async function loadContent(id) {
 
 // What a caller is to a Session's Content:
 // - 'teacher': the one who answers for the Session, and manages its Content;
-// - 'staff': the Principal, a Vice Principal, the Class's homeroom teacher - they
-//   read all of it, drafts included;
+// - 'reader': the Principal, a Vice Principal, the Class's homeroom teacher - they
+//   read all of it, drafts included, and write none of it;
 // - 'student': placed in the Class now - reads what is published;
 // - null: anyone else, another school included, who gets a 404.
 async function standingOf(auth, session) {
     if ((await answeringTeacherOf(session.classSubject)) === auth.membershipId) return 'teacher';
-    if (await isPrincipalOrVice(auth.membershipId)) return 'staff';
-    if (await isHomeroomOf(auth.membershipId, session.classSubject.classId)) return 'staff';
+    if (await isPrincipalOrVice(auth.membershipId)) return 'reader';
+    if (await isHomeroomOf(auth.membershipId, session.classSubject.classId)) return 'reader';
 
     const placed = await prisma.classMembership.findFirst({
         where: {
@@ -103,13 +75,21 @@ async function standingOf(auth, session) {
     return placed ? 'student' : null;
 }
 
-// Staff who may read are told no (403); anyone the Session does not concern gets
-// the same 404 as another school's.
+// A reader is told no (403); anyone the Session does not concern gets the same 404
+// as another school's.
 async function assertManages(auth, session) {
     const standing = await standingOf(auth, session);
     if (standing === 'teacher') return;
     if (standing === null || standing === 'student') throw notFound('Session not found');
     throw forbidden('Only the teacher of this class subject manages its content');
+}
+
+// A live Content and its Session, for the teacher who manages it.
+async function loadManagedContent(auth, contentId) {
+    const row = await loadContent(contentId);
+    const session = await loadSession(row.sessionId);
+    await assertManages(auth, session);
+    return { row, session };
 }
 
 // ---------------------------------------------------------------------------
@@ -187,19 +167,38 @@ function fileNameOf(original, type) {
     return extensions.some((ext) => name.toLowerCase().endsWith(ext)) ? name : `${name}.${type}`;
 }
 
+// What differs by type, in one place:
+// - view: the payload as a response shows it. A FILE's storage key stays here; the
+//   bytes come from GET /api/content/:id/file.
+// - fromUrl / fromHtml: the payload made from what a body sends, for the types
+//   that hold a link or a text. A FILE has neither: it arrives as multipart, and
+//   its file is not replaced.
+const TYPES = {
+    FILE: {
+        view: (payload) => ({
+            fileName: payload.fileName,
+            fileType: payload.fileType,
+            mimeType: payload.mimeType,
+            size: payload.size,
+        }),
+    },
+    VIDEO: {
+        view: (payload) => ({ url: payload.url, provider: payload.provider, videoId: payload.videoId }),
+        fromUrl: videoPayload,
+    },
+    TEXT: {
+        view: (payload) => ({ html: payload.html }),
+        fromHtml: (html) => ({ html: cleanText(html) }),
+    },
+    LINK: {
+        view: (payload) => ({ url: payload.url }),
+        fromUrl: (url) => ({ url }),
+    },
+};
+
 // ---------------------------------------------------------------------------
 // Views
 // ---------------------------------------------------------------------------
-
-// A FILE's storage key stays here; the bytes come from GET /api/content/:id/file.
-function payloadView(type, payload) {
-    if (type === 'FILE') {
-        return { fileName: payload.fileName, fileType: payload.fileType, mimeType: payload.mimeType, size: payload.size };
-    }
-    if (type === 'VIDEO') return { url: payload.url, provider: payload.provider, videoId: payload.videoId };
-    if (type === 'TEXT') return { html: payload.html };
-    return { url: payload.url };
-}
 
 const contentView = (row) => ({
     id: row.id,
@@ -209,7 +208,7 @@ const contentView = (row) => ({
     order: row.order,
     published: row.publishedAt !== null,
     publishedAt: row.publishedAt,
-    payload: payloadView(row.type, row.payload),
+    payload: TYPES[row.type].view(row.payload),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
 });
@@ -240,7 +239,7 @@ async function listForSession(auth, sessionId) {
             deletedAt: null,
             ...(standing === 'student' ? { publishedAt: { not: null } } : {}),
         },
-        orderBy: [{ order: 'asc' }, { createdAt: 'asc' }],
+        orderBy: CONTENT_ORDER,
     });
     return { session: sessionView(session), canManage: standing === 'teacher', contents: rows.map(contentView) };
 }
@@ -272,23 +271,17 @@ async function loadForWriting(auth, sessionId) {
     const session = await loadSession(sessionId);
     await assertManages(auth, session);
     if (session.status !== 'SCHEDULED') {
-        throw conflict(`${describe(session)} was cancelled; add the content to another Pertemuan`);
+        throw conflict(`${describeSession(session)} was cancelled; add the content to another Session`);
     }
     return session;
 }
 
-async function nextOrder(sessionId) {
-    const last = await prisma.content.aggregate({
-        where: { sessionId, deletedAt: null },
-        _max: { order: true },
-    });
-    return (last._max.order ?? 0) + 1;
-}
+const nextOrder = async (sessionId) => (await lastOrderOf(prisma, sessionId)) + 1;
 
+// VIDEO, LINK or TEXT from the JSON body; the schema lets no FILE through.
 function payloadFor({ type, url, html }) {
-    if (type === 'VIDEO') return videoPayload(url);
-    if (type === 'TEXT') return { html: cleanText(html) };
-    return { url };
+    const { fromUrl, fromHtml } = TYPES[type];
+    return fromHtml ? fromHtml(html) : fromUrl(url);
 }
 
 async function create(auth, sessionId, body) {
@@ -304,7 +297,7 @@ async function create(auth, sessionId, body) {
             createdByUserId: auth.userId,
         },
     });
-    log.info(`${body.type} added to ${describe(session)}`);
+    log.info(`${body.type} added to ${describeSession(session)}`);
     return contentView(row);
 }
 
@@ -341,37 +334,34 @@ async function createFile(auth, sessionId, { title }, file) {
         await storage.remove(storageKey);
         throw error;
     }
-    log.info(`FILE (${type.toUpperCase()}) added to ${describe(session)}`);
+    log.info(`FILE (${type.toUpperCase()}) added to ${describeSession(session)}`);
     return contentView(row);
 }
 
 async function update(auth, contentId, { title, url, html }) {
-    const row = await loadContent(contentId);
-    const session = await loadSession(row.sessionId);
-    await assertManages(auth, session);
+    const { row, session } = await loadManagedContent(auth, contentId);
+    const { fromUrl, fromHtml } = TYPES[row.type];
 
     const data = {};
     if (title !== undefined) data.title = title;
     if (url !== undefined) {
-        if (row.type !== 'VIDEO' && row.type !== 'LINK') throw badRequest(`A ${row.type} has no link to change`);
-        data.payload = row.type === 'VIDEO' ? videoPayload(url) : { url };
+        if (!fromUrl) throw badRequest(`A ${row.type} has no link to change`);
+        data.payload = fromUrl(url);
     }
     if (html !== undefined) {
-        if (row.type !== 'TEXT') throw badRequest(`A ${row.type} has no text to change`);
-        data.payload = { html: cleanText(html) };
+        if (!fromHtml) throw badRequest(`A ${row.type} has no text to change`);
+        data.payload = fromHtml(html);
     }
 
     const changed = await prisma.content.updateMany({ where: { id: row.id, deletedAt: null }, data });
     if (changed.count === 0) throw notFound('Content not found');
-    log.info(`${row.type} edited in ${describe(session)}`);
+    log.info(`${row.type} edited in ${describeSession(session)}`);
     return contentView(await prisma.content.findFirst({ where: { id: row.id } }));
 }
 
 // Once only: published is published. To take one back, delete it.
 async function publish(auth, contentId) {
-    const row = await loadContent(contentId);
-    const session = await loadSession(row.sessionId);
-    await assertManages(auth, session);
+    const { row, session } = await loadManagedContent(auth, contentId);
     if (row.publishedAt) throw conflict('This content is published already');
 
     const claimed = await prisma.content.updateMany({
@@ -381,7 +371,7 @@ async function publish(auth, contentId) {
     if (claimed.count === 0) throw conflict('This content is published already');
     // Ticket 05: content.published.
 
-    log.info(`${row.type} published in ${describe(session)}`);
+    log.info(`${row.type} published in ${describeSession(session)}`);
     return contentView(await prisma.content.findFirst({ where: { id: row.id } }));
 }
 
@@ -394,7 +384,7 @@ async function reorder(auth, sessionId, { contentIds }) {
     const liveIds = new Set(live.map((row) => row.id));
     if (new Set(contentIds).size !== contentIds.length) throw badRequest('A content is named twice');
     if (contentIds.length !== liveIds.size || !contentIds.every((id) => liveIds.has(id))) {
-        throw badRequest(`Name every content of ${describe(session)}, each once`);
+        throw badRequest(`Name every content of ${describeSession(session)}, each once`);
     }
 
     await prisma.$transaction(async (tx) => {
@@ -402,22 +392,20 @@ async function reorder(auth, sessionId, { contentIds }) {
             await tx.content.updateMany({ where: { id, sessionId }, data: { order: index + 1 } });
         }
     });
-    log.info(`Content reordered in ${describe(session)}`);
+    log.info(`Content reordered in ${describeSession(session)}`);
     return listForSession(auth, sessionId);
 }
 
 // Soft: the row stays with deletedAt, and a FILE's bytes stay in storage.
 async function remove(auth, contentId) {
-    const row = await loadContent(contentId);
-    const session = await loadSession(row.sessionId);
-    await assertManages(auth, session);
+    const { row, session } = await loadManagedContent(auth, contentId);
 
     const removed = await prisma.content.updateMany({
         where: { id: row.id, deletedAt: null },
         data: { deletedAt: new Date() },
     });
     if (removed.count === 0) throw notFound('Content not found');
-    log.info(`${row.type} deleted from ${describe(session)}`);
+    log.info(`${row.type} deleted from ${describeSession(session)}`);
 }
 
 export {

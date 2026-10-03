@@ -3,7 +3,7 @@ import { isPrincipalOrVice, isHomeroomOf } from '../../shared/guards.js';
 import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { distanceMeters } from '../../shared/geo.js';
 import { createLogger } from '../../lib/helpers.js';
-import { answeringTeacherOf } from '../sessions/sessions.service.js';
+import { answeringTeacherOf, sessionSelect, loadSession, describeSession } from '../sessions/sessions.service.js';
 
 const log = createLogger('Attendance');
 
@@ -33,38 +33,6 @@ const log = createLogger('Attendance');
 const CHECK_IN_RADIUS_M = 150;
 const LATE_AFTER_MS = 30 * 60 * 1000;
 const MIN_NOTE_LENGTH = 3;
-
-const sessionSelect = {
-    id: true,
-    number: true,
-    status: true,
-    startsAt: true,
-    endsAt: true,
-    needsCompletion: true,
-    completedAt: true,
-    classSubject: {
-        select: {
-            id: true,
-            status: true,
-            endedAt: true,
-            classId: true,
-            subjectId: true,
-            semesterId: true,
-            teacherMembershipId: true,
-            class: { select: { name: true } },
-            subject: { select: { code: true, name: true } },
-        },
-    },
-};
-
-const describe = (session) =>
-    `Pertemuan ke-${session.number} of ${session.classSubject.subject.code} in ${session.classSubject.class.name}`;
-
-async function loadSession(id) {
-    const session = await prisma.session.findFirst({ where: { id }, select: sessionSelect });
-    if (!session) throw notFound('Session not found');
-    return session;
-}
 
 // The student's placement now: an open ClassMembership on a live profile.
 function currentPlacement(membershipId) {
@@ -129,7 +97,12 @@ const sessionView = (session) => ({
     needsCompletion: session.needsCompletion,
     confirmed: session.completedAt !== null,
     completedAt: session.completedAt,
+    classSubjectId: session.classSubject.id,
+    // The name alone repeats from year to year: classId and academicYear tell a
+    // student's two 7As apart (2026-10-03).
+    classId: session.classSubject.classId,
     class: session.classSubject.class.name,
+    academicYear: session.classSubject.class.academicYear.label,
     subject: session.classSubject.subject,
 });
 
@@ -145,7 +118,7 @@ async function checkIn(auth, sessionId, { latitude, longitude }) {
     }
 
     const now = new Date();
-    if (session.status !== 'SCHEDULED') throw conflict(`${describe(session)} was cancelled`);
+    if (session.status !== 'SCHEDULED') throw conflict(`${describeSession(session)} was cancelled`);
     if (session.completedAt) throw conflict('The teacher has already confirmed this attendance');
     if (now < session.startsAt) throw conflict('Check-in opens when the session starts');
     if (now >= session.endsAt) throw conflict('The session has ended, so check-in is closed');
@@ -191,7 +164,7 @@ async function checkIn(auth, sessionId, { latitude, longitude }) {
     // Ticket 05: attendance.checked_in.
 
     const flags = [late && 'late', outsideSchool && 'outside the school'].filter(Boolean);
-    log.info(`Check-in to ${describe(session)}${flags.length ? ` (${flags.join(', ')})` : ''}`);
+    log.info(`Check-in to ${describeSession(session)}${flags.length ? ` (${flags.join(', ')})` : ''}`);
     return { session: sessionView(session), attendance: attendanceView(row) };
 }
 
@@ -204,8 +177,8 @@ async function confirm(auth, sessionId, { statuses = [] }) {
     await assertAnswers(auth, session);
 
     const now = new Date();
-    if (session.status !== 'SCHEDULED') throw conflict(`${describe(session)} was cancelled`);
-    if (session.startsAt > now) throw conflict(`${describe(session)} has not begun yet`);
+    if (session.status !== 'SCHEDULED') throw conflict(`${describeSession(session)} was cancelled`);
+    if (session.startsAt > now) throw conflict(`${describeSession(session)} has not begun yet`);
     if (session.completedAt) throw conflict('This attendance has already been confirmed');
 
     const roster = await rosterOf(session);
@@ -259,7 +232,7 @@ async function confirm(auth, sessionId, { statuses = [] }) {
     });
     // Ticket 05: attendance.confirmed.
 
-    log.info(`${describe(session)} confirmed${session.needsCompletion ? ', filled in after the fact' : ''}`);
+    log.info(`${describeSession(session)} confirmed${session.needsCompletion ? ', filled in after the fact' : ''}`);
     return rosterView(auth, sessionId);
 }
 
@@ -296,7 +269,7 @@ async function correct(auth, attendanceId, { status, note }) {
         });
     });
 
-    log.info(`Attendance corrected in ${describe(session)}: ${row.status} -> ${status}`);
+    log.info(`Attendance corrected in ${describeSession(session)}: ${row.status} -> ${status}`);
     const updated = await prisma.attendance.findFirst({ where: { id: row.id } });
     return attendanceView(updated);
 }

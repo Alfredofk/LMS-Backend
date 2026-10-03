@@ -135,6 +135,10 @@ async function listClassSubjects(req, res) {
     });
 }
 
+async function listOwnClassSubjects(req, res) {
+    return ok(res, { classSubjects: await service.listOwnClassSubjects(req.auth) });
+}
+
 async function cancelClassSubject(req, res) {
     const classSubject = await service.cancelClassSubject(req.auth, req.validated.params.id);
     return ok(res, { classSubject, message: 'Request cancelled.' });
@@ -245,6 +249,7 @@ export {
     subjectBoard,
     requestClassSubject,
     listClassSubjects,
+    listOwnClassSubjects,
     cancelClassSubject,
     approveClassSubject,
     rejectClassSubject,
