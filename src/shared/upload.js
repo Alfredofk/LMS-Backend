@@ -18,20 +18,43 @@ const SIGNATURES = {
     pdf: [0x25, 0x50, 0x44, 0x46, 0x2d],
 };
 
-const MIME = { jpg: 'image/jpeg', png: 'image/png', pdf: 'application/pdf' };
+const MIME = {
+    jpg: 'image/jpeg',
+    png: 'image/png',
+    pdf: 'application/pdf',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+};
+
+// DOCX and PPTX (teaching-and-learning 04) are ZIP packages, Office Open XML:
+// "PK\3\4", then parts by name. A ZIP stores its file names uncompressed, so the
+// part that says what the package is can be found in the bytes without unpacking.
+// A plain ZIP is neither, and one carrying macros (vbaProject.bin, a .docm or
+// .pptm renamed) is refused: these files are opened on children's devices.
+const ZIP = [0x50, 0x4b, 0x03, 0x04];
+const OOXML_PARTS = { docx: 'word/document.xml', pptx: 'ppt/presentation.xml' };
+
+const startsWith = (buffer, bytes) => buffer.length >= bytes.length && bytes.every((byte, i) => buffer[i] === byte);
+
+function detectOoxml(buffer) {
+    if (!buffer.includes('[Content_Types].xml') || buffer.includes('vbaProject.bin')) return null;
+    for (const [type, part] of Object.entries(OOXML_PARTS)) {
+        if (buffer.includes(part)) return type;
+    }
+    return null;
+}
 
 function detectType(buffer) {
     for (const [type, bytes] of Object.entries(SIGNATURES)) {
-        if (buffer.length >= bytes.length && bytes.every((byte, i) => buffer[i] === byte)) {
-            return type;
-        }
+        if (startsWith(buffer, bytes)) return type;
     }
+    if (startsWith(buffer, ZIP)) return detectOoxml(buffer);
     return null;
 }
 
 // One required file under `field`, at most `maxBytes`, of one of `types`.
 //
-// On success req.file carries `detectedType` ('jpg' | 'png' | 'pdf'). Multer's own
+// On success req.file carries `detectedType` ('jpg' | 'png' | 'pdf' | 'docx' | 'pptx'). Multer's own
 // errors - too large, too many files, an unexpected field - become a 400 in the
 // usual envelope instead of falling through to the 500 handler.
 function singleFile(field, { maxBytes, types }) {

@@ -430,6 +430,7 @@ model School {
     sessions       Session[]
     attendances       Attendance[]
     attendanceChanges AttendanceChange[]
+    contents          Content[]
 
     @@index([deactivatedAt])
 }
@@ -847,6 +848,7 @@ model Session {
     school       School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
     classSubject ClassSubject @relation(fields: [classSubjectId], references: [id], onDelete: Cascade)
     attendances  Attendance[]
+    contents     Content[]
 
     @@unique([classSubjectId, number])
     @@index([schoolId, startsAt])
@@ -908,6 +910,44 @@ model AttendanceChange {
     attendance Attendance @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
 
     @@index([attendanceId, createdAt])
+    @@index([schoolId])
+}
+
+enum ContentType {
+    /// Uploaded: PDF, JPG, PNG, DOCX or PPTX, at most 10 MB.
+    FILE
+    /// A link only, never uploaded: YouTube, or another https page.
+    VIDEO
+    /// Rich text, sanitised before it is stored.
+    TEXT
+    LINK
+}
+
+/// A piece of learning material under a Session (teaching-and-learning 04,
+/// handoff #13). No prerequisite gating. Students see it once its teacher
+/// publishes it. Soft-deleted only (handoff #26).
+///
+/// payload per type - FILE { storageKey, fileName, fileType, mimeType, size },
+/// VIDEO { url, provider, videoId }, TEXT { html }, LINK { url }. A FILE's
+/// storageKey never leaves the server.
+model Content {
+    id              String      @id @default(cuid())
+    schoolId        String
+    sessionId       String
+    type            ContentType
+    title           String
+    order           Int
+    payload         Json
+    publishedAt     DateTime?
+    deletedAt       DateTime?
+    createdByUserId String
+    createdAt       DateTime    @default(now())
+    updatedAt       DateTime    @updatedAt
+
+    school  School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+    @@index([sessionId, order])
     @@index([schoolId])
 }
 

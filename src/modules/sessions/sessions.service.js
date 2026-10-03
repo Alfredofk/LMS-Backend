@@ -5,6 +5,7 @@ import { conflict, forbidden, notFound } from '../../shared/errors.js';
 import { localToUtc, utcToLocal } from '../../shared/timeZone.js';
 import { createLogger } from '../../lib/helpers.js';
 import { toDate, toDay, holidayDatesBetween, daysBetween } from '../holidays/holidays.calendar.js';
+import { moveContentOffHoliday } from '../content/content.moves.js';
 
 const log = createLogger('Sessions');
 
@@ -23,8 +24,9 @@ const log = createLogger('Sessions');
 //   touched. What is planned again runs from tomorrow, the school's local date, and
 //   its numbers continue after the last one before it; today's stay as they are.
 // - A holiday that starts counting after the start cancels the Sessions on it, and
-//   no other number changes. One taken back after the start re-plans from tomorrow,
-//   so its day has Sessions again (owner, 2026-09-29).
+//   no other number changes; their Content moves to the next SCHEDULED Session
+//   (content.moves.js, ticket 04). One taken back after the start re-plans from
+//   tomorrow, so its day has Sessions again, empty (owner, 2026-09-29).
 // - A teacher who leaves mid-semester hands the rest to whoever takes the slot:
 //   the successor's ClassSubject inherits the schedule and the future Sessions. So
 //   does an assignment ended or replaced while its teacher stays (ticket 10),
@@ -881,14 +883,18 @@ async function resyncSchool(school, days) {
         });
         const cancel = ahead.filter((row) => nowHolidays.has(utcToLocal(row.startsAt, school.timeZone).date));
         if (cancel.length > 0) {
-            await prisma.session.updateMany({
-                where: { id: { in: cancel.map((row) => row.id) } },
-                data: {
-                    status: 'CANCELLED',
-                    cancelReason: 'HOLIDAY',
-                    cancelledAt: now,
-                    needsCompletion: false,
-                },
+            // Their Content moves on in the same step (teaching-and-learning 04).
+            await prisma.$transaction(async (tx) => {
+                await tx.session.updateMany({
+                    where: { id: { in: cancel.map((row) => row.id) } },
+                    data: {
+                        status: 'CANCELLED',
+                        cancelReason: 'HOLIDAY',
+                        cancelledAt: now,
+                        needsCompletion: false,
+                    },
+                });
+                await moveContentOffHoliday(tx, classSubject.id, cancel);
             });
         }
     }
