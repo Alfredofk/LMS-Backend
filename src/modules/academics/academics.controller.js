@@ -1,5 +1,6 @@
 import { ok } from '../../shared/errors.js';
 import * as service from './academics.service.js';
+import * as subjectChoice from './academics.subjectChoice.js';
 
 // Thin by design, like the other controllers: read what validation produced, call
 // the service, wrap the answer in the envelope. No try/catch - Express 5 hands a
@@ -101,11 +102,11 @@ async function deleteClass(req, res) {
 // ---- subjects -----------------------------------------------------------------
 
 async function listSubjects(req, res) {
-    return ok(res, { subjects: await service.listSubjects(req.auth) });
+    return ok(res, { subjects: await subjectChoice.listSubjects(req.auth) });
 }
 
 async function selectSubjects(req, res) {
-    const subjects = await service.selectSubjects(req.auth, req.validated.body);
+    const subjects = await subjectChoice.selectSubjects(req.auth, req.validated.body);
     return ok(res, { subjects, message: 'Subjects saved.' });
 }
 

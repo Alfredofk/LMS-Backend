@@ -45,6 +45,17 @@ async function isPrincipalOrVice(membershipId) {
     return Boolean(found);
 }
 
+// The same, as a refusal: 403, for a member who may reach the academic module but
+// not run it. Checked against the database, not the token's roles, the way
+// rotateSchoolCode() does: a role withdrawn minutes ago must not still work. Moved
+// here from academics.service.js (review of registration-and-membership 20, owner
+// 2026-10-04), so academics.subjectChoice.js shares it without an import cycle.
+async function assertPrincipalOrVice(auth) {
+    if (!(await isPrincipalOrVice(auth.membershipId))) {
+        throw forbidden('Only the Principal or a Vice Principal can do this');
+    }
+}
+
 // Homeroom teacher of this specific class.
 //
 // Not a role - it is a property of the class. That is why this takes a classId:
@@ -156,6 +167,7 @@ export {
     hasActiveRole,
     isPrincipal,
     isPrincipalOrVice,
+    assertPrincipalOrVice,
     isHomeroomOf,
     isHomeroomOfStudent,
     isTeacherOfClassSubject,

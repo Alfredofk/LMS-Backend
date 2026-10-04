@@ -26,7 +26,8 @@ const log = createLogger('Tracking');
 // - Always 200, with an answer per event, as a bulk approval answers: a batch is
 //   not lost for one stale item, and the frontend learns which one it was.
 // - An accepted event's answer says whether its Content is now complete for the
-//   student (`completed`), so the frontend ticks it at once (2026-10-04).
+//   student (`completed`), so the frontend ticks it at once (ticket 06 follow-up,
+//   owner 2026-10-04).
 
 const MAX_AHEAD_MS = 5 * 60 * 1000;
 const MAX_AGE_MS = 24 * 60 * 60 * 1000;

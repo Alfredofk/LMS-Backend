@@ -1,6 +1,13 @@
 import { prisma } from '../../shared/prisma.js';
 import { isValidGrade, phaseFor } from '../../shared/schoolType.js';
-import { isPrincipal, isPrincipalOrVice, isHomeroomOf, hasActiveRole, currentPlacement } from '../../shared/guards.js';
+import {
+    isPrincipal,
+    isPrincipalOrVice,
+    assertPrincipalOrVice,
+    isHomeroomOf,
+    hasActiveRole,
+    currentPlacement,
+} from '../../shared/guards.js';
 import {
     assertClassSubjectRetryAllowed,
     assertRejectionReason,
@@ -15,35 +22,32 @@ import {
     assertSemesterDatesMayChange,
     regenerateSemester,
 } from '../sessions/sessions.service.js';
+import { assertSubjectSelected } from './academics.subjectChoice.js';
 
 const log = createLogger('Academics');
 
-// Academic period and class setup (ticket 07), and subjects and teaching
-// assignments (ticket 08).
+// Academic period and class setup (ticket 07), subjects and teaching assignments
+// (ticket 08), Class Moves (ticket 16), and ending or replacing a teaching
+// assignment (teaching-and-learning 10). Which national Subjects a school uses
+// (ticket 20) is academics.subjectChoice.js; this file reads assertSubjectSelected
+// from it.
 //
 // Every route here is reached with a token that carries the school, so
 // requireAuth has already opened the tenant scope: a year, class or teacher from
 // another school is simply not found - 404, never 403 (ADR-0001).
 //
-// The Principal owns every write (decision #53): the academic year, its
-// semesters, the classes and who is homeroom teacher of each. None of these is an
-// approval, so nothing here writes ApprovalAudit (ADR-0003 keeps it for decisions).
+// The academic year, its semesters, the classes and who is homeroom teacher of
+// each are written by the Principal or a Vice Principal (decision #53, ticket 19,
+// through assertPrincipalOrVice in shared/guards.js). None of these is an
+// approval, so they write no ApprovalAudit (ADR-0003 keeps it for decisions). The
+// decisions here do: a ClassSubject's request, approval, override, cancellation
+// and ending, and a Class Move's.
 //
 // Owner's decisions (2026-09-23): several academic years may be ACTIVE at once,
 // so next year can be prepared before this one closes; one teacher may be
 // homeroom of several classes; the Principal may change a class's homeroom
 // teacher. The SD special case - mandatory ClassSubjects created with the class -
 // moved to ticket 08, where ClassSubject is built.
-
-// Checked against the database, not the token's roles, the way
-// rotateSchoolCode() does: a role withdrawn minutes ago must not still work.
-// Everything this module guards is the academic day-to-day, which a Vice
-// Principal runs too (registration-and-membership ticket 19).
-async function assertPrincipalOrVice(auth) {
-    if (!(await isPrincipalOrVice(auth.membershipId))) {
-        throw forbidden('Only the Principal or a Vice Principal can do this');
-    }
-}
 
 // A Vice Principal is also a teacher, and never decides their own teaching: not
 // approving or rejecting their own request, not overriding one for themselves
@@ -974,167 +978,8 @@ async function cancelClassMove(auth, id) {
 }
 
 // ---------------------------------------------------------------------------
-// Subjects (ticket 08), and which national ones the school uses (ticket 20)
+// Subjects (ticket 08); which national ones a school uses is academics.subjectChoice.js (ticket 20)
 // ---------------------------------------------------------------------------
-
-// The school's subject choice is audited against the school, as its other
-// settings are (location, time zone, joint leave).
-const SCHOOL_SUBJECT = 'School';
-
-// The national Subjects this school has deselected (registration-and-membership
-// 20). One with no row, or a row selected again, is in use.
-async function deselectedSubjectIds() {
-    const rows = await prisma.schoolSubjectChoice.findMany({
-        where: { selected: false },
-        select: { subjectId: true },
-    });
-    return new Set(rows.map((row) => row.subjectId));
-}
-
-// A deselected national Subject takes no new ClassSubject: it is not asked for,
-// not approved, not assigned by override (owner, 2026-10-04). One already running
-// keeps going to its end, and a replacement continues it.
-async function assertSubjectSelected(subjectId) {
-    const deselected = await prisma.schoolSubjectChoice.findFirst({
-        where: { subjectId, selected: false },
-        select: { id: true },
-    });
-    if (deselected) {
-        throw badRequest(
-            'This school does not use this subject. The Principal or a Vice Principal can select it again'
-        );
-    }
-}
-
-const NO_CLASS_SUBJECTS = { activeClassSubjects: 0, pendingRequests: 0 };
-
-// What a deselection would leave running, for the leaders' warning before they
-// untick a Subject (ticket 20, owner 2026-10-04). Per Subject: the ClassSubjects
-// still running, and the requests waiting, in an OPEN Semester of an ACTIVE year -
-// the same "live" loadLiveAssignment uses. A warning only: nothing is refused on it.
-async function classSubjectCountsBySubject() {
-    const groups = await prisma.classSubject.groupBy({
-        by: ['subjectId', 'status'],
-        where: {
-            status: { in: ['ACTIVE', 'PENDING'] },
-            endedAt: null,
-            semester: { status: 'OPEN', academicYear: { status: 'ACTIVE' } },
-        },
-        _count: { _all: true },
-    });
-
-    const counts = new Map();
-    for (const group of groups) {
-        const entry = counts.get(group.subjectId) ?? { ...NO_CLASS_SUBJECTS };
-        if (group.status === 'ACTIVE') entry.activeClassSubjects = group._count._all;
-        else entry.pendingRequests = group._count._all;
-        counts.set(group.subjectId, entry);
-    }
-    return counts;
-}
-
-// The national catalog (schoolId null, from migration national_subject_catalog)
-// plus this school's local subjects. The tenant extension reads both for Subject
-// (CATALOG_MODELS in shared/prisma.js), so nothing here names a school.
-//
-// The Principal and a Vice Principal see every national Subject, so they can select
-// a deselected one again; everyone else sees only those in use (ticket 20). A
-// local Subject is always selected. The leaders also get each Subject's counts
-// (classSubjectCountsBySubject), a local one's too, so every row has one shape.
-async function listSubjects(auth) {
-    const [subjects, deselected, leader] = await Promise.all([
-        prisma.subject.findMany({
-            select: { id: true, code: true, name: true, schoolId: true },
-            orderBy: { code: 'asc' },
-        }),
-        deselectedSubjectIds(),
-        isPrincipalOrVice(auth.membershipId),
-    ]);
-    const counts = leader ? await classSubjectCountsBySubject() : null;
-
-    return subjects
-        .map((subject) => ({
-            id: subject.id,
-            code: subject.code,
-            name: subject.name,
-            national: subject.schoolId === null,
-            selected: !deselected.has(subject.id),
-            ...(counts ? (counts.get(subject.id) ?? NO_CLASS_SUBJECTS) : {}),
-        }))
-        .filter((subject) => leader || subject.selected)
-        .sort((a, b) => Number(b.national) - Number(a.national));
-}
-
-// The national Subjects the school uses, named in full (ticket 20): every one left
-// out is deselected, so an empty list deselects all 18. In one transaction, so a
-// "select all" lands whole or not at all. A row is written only for a Subject
-// whose choice changes, and each change is audited; saving the same list twice
-// changes nothing. Selecting again flips the row back - nothing is deleted.
-async function selectSubjects(auth, { selectedIds }) {
-    await assertPrincipalOrVice(auth);
-
-    const national = await prisma.subject.findMany({
-        where: { schoolId: null },
-        select: { id: true, code: true, name: true },
-        orderBy: { code: 'asc' },
-    });
-    const wanted = new Set(selectedIds);
-    const known = new Set(national.map((subject) => subject.id));
-    const stray = [...wanted].filter((id) => !known.has(id));
-    if (stray.length) {
-        throw badRequest(`Only national subjects can be selected. These are not: ${stray.join(', ')}`);
-    }
-
-    let changed;
-    try {
-        changed = await prisma.$transaction(async (tx) => {
-            const choices = await tx.schoolSubjectChoice.findMany({
-                select: { id: true, subjectId: true, selected: true },
-            });
-            const bySubject = new Map(choices.map((choice) => [choice.subjectId, choice]));
-            const said = [];
-
-            for (const subject of national) {
-                const selected = wanted.has(subject.id);
-                const existing = bySubject.get(subject.id);
-                if ((existing?.selected ?? true) === selected) continue;
-
-                if (existing) {
-                    await tx.schoolSubjectChoice.updateMany({
-                        where: { id: existing.id },
-                        data: { selected, decidedByUserId: auth.userId },
-                    });
-                } else {
-                    await tx.schoolSubjectChoice.create({
-                        data: { subjectId: subject.id, selected, decidedByUserId: auth.userId },
-                    });
-                }
-
-                const line = `${subject.code} ${subject.name}: ${selected ? 'selected' : 'deselected'}`;
-                await recordAudit({
-                    schoolId: auth.schoolId,
-                    subjectType: SCHOOL_SUBJECT,
-                    subjectId: auth.schoolId,
-                    action: 'UPDATE_SUBJECTS',
-                    actorUserId: auth.userId,
-                    reason: line,
-                    client: tx,
-                });
-                said.push(line);
-            }
-            return said;
-        });
-    } catch (error) {
-        // Two saves at the same moment both creating the same Subject's first row.
-        if (error?.code === 'P2002') {
-            throw conflict('The subjects were changed by someone else at the same moment. Try again');
-        }
-        throw error;
-    }
-
-    if (changed.length) log.info(`Subjects at ${auth.schoolName}: ${changed.join('; ')}`);
-    return listSubjects(auth);
-}
 
 // A local subject (muatan lokal). The extension stamps this school onto it.
 async function createSubject(auth, body) {
@@ -1248,10 +1093,10 @@ async function resolveSlot({ classId, subjectId, semesterId }) {
     // National or this school's: the extension hides every other school's.
     const subject = await prisma.subject.findFirst({
         where: { id: subjectId },
-        select: { id: true, code: true },
+        select: { id: true, code: true, name: true },
     });
     if (!subject) throw notFound('Subject not found');
-    await assertSubjectSelected(subject.id);
+    await assertSubjectSelected(subject);
 
     if (semester.academicYearId !== target.academicYearId) {
         throw badRequest('The class and the semester belong to different academic years');
@@ -1489,7 +1334,7 @@ async function decideClassSubject(auth, id, { action, reason }) {
     await assertNotDecidingForSelf(auth, row.teacher.id);
     // A request filed before its subject was deselected does not get in through
     // the approval (ticket 20). Rejecting it is still allowed.
-    if (action === 'APPROVE' && row.status === 'PENDING') await assertSubjectSelected(row.subject.id);
+    if (action === 'APPROVE' && row.status === 'PENDING') await assertSubjectSelected(row.subject);
     const now = new Date();
 
     await prisma.$transaction(async (tx) => {
@@ -1777,8 +1622,6 @@ export {
     approveClassMove,
     rejectClassMove,
     cancelClassMove,
-    listSubjects,
-    selectSubjects,
     createSubject,
     subjectBoard,
     requestClassSubject,

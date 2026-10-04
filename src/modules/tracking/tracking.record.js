@@ -66,6 +66,18 @@ const storedTenth = (row) =>
         ? tenthOf(row.videoPositionSeconds, row.videoDurationSeconds)
         : 0;
 
+// The furthest point reached, in seconds of this report's duration. A player may
+// report a different duration for the same video from one report to the next.
+// Seconds kept against one duration and read against another overstate how far it
+// was watched: 150 s of 1000 read as 150 s of 180 is 83%, and a later report at
+// 89% would then reach no new tenth and never complete it. So the point carries
+// over as a share of the video (review of the teaching-and-learning 06 follow-up,
+// owner 2026-10-04). With an unchanged duration it is the stored point itself.
+const furthestIn = (row, duration) =>
+    row.videoPositionSeconds != null && row.videoDurationSeconds
+        ? (row.videoPositionSeconds / row.videoDurationSeconds) * duration
+        : 0;
+
 const earlier = (a, b) => (a && a < b ? a : b);
 const later = (a, b) => (a && a > b ? a : b);
 
@@ -106,9 +118,11 @@ async function lockProgress(client, contentId, studentProfileId, occurredAt) {
 // once.
 //
 // Every answer says whether the Content is now complete for the student, recorded
-// or not, so the frontend can tick it without reading the list again (2026-10-04).
-// A report that reaches no new tenth cannot complete a video: completion is at 80%,
-// so a complete one already holds its eighth tenth.
+// or not, so the frontend can tick it without reading the list again
+// (teaching-and-learning 06 follow-up, owner 2026-10-04). A report that reaches no
+// new tenth cannot complete a video: the furthest point is kept as a share of the
+// video (furthestIn), so a stored eighth tenth means a report reached 80% and
+// completed it.
 async function recordContentEvent(
     client,
     { actorMembershipId, studentProfileId, content, session, verb, occurredAt, position, duration }
@@ -144,7 +158,7 @@ async function recordContentEvent(
         lastActivityAt: later(row.lastActivityAt, occurredAt),
     };
     if (video) {
-        data.videoPositionSeconds = Math.max(row.videoPositionSeconds ?? 0, Math.min(position, duration));
+        data.videoPositionSeconds = Math.max(furthestIn(row, duration), Math.min(position, duration));
         data.videoDurationSeconds = duration;
     }
     if (!row.completedAt && rule.completes(content, { position, duration })) data.completedAt = occurredAt;
