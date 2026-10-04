@@ -100,8 +100,13 @@ async function deleteClass(req, res) {
 
 // ---- subjects -----------------------------------------------------------------
 
-async function listSubjects(_req, res) {
-    return ok(res, { subjects: await service.listSubjects() });
+async function listSubjects(req, res) {
+    return ok(res, { subjects: await service.listSubjects(req.auth) });
+}
+
+async function selectSubjects(req, res) {
+    const subjects = await service.selectSubjects(req.auth, req.validated.body);
+    return ok(res, { subjects, message: 'Subjects saved.' });
 }
 
 async function createSubject(req, res) {
@@ -245,6 +250,7 @@ export {
     rejectClassMove,
     cancelClassMove,
     listSubjects,
+    selectSubjects,
     createSubject,
     subjectBoard,
     requestClassSubject,

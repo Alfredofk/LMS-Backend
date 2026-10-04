@@ -137,6 +137,9 @@ enum ApprovalAction {
     /// A teaching assignment ended, or replaced, while its teacher stays in the school
     /// (teaching-and-learning 10). Not REMOVE, which is a member leaving the school.
     END
+    /// The Principal or a Vice Principal selecting, or deselecting, a national Subject
+    /// for the school (registration-and-membership 20).
+    UPDATE_SUBJECTS
 }
 
 // ---------------------------------------------------------------------------
@@ -431,6 +434,7 @@ model School {
     approvalAudits ApprovalAudit[]
     schoolHolidays SchoolHoliday[]
     jointLeaveChoices SchoolJointLeaveChoice[]
+    subjectChoices    SchoolSubjectChoice[]
     scheduleSlots  ClassSubjectSchedule[]
     sessions       Session[]
     attendances       Attendance[]
@@ -685,9 +689,31 @@ model Subject {
 
     school        School?        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
     classSubjects ClassSubject[]
+    schoolChoices SchoolSubjectChoice[]
 
     @@unique([schoolId, code])
     @@index([schoolId])
+}
+
+/// Whether a school uses one national Subject (registration-and-membership 20,
+/// owner 2026-10-04). A school with no row uses it, so every school - and every
+/// national Subject added later - starts with all of them, and nothing is backfilled.
+/// `selected` false takes the Subject out of reach for new ClassSubjects; true puts
+/// it back, so selecting it again needs no delete. Set by the Principal or a Vice
+/// Principal, for national Subjects only: a local one is the school's own.
+model SchoolSubjectChoice {
+    id              String   @id @default(cuid())
+    schoolId        String
+    subjectId       String
+    selected        Boolean
+    decidedByUserId String
+    createdAt       DateTime @default(now())
+    updatedAt       DateTime @updatedAt
+
+    school  School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    subject Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+    @@unique([schoolId, subjectId])
 }
 
 /// A cohort, never a course offering. Created by the principal, who names its

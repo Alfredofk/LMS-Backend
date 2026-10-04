@@ -125,6 +125,13 @@ const subjectBody = z.strictObject({
     name: z.string().trim().min(2, 'Name the subject').max(100),
 });
 
+// The national Subjects the school uses (registration-and-membership 20). Every one
+// left out is deselected, so an empty list deselects them all. Whether each id is a
+// national Subject is the service's.
+const subjectSelectionBody = z.strictObject({
+    selectedIds: z.array(id).max(100),
+});
+
 const slot = {
     classId: id,
     subjectId: id,
@@ -184,6 +191,7 @@ export {
     classMoveBody,
     classMoveListQuery,
     subjectBody,
+    subjectSelectionBody,
     classSubjectBody,
     overrideBody,
     classSubjectListQuery,

@@ -16,6 +16,7 @@ import {
     classMoveBody,
     classMoveListQuery,
     subjectBody,
+    subjectSelectionBody,
     classSubjectBody,
     overrideBody,
     classSubjectListQuery,
@@ -143,6 +144,13 @@ const teacher = requireRole('TEACHER');
 
 router.get('/subjects', staff, controller.listSubjects);
 router.post('/subjects', principalOrVice, validate({ body: subjectBody }), controller.createSubject);
+// Which national Subjects the school uses, the whole list at once (ticket 20).
+router.put(
+    '/subjects/selection',
+    principalOrVice,
+    validate({ body: subjectSelectionBody }),
+    controller.selectSubjects
+);
 
 router.get(
     '/semesters/:id/class-subjects',
