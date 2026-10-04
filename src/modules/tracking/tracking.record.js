@@ -104,6 +104,11 @@ async function lockProgress(client, contentId, studentProfileId, occurredAt) {
 // { recorded: false }. It is looked at once without the lock - most reports stop
 // there - and again under it, so two batches racing past the same tenth record it
 // once.
+//
+// Every answer says whether the Content is now complete for the student, recorded
+// or not, so the frontend can tick it without reading the list again (2026-10-04).
+// A report that reaches no new tenth cannot complete a video: completion is at 80%,
+// so a complete one already holds its eighth tenth.
 async function recordContentEvent(
     client,
     { actorMembershipId, studentProfileId, content, session, verb, occurredAt, position, duration }
@@ -114,11 +119,11 @@ async function recordContentEvent(
 
     if (video) {
         const seen = await client.contentProgress.findFirst({ where: { contentId: content.id, studentProfileId } });
-        if (reached <= storedTenth(seen)) return { recorded: false };
+        if (reached <= storedTenth(seen)) return { recorded: false, completed: Boolean(seen?.completedAt) };
     }
 
     const row = await lockProgress(client, content.id, studentProfileId, occurredAt);
-    if (video && reached <= storedTenth(row)) return { recorded: false };
+    if (video && reached <= storedTenth(row)) return { recorded: false, completed: Boolean(row.completedAt) };
 
     await recordEvent(client, {
         actorMembershipId,

@@ -40,7 +40,8 @@ const log = createLogger('Content');
 // Learning Events (ticket 05): publishing writes content.published, and a student
 // fetching a FILE writes content.file_downloaded - observed by the server, not
 // claimed by the client. readableByStudent is what the tracking module asks before
-// it records a student's own events.
+// it records a student's own events. A student's list of a Session's Content shows
+// what those events derived, their own ContentProgress per Content (2026-10-04).
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const FILE_TYPES = ['pdf', 'jpg', 'png', 'docx', 'pptx'];
@@ -229,6 +230,10 @@ const sessionView = (session) => ({
 // Reading
 // ---------------------------------------------------------------------------
 
+// A Session's Content, as the caller may read it. A student's list also carries,
+// on each Content, their own progress - when they first opened it and when it was
+// completed, or null if never opened (2026-10-04, asked by the frontend for its
+// ticks and its "done" badge). Staff are not tracked, so theirs carries none.
 async function listForSession(auth, sessionId) {
     const session = await loadSession(sessionId);
     const standing = await standingOf(auth, session);
@@ -241,7 +246,31 @@ async function listForSession(auth, sessionId) {
         },
         orderBy: CONTENT_ORDER,
     });
-    return { session: sessionView(session), canManage: standing === 'teacher', contents: rows.map(contentView) };
+    const answer = { session: sessionView(session), canManage: standing === 'teacher' };
+    if (standing !== 'student') return { ...answer, contents: rows.map(contentView) };
+
+    const progress = await ownProgressOf(auth, rows);
+    return {
+        ...answer,
+        contents: rows.map((row) => ({ ...contentView(row), progress: progress.get(row.id) ?? null })),
+    };
+}
+
+// A student's own progress on these Content, by contentId. It reads the
+// ContentProgress rows the progress views count (teaching-and-learning 06), so a
+// tick the student sees agrees with what their teacher sees for them. What
+// completes a Content is tracking.record.js's rule, not this one's.
+async function ownProgressOf(auth, rows) {
+    const studentProfileId = await studentProfileOf(auth);
+    if (!studentProfileId || rows.length === 0) return new Map();
+
+    const progress = await prisma.contentProgress.findMany({
+        where: { studentProfileId, contentId: { in: rows.map((row) => row.id) } },
+        select: { contentId: true, firstOpenedAt: true, completedAt: true },
+    });
+    return new Map(
+        progress.map((row) => [row.contentId, { firstOpenedAt: row.firstOpenedAt, completedAt: row.completedAt }])
+    );
 }
 
 // A Content a student may act on: live, published, under a Session of the Class
