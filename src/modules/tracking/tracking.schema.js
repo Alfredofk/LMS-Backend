@@ -38,4 +38,7 @@ const eventsBody = z.strictObject({
     events: z.array(event).min(1, 'Send at least one event').max(50, 'At most 50 events at once'),
 });
 
-export { eventsBody };
+// A ClassSubject's progress (ticket 06).
+const idParams = z.object({ id: z.string().min(1) });
+
+export { eventsBody, idParams };

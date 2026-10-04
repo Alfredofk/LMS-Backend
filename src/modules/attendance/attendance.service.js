@@ -391,17 +391,13 @@ async function mine(auth, { classSubjectId }) {
 }
 
 // ---------------------------------------------------------------------------
-// One student's summary, for the school's leaders
+// Counts, for the school's leaders and the progress views
 // ---------------------------------------------------------------------------
 
-const STATUS_COUNT = { PRESENT: 'present', SICK: 'sick', EXCUSED: 'excused', ABSENT: 'absent' };
-
-// A student's counts over one academic year, a row per Semester
-// (registration-and-membership ticket 22, owner 2026-10-04). Called by
-// membership's member detail; the caller has already decided who may read it.
+// One rule for every count of a student's attendance: the member detail's
+// (registration-and-membership ticket 22) and the progress views'
+// (teaching-and-learning 06), so a student's numbers agree in both.
 //
-// - A Session counts under its ClassSubject's Semester, not under a Class: a
-//   student who moved Class during the year keeps the weeks in the first one.
 // - Confirmed Sessions only. A check-in writes PRESENT at once, but ABSENT is
 //   written only at confirmation, so an unconfirmed Session would overstate the
 //   rate. A Session cancelled after the fact - NOT_HELD after a check-in, say -
@@ -411,6 +407,25 @@ const STATUS_COUNT = { PRESENT: 'present', SICK: 'sick', EXCUSED: 'excused', ABS
 //
 // The student's own numbers, with nothing to compare them against: no class
 // average, no rank (handoff #21).
+const CONFIRMED_SESSION = { status: 'SCHEDULED', completedAt: { not: null } };
+
+const STATUS_COUNT = { PRESENT: 'present', SICK: 'sick', EXCUSED: 'excused', ABSENT: 'absent' };
+
+const noCounts = () => ({ counted: 0, present: 0, sick: 0, excused: 0, absent: 0, late: 0, outsideSchool: 0 });
+
+function tally(counts, row) {
+    counts.counted += 1;
+    counts[STATUS_COUNT[row.status]] += 1;
+    if (row.status === 'PRESENT' && row.late) counts.late += 1;
+    if (row.status === 'PRESENT' && row.outsideSchool) counts.outsideSchool += 1;
+}
+
+// A student's counts over one academic year, a row per Semester
+// (registration-and-membership ticket 22, owner 2026-10-04). Called by
+// membership's member detail; the caller has already decided who may read it.
+//
+// A Session counts under its ClassSubject's Semester, not under a Class: a student
+// who moved Class during the year keeps the weeks in the first one.
 async function attendanceSummary(studentProfileId, academicYearId) {
     const [semesters, rows] = await Promise.all([
         prisma.semester.findMany({
@@ -421,11 +436,7 @@ async function attendanceSummary(studentProfileId, academicYearId) {
         prisma.attendance.findMany({
             where: {
                 studentProfileId,
-                session: {
-                    status: 'SCHEDULED',
-                    completedAt: { not: null },
-                    classSubject: { semester: { academicYearId } },
-                },
+                session: { ...CONFIRMED_SESSION, classSubject: { semester: { academicYearId } } },
             },
             select: {
                 status: true,
@@ -439,28 +450,42 @@ async function attendanceSummary(studentProfileId, academicYearId) {
     const bySemester = new Map(
         semesters.map((semester) => [
             semester.id,
-            {
-                semesterId: semester.id,
-                ordinal: semester.ordinal,
-                counted: 0,
-                present: 0,
-                sick: 0,
-                excused: 0,
-                absent: 0,
-                late: 0,
-                outsideSchool: 0,
-            },
+            { semesterId: semester.id, ordinal: semester.ordinal, ...noCounts() },
         ])
     );
     for (const row of rows) {
         const counts = bySemester.get(row.session.classSubject.semesterId);
-        if (!counts) continue;
-        counts.counted += 1;
-        counts[STATUS_COUNT[row.status]] += 1;
-        if (row.status === 'PRESENT' && row.late) counts.late += 1;
-        if (row.status === 'PRESENT' && row.outsideSchool) counts.outsideSchool += 1;
+        if (counts) tally(counts, row);
     }
     return [...bySemester.values()];
 }
 
-export { checkIn, confirm, correct, rosterView, history, mine, attendanceSummary };
+// Several students' counts over the Sessions the caller names - a slot's, for the
+// progress views (teaching-and-learning 06) - confirmed ones only, as above. Every
+// student asked for has an entry, all zero when nothing counted. The caller has
+// already decided who may read it.
+async function attendanceCounts(studentProfileIds, sessionWhere) {
+    const rows = await prisma.attendance.findMany({
+        where: {
+            studentProfileId: { in: studentProfileIds },
+            session: { ...sessionWhere, ...CONFIRMED_SESSION },
+        },
+        select: { studentProfileId: true, status: true, late: true, outsideSchool: true },
+    });
+
+    const byStudent = new Map(studentProfileIds.map((studentProfileId) => [studentProfileId, noCounts()]));
+    for (const row of rows) tally(byStudent.get(row.studentProfileId), row);
+    return byStudent;
+}
+
+export {
+    checkIn,
+    confirm,
+    correct,
+    rosterView,
+    history,
+    mine,
+    CONFIRMED_SESSION,
+    attendanceSummary,
+    attendanceCounts,
+};
