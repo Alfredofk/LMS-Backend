@@ -1,9 +1,9 @@
 import { prisma } from '../../shared/prisma.js';
-import { isPrincipalOrVice, isHomeroomOf } from '../../shared/guards.js';
+import { currentPlacement } from '../../shared/guards.js';
 import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { distanceMeters } from '../../shared/geo.js';
 import { createLogger } from '../../lib/helpers.js';
-import { answeringTeacherOf, sessionSelect, loadSession, describeSession } from '../sessions/sessions.service.js';
+import { answeringTeacherOf, staffStandingOf, sessionSelect, loadSession, describeSession } from '../sessions/sessions.service.js';
 import { recordEvent } from '../tracking/tracking.record.js';
 
 const log = createLogger('Attendance');
@@ -36,21 +36,11 @@ const CHECK_IN_RADIUS_M = 150;
 const LATE_AFTER_MS = 30 * 60 * 1000;
 const MIN_NOTE_LENGTH = 3;
 
-// The student's placement now: an open ClassMembership on a live profile.
-function currentPlacement(membershipId) {
-    return prisma.classMembership.findFirst({
-        where: { endedAt: null, studentProfile: { membershipId, endedAt: null } },
-        select: { classId: true, studentProfileId: true },
-    });
-}
-
-// Who reads a Session's attendance: the Principal and Vice Principals, the teacher
-// who answers for it, and the Class's homeroom teacher. Anyone else - another
-// school included - gets 404.
+// Who reads a Session's attendance: its staff - the teacher who answers for it,
+// the Principal and Vice Principals, and the Class's homeroom teacher
+// (staffStandingOf). Anyone else - another school included - gets 404.
 async function canRead(auth, session) {
-    if (await isPrincipalOrVice(auth.membershipId)) return true;
-    if ((await answeringTeacherOf(session.classSubject)) === auth.membershipId) return true;
-    return isHomeroomOf(auth.membershipId, session.classSubject.classId);
+    return Boolean(await staffStandingOf(auth, session.classSubject));
 }
 
 async function assertCanRead(auth, session) {
@@ -478,6 +468,18 @@ async function attendanceCounts(studentProfileIds, sessionWhere) {
     return byStudent;
 }
 
+// Each student's latest check-in among the Sessions the caller names, confirmed or
+// not, for the progress views' last activity (teaching-and-learning 06). A student
+// who never checked in there has no entry.
+async function lastCheckIns(studentProfileIds, sessionWhere) {
+    const rows = await prisma.attendance.groupBy({
+        by: ['studentProfileId'],
+        where: { studentProfileId: { in: studentProfileIds }, checkedInAt: { not: null }, session: sessionWhere },
+        _max: { checkedInAt: true },
+    });
+    return new Map(rows.map((row) => [row.studentProfileId, row._max.checkedInAt]));
+}
+
 export {
     checkIn,
     confirm,
@@ -488,4 +490,5 @@ export {
     CONFIRMED_SESSION,
     attendanceSummary,
     attendanceCounts,
+    lastCheckIns,
 };

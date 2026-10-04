@@ -1,12 +1,12 @@
 import sanitizeHtml from 'sanitize-html';
 
 import { prisma } from '../../shared/prisma.js';
-import { isPrincipalOrVice, isHomeroomOf } from '../../shared/guards.js';
+import { currentPlacement } from '../../shared/guards.js';
 import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { getStorage } from '../../shared/storage.js';
 import { MIME } from '../../shared/upload.js';
 import { createLogger } from '../../lib/helpers.js';
-import { answeringTeacherOf, loadSession, describeSession } from '../sessions/sessions.service.js';
+import { staffStandingOf, loadSession, describeSession } from '../sessions/sessions.service.js';
 import { recordEvent, recordContentEvent } from '../tracking/tracking.record.js';
 import { CONTENT_ORDER, lastOrderOf } from './content.moves.js';
 
@@ -63,21 +63,18 @@ async function loadContent(id) {
 //   read all of it, drafts included, and write none of it;
 // - 'student': placed in the Class now - reads what is published;
 // - null: anyone else, another school included, who gets a 404.
+// The first two are staffStandingOf's (sessions.service.js), the rule attendance
+// and the progress views read too.
 async function standingOf(auth, session) {
-    if ((await answeringTeacherOf(session.classSubject)) === auth.membershipId) return 'teacher';
-    if (await isPrincipalOrVice(auth.membershipId)) return 'reader';
-    if (await isHomeroomOf(auth.membershipId, session.classSubject.classId)) return 'reader';
-
-    const placed = await prisma.classMembership.findFirst({
-        where: {
-            classId: session.classSubject.classId,
-            endedAt: null,
-            studentProfile: { membershipId: auth.membershipId, endedAt: null },
-        },
-        select: { id: true },
-    });
-    return placed ? 'student' : null;
+    const staff = await staffStandingOf(auth, session.classSubject);
+    if (staff) return staff;
+    const placement = await currentPlacement(auth.membershipId);
+    return placement?.classId === session.classSubject.classId ? 'student' : null;
 }
+
+// What a student may read: published, and not deleted. The progress views
+// (teaching-and-learning 06) count Content by the same rule.
+const READABLE_BY_STUDENT = { publishedAt: { not: null }, deletedAt: null };
 
 // A reader is told no (403); anyone the Session does not concern gets the same 404
 // as another school's.
@@ -240,8 +237,7 @@ async function listForSession(auth, sessionId) {
     const rows = await prisma.content.findMany({
         where: {
             sessionId,
-            deletedAt: null,
-            ...(standing === 'student' ? { publishedAt: { not: null } } : {}),
+            ...(standing === 'student' ? READABLE_BY_STUDENT : { deletedAt: null }),
         },
         orderBy: CONTENT_ORDER,
     });
@@ -254,7 +250,7 @@ async function listForSession(auth, sessionId) {
 // alike.
 async function readableByStudent(auth, contentId) {
     const row = await prisma.content.findFirst({
-        where: { id: contentId, deletedAt: null, publishedAt: { not: null } },
+        where: { id: contentId, ...READABLE_BY_STUDENT },
     });
     if (!row) return null;
     const session = await loadSession(row.sessionId);
@@ -465,6 +461,7 @@ async function remove(auth, contentId) {
 export {
     MAX_FILE_BYTES,
     FILE_TYPES,
+    READABLE_BY_STUDENT,
     listForSession,
     readFile,
     readableByStudent,

@@ -1,6 +1,6 @@
 import { prisma } from '../../shared/prisma.js';
 import { isValidGrade, phaseFor } from '../../shared/schoolType.js';
-import { isPrincipal, isPrincipalOrVice, isHomeroomOf, hasActiveRole } from '../../shared/guards.js';
+import { isPrincipal, isPrincipalOrVice, isHomeroomOf, hasActiveRole, currentPlacement } from '../../shared/guards.js';
 import {
     assertClassSubjectRetryAllowed,
     assertRejectionReason,
@@ -1272,23 +1272,27 @@ async function listClassSubjects(auth, { status, mine }) {
     return rows.map(classSubjectView);
 }
 
-// A student's own subjects (2026-10-03): the live ClassSubjects of the Class they
-// are placed in now (teaching-and-learning spec, invariant 6), every semester of
-// its academic year, and who teaches each. Nothing PENDING, and none of the staff's
-// bookkeeping - when it was asked for or decided, an override. No placement, no
-// subjects.
-async function listOwnClassSubjects(auth) {
-    const placement = await prisma.classMembership.findFirst({
-        where: { endedAt: null, studentProfile: { membershipId: auth.membershipId, endedAt: null } },
-        select: { classId: true },
-    });
-    if (!placement) return [];
+// The live ClassSubjects of the Class a student is placed in now (teaching-and-
+// learning spec, invariant 6), every semester of its academic year, in the order a
+// student reads them - each with the caller's own select. Nothing PENDING, nothing
+// ended. No placement, no rows. Shared by the student's own subjects below and
+// their progress (teaching-and-learning 06), so both list the same ClassSubjects.
+async function liveClassSubjectsOfStudent(membershipId, select) {
+    const placement = await currentPlacement(membershipId);
+    if (!placement) return { placement: null, rows: [] };
 
     const rows = await prisma.classSubject.findMany({
         where: { classId: placement.classId, status: 'ACTIVE', endedAt: null },
-        select: classSubjectSelect,
+        select,
         orderBy: [{ semester: { ordinal: 'asc' } }, { subject: { code: 'asc' } }],
     });
+    return { placement, rows };
+}
+
+// A student's own subjects (2026-10-03), and who teaches each. None of the staff's
+// bookkeeping - when it was asked for or decided, an override.
+async function listOwnClassSubjects(auth) {
+    const { rows } = await liveClassSubjectsOfStudent(auth.membershipId, classSubjectSelect);
     return rows.map((row) => ({
         id: row.id,
         class: { id: row.class.id, name: row.class.name },
@@ -1631,6 +1635,7 @@ export {
     requestClassSubject,
     listClassSubjects,
     listOwnClassSubjects,
+    liveClassSubjectsOfStudent,
     cancelClassSubject,
     approveClassSubject,
     rejectClassSubject,

@@ -87,6 +87,17 @@ async function isGuardianOf(membershipId, studentProfileId) {
     return Boolean(found);
 }
 
+// Where a student sits now: their open ClassMembership, on a live profile - at most
+// one, by ClassMembership_one_active_per_student. Null for anyone not placed. What
+// a student reaches - the Sessions and Content of this Class, a check-in, their own
+// subjects - is decided from it (teaching-and-learning spec, invariant 6).
+function currentPlacement(membershipId) {
+    return prisma.classMembership.findFirst({
+        where: { endedAt: null, studentProfile: { membershipId, endedAt: null } },
+        select: { classId: true, studentProfileId: true, class: { select: { id: true, name: true } } },
+    });
+}
+
 // The homeroom teacher who may decide a student's or guardian's join request.
 async function isHomeroomOfStudent(membershipId, studentProfileId) {
     const placement = await prisma.classMembership.findFirst({
@@ -149,6 +160,7 @@ export {
     isHomeroomOfStudent,
     isTeacherOfClassSubject,
     isGuardianOf,
+    currentPlacement,
     requireResource,
     requirePlatformAdmin,
 };

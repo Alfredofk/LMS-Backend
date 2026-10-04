@@ -1,6 +1,6 @@
 import { prisma } from '../../shared/prisma.js';
 import { runInSchool } from '../../shared/tenantContext.js';
-import { isPrincipalOrVice, isHomeroomOf } from '../../shared/guards.js';
+import { isPrincipalOrVice, isHomeroomOf, currentPlacement } from '../../shared/guards.js';
 import { conflict, forbidden, notFound } from '../../shared/errors.js';
 import { localToUtc, utcToLocal } from '../../shared/timeZone.js';
 import { createLogger } from '../../lib/helpers.js';
@@ -112,6 +112,17 @@ const tomorrowOf = (zone, now = new Date()) => nextDay(utcToLocal(now, zone).dat
 // first day before it starts, tomorrow after.
 const replansFrom = (semester, zone, now = new Date()) =>
     hasStarted(semester, zone, now) ? tomorrowOf(zone, now) : toDay(semester.startDate);
+
+// The moments a Semester spans in the school's own zone: from 00:00 of its first
+// day to 00:00 after its last (2026-10-04, for the progress views' roster). A
+// school with no time zone has no Session either; UTC midnight stands in.
+async function semesterSpan(schoolId, semester) {
+    const zone = await zoneOf(schoolId);
+    const after = nextDay(toDay(semester.endDate));
+    return zone
+        ? { start: startOf(semester, zone), end: midnightOf(after, zone) }
+        : { start: toDate(toDay(semester.startDate)), end: toDate(after) };
+}
 
 // ---------------------------------------------------------------------------
 // Planning
@@ -324,24 +335,28 @@ async function answeringTeacherOf(classSubject) {
     return successor?.teacherMembershipId ?? null;
 }
 
-// Who reads a ClassSubject's timetable and Sessions: the Principal and Vice
-// Principals, the teacher who answers for it (its own, or a successor for an ended
-// one), the Class's homeroom teacher, and the students placed in the Class. Anyone
-// else - another school included - gets the same 404.
-async function assertCanRead(auth, classSubject) {
-    if (await isPrincipalOrVice(auth.membershipId)) return;
-    if ((await answeringTeacherOf(classSubject)) === auth.membershipId) return;
-    if (await isHomeroomOf(auth.membershipId, classSubject.classId)) return;
+// What a staff member is to a ClassSubject - the one rule sessions, attendance,
+// content and the progress views share (2026-10-04, from the review of
+// teaching-and-learning 06):
+// - 'teacher': the one who answers for it (answeringTeacherOf), who confirms its
+//   attendance and manages its Content;
+// - 'reader': the Principal, a Vice Principal, or the Class's homeroom teacher,
+//   who read it and change nothing of it;
+// - null: no standing as staff. Whether a student is placed in the Class is each
+//   caller's own question.
+async function staffStandingOf(auth, classSubject) {
+    if ((await answeringTeacherOf(classSubject)) === auth.membershipId) return 'teacher';
+    if (await isPrincipalOrVice(auth.membershipId)) return 'reader';
+    if (await isHomeroomOf(auth.membershipId, classSubject.classId)) return 'reader';
+    return null;
+}
 
-    const placed = await prisma.classMembership.findFirst({
-        where: {
-            classId: classSubject.classId,
-            endedAt: null,
-            studentProfile: { membershipId: auth.membershipId },
-        },
-        select: { id: true },
-    });
-    if (placed) return;
+// Who reads a ClassSubject's timetable and Sessions: its staff (staffStandingOf)
+// and the students placed in the Class now. Anyone else, another school included,
+// gets the same 404.
+async function assertCanRead(auth, classSubject) {
+    if (await staffStandingOf(auth, classSubject)) return;
+    if ((await currentPlacement(auth.membershipId))?.classId === classSubject.classId) return;
     throw notFound('Class subject not found');
 }
 
@@ -1112,6 +1127,8 @@ export {
     listNeedingCompletion,
     markNotHeld,
     answeringTeacherOf,
+    staffStandingOf,
+    semesterSpan,
     sessionSelect,
     loadSession,
     describeSession,
