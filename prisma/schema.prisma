@@ -436,6 +436,8 @@ model School {
     attendances       Attendance[]
     attendanceChanges AttendanceChange[]
     contents          Content[]
+    learningEvents    LearningEvent[]
+    contentProgress   ContentProgress[]
 
     @@index([deactivatedAt])
 }
@@ -475,6 +477,7 @@ model SchoolMembership {
     taughtSubjects  ClassSubject[]    @relation("AssignedTeacher")
     leaveRequests   LeaveRequest[]
     notifications   Notification[]
+    learningEvents  LearningEvent[]
 
     // No @@unique([schoolId, userId]). Dropped on 2026-09-20 (owner), because a
     // TOTAL constraint here contradicts decision #51: a rejected applicant may
@@ -537,6 +540,7 @@ model StudentProfile {
     classMoves       ClassMove[]
     guardianLinks    GuardianStudent[]
     attendances      Attendance[]
+    contentProgress  ContentProgress[]
 
     @@index([schoolId])
 }
@@ -949,11 +953,77 @@ model Content {
     createdAt       DateTime    @default(now())
     updatedAt       DateTime    @updatedAt
 
-    school  School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-    session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+    school   School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    session  Session           @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+    progress ContentProgress[]
 
     @@index([sessionId, order])
     @@index([schoolId])
+}
+
+// ---------------------------------------------------------------------------
+// Tracking - teaching-and-learning 05, the thesis's contribution (handoff #11)
+// ---------------------------------------------------------------------------
+
+/// Something a person did: actor, verb, object, context, time. The source of truth
+/// for progress, and later for gamification and support signals.
+///
+/// Append-only (handoff #26). No code path updates or deletes one, and the
+/// database refuses it too: a trigger in the _add_learning_events migration
+/// raises on every UPDATE, and on every DELETE unless the transaction has set
+/// lms.allow_learning_event_delete - which only the test-data cleanup does. A
+/// school or membership deleted by hand therefore fails on its events.
+///
+/// verb is from a closed list in src/modules/tracking/tracking.record.js, a String
+/// so the assessment slice adds its own without an enum migration. objectType names
+/// the table objectId points into (Content, Session). occurredAt is when it
+/// happened, bounded by the server for what a client reports; receivedAt is when
+/// the server wrote it.
+model LearningEvent {
+    id                String   @id @default(cuid())
+    schoolId          String
+    actorMembershipId String
+    verb              String
+    objectType        String
+    objectId          String
+    context           Json
+    occurredAt        DateTime
+    receivedAt        DateTime @default(now())
+
+    school School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    actor  SchoolMembership @relation(fields: [actorMembershipId], references: [id], onDelete: Cascade)
+
+    @@index([schoolId, actorMembershipId, occurredAt])
+    @@index([objectType, objectId])
+}
+
+/// One student's progress through one Content, derived from their Learning Events
+/// in the same transaction (handoff #24) - never written on its own. Completion is
+/// per type (owner, 2026-09-27): a FILE opened or downloaded, a YouTube VIDEO
+/// watched to 80%, a TEXT read to its end, a LINK (or another site's VIDEO)
+/// clicked. Client-reported, so a signal, not proof (handoff #15).
+model ContentProgress {
+    id                   String    @id @default(cuid())
+    schoolId             String
+    contentId            String
+    studentProfileId     String
+    firstOpenedAt        DateTime?
+    lastActivityAt       DateTime
+    /// Set once, by the event that completed it, and never cleared.
+    completedAt          DateTime?
+    /// The furthest point of a VIDEO reached, as recorded per 10% (tracking.record.js).
+    videoPositionSeconds Float?
+    videoDurationSeconds Float?
+    createdAt            DateTime  @default(now())
+    updatedAt            DateTime  @updatedAt
+
+    school         School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    content        Content        @relation(fields: [contentId], references: [id], onDelete: Cascade)
+    studentProfile StudentProfile @relation(fields: [studentProfileId], references: [id], onDelete: Cascade)
+
+    @@unique([contentId, studentProfileId])
+    @@index([schoolId])
+    @@index([studentProfileId])
 }
 
 /// A student moved from one class to another inside the school (ticket 16). The

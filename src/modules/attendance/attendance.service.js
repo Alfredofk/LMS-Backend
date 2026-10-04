@@ -4,6 +4,7 @@ import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.j
 import { distanceMeters } from '../../shared/geo.js';
 import { createLogger } from '../../lib/helpers.js';
 import { answeringTeacherOf, sessionSelect, loadSession, describeSession } from '../sessions/sessions.service.js';
+import { recordEvent } from '../tracking/tracking.record.js';
 
 const log = createLogger('Attendance');
 
@@ -27,8 +28,9 @@ const log = createLogger('Attendance');
 //   ClassSubject's, or the successor's once that ended (answeringTeacherOf). A
 //   Session between an ending and a successor takes check-ins, and waits.
 //
-// Ticket 05 (Learning Events) writes attendance.checked_in and
-// attendance.confirmed at the two points marked below.
+// Learning Events (ticket 05): a check-in writes attendance.checked_in, with its
+// two flags and nothing of the location, and a confirmation attendance.confirmed -
+// each in the same transaction as the attendance it records.
 
 const CHECK_IN_RADIUS_M = 150;
 const LATE_AFTER_MS = 30 * 60 * 1000;
@@ -137,15 +139,27 @@ async function checkIn(auth, sessionId, { latitude, longitude }) {
 
     let row;
     try {
-        row = await prisma.attendance.create({
-            data: {
-                sessionId: session.id,
-                studentProfileId: placement.studentProfileId,
-                status: 'PRESENT',
-                checkedInAt: now,
-                outsideSchool,
-                late,
-            },
+        row = await prisma.$transaction(async (tx) => {
+            const created = await tx.attendance.create({
+                data: {
+                    sessionId: session.id,
+                    studentProfileId: placement.studentProfileId,
+                    status: 'PRESENT',
+                    checkedInAt: now,
+                    outsideSchool,
+                    late,
+                },
+            });
+            // The two flags only - never the location or a distance (spec invariant 3).
+            await recordEvent(tx, {
+                actorMembershipId: auth.membershipId,
+                verb: 'attendance.checked_in',
+                objectType: 'Session',
+                objectId: session.id,
+                context: { attendanceId: created.id, classSubjectId: session.classSubject.id, late, outsideSchool },
+                occurredAt: now,
+            });
+            return created;
         });
     } catch (error) {
         if (error?.code !== 'P2002') throw error;
@@ -161,7 +175,6 @@ async function checkIn(auth, sessionId, { latitude, longitude }) {
                 : 'The teacher has already confirmed this attendance'
         );
     }
-    // Ticket 05: attendance.checked_in.
 
     const flags = [late && 'late', outsideSchool && 'outside the school'].filter(Boolean);
     log.info(`Check-in to ${describeSession(session)}${flags.length ? ` (${flags.join(', ')})` : ''}`);
@@ -206,11 +219,12 @@ async function confirm(auth, sessionId, { statuses = [] }) {
         const checkedIn = new Set(existing.map((row) => row.studentProfileId));
         const absent = roster.filter((studentProfileId) => !checkedIn.has(studentProfileId));
         // skipDuplicates: a check-in landing in the same moment keeps its PRESENT.
-        await tx.attendance.createMany({
+        const marked = await tx.attendance.createMany({
             data: absent.map((studentProfileId) => ({ sessionId: session.id, studentProfileId, status: 'ABSENT' })),
             skipDuplicates: true,
         });
 
+        let changed = 0;
         for (const entry of statuses) {
             const row = await tx.attendance.findFirst({
                 where: { sessionId: session.id, studentProfileId: entry.studentProfileId },
@@ -228,9 +242,18 @@ async function confirm(auth, sessionId, { statuses = [] }) {
                     changedByUserId: auth.userId,
                 },
             });
+            changed += 1;
         }
+
+        await recordEvent(tx, {
+            actorMembershipId: auth.membershipId,
+            verb: 'attendance.confirmed',
+            objectType: 'Session',
+            objectId: session.id,
+            context: { classSubjectId: session.classSubject.id, markedAbsent: marked.count, changed },
+            occurredAt: now,
+        });
     });
-    // Ticket 05: attendance.confirmed.
 
     log.info(`${describeSession(session)} confirmed${session.needsCompletion ? ', filled in after the fact' : ''}`);
     return rosterView(auth, sessionId);

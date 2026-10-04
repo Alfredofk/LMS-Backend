@@ -23,6 +23,7 @@ import holidayRoutes, { adminRouter as adminHolidayRoutes } from './modules/holi
 import sessionRoutes from './modules/sessions/sessions.routes.js';
 import attendanceRoutes from './modules/attendance/attendance.routes.js';
 import contentRoutes from './modules/content/content.routes.js';
+import trackingRoutes from './modules/tracking/tracking.routes.js';
 import { generalLimiter } from './shared/rateLimit.js';
 import { verifyTransport } from './shared/mailer.js';
 import { createLogger } from './lib/helpers.js';
@@ -92,6 +93,7 @@ app.use('/api/holidays', holidayRoutes);
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/content', contentRoutes);
+app.use('/api/tracking', trackingRoutes);
 
 // Catch 404
 app.use((_req, _res, next) => next(notFound('Route not found')));

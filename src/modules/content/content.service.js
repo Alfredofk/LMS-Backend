@@ -7,6 +7,7 @@ import { getStorage } from '../../shared/storage.js';
 import { MIME } from '../../shared/upload.js';
 import { createLogger } from '../../lib/helpers.js';
 import { answeringTeacherOf, loadSession, describeSession } from '../sessions/sessions.service.js';
+import { recordEvent, recordContentEvent } from '../tracking/tracking.record.js';
 import { CONTENT_ORDER, lastOrderOf } from './content.moves.js';
 
 const log = createLogger('Content');
@@ -36,7 +37,10 @@ const log = createLogger('Content');
 // - A Session cancelled for a holiday hands its Content on: content.moves.js, called
 //   from sessions.service.js.
 //
-// Ticket 05 (Learning Events) writes content.published at the point marked below.
+// Learning Events (ticket 05): publishing writes content.published, and a student
+// fetching a FILE writes content.file_downloaded - observed by the server, not
+// claimed by the client. readableByStudent is what the tracking module asks before
+// it records a student's own events.
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const FILE_TYPES = ['pdf', 'jpg', 'png', 'docx', 'pptx'];
@@ -244,15 +248,54 @@ async function listForSession(auth, sessionId) {
     return { session: sessionView(session), canManage: standing === 'teacher', contents: rows.map(contentView) };
 }
 
+// A Content a student may act on: live, published, under a Session of the Class
+// they sit in now - what listForSession shows them (spec invariant 6). Null for
+// anything else, another school's included, so the caller answers every miss
+// alike.
+async function readableByStudent(auth, contentId) {
+    const row = await prisma.content.findFirst({
+        where: { id: contentId, deletedAt: null, publishedAt: { not: null } },
+    });
+    if (!row) return null;
+    const session = await loadSession(row.sessionId);
+    return (await standingOf(auth, session)) === 'student' ? { content: row, session } : null;
+}
+
+// The student whose standing let them in, for their progress row.
+async function studentProfileOf(auth) {
+    const profile = await prisma.studentProfile.findFirst({
+        where: { membershipId: auth.membershipId, endedAt: null },
+        select: { id: true },
+    });
+    return profile?.id ?? null;
+}
+
 // A FILE's bytes. A student reaches only a published one; to anyone else it does
 // not exist.
+//
+// A student's fetch is recorded as content.file_downloaded once the bytes are read
+// (ticket 05), and completes the FILE. A staff member's is not tracked.
 async function readFile(auth, contentId) {
     const row = await loadContent(contentId);
-    const standing = await standingOf(auth, await loadSession(row.sessionId));
+    const session = await loadSession(row.sessionId);
+    const standing = await standingOf(auth, session);
     if (!standing || (standing === 'student' && !row.publishedAt)) throw notFound('Content not found');
     if (row.type !== 'FILE') throw badRequest(`This content is a ${row.type}, not a file`);
 
     const buffer = await getStorage().read(row.payload.storageKey);
+    if (standing === 'student') {
+        const studentProfileId = await studentProfileOf(auth);
+        await prisma.$transaction((tx) =>
+            recordContentEvent(tx, {
+                actorMembershipId: auth.membershipId,
+                studentProfileId,
+                content: row,
+                session,
+                verb: 'content.file_downloaded',
+                occurredAt: new Date(),
+            })
+        );
+    }
     return {
         buffer,
         contentType: row.payload.mimeType,
@@ -364,12 +407,23 @@ async function publish(auth, contentId) {
     const { row, session } = await loadManagedContent(auth, contentId);
     if (row.publishedAt) throw conflict('This content is published already');
 
-    const claimed = await prisma.content.updateMany({
-        where: { id: row.id, publishedAt: null, deletedAt: null },
-        data: { publishedAt: new Date() },
+    const now = new Date();
+    await prisma.$transaction(async (tx) => {
+        const claimed = await tx.content.updateMany({
+            where: { id: row.id, publishedAt: null, deletedAt: null },
+            data: { publishedAt: now },
+        });
+        if (claimed.count === 0) throw conflict('This content is published already');
+
+        await recordEvent(tx, {
+            actorMembershipId: auth.membershipId,
+            verb: 'content.published',
+            objectType: 'Content',
+            objectId: row.id,
+            context: { contentType: row.type, sessionId: row.sessionId, classSubjectId: session.classSubject.id },
+            occurredAt: now,
+        });
     });
-    if (claimed.count === 0) throw conflict('This content is published already');
-    // Ticket 05: content.published.
 
     log.info(`${row.type} published in ${describeSession(session)}`);
     return contentView(await prisma.content.findFirst({ where: { id: row.id } }));
@@ -413,6 +467,8 @@ export {
     FILE_TYPES,
     listForSession,
     readFile,
+    readableByStudent,
+    studentProfileOf,
     create,
     createFile,
     update,
