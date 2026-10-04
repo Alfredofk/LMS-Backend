@@ -4,6 +4,7 @@ storage/
 
 # Agent-facing docs and design notes — local only
 CLAUDE.md
+CODING_STANDARDS.md
 CONTEXT.md
 docs/
 .scratch/
