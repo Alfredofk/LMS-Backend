@@ -11,7 +11,8 @@ import { scheduleBody, idParams, sessionsQuery, mineQuery } from './sessions.sch
 // school sets it, not each teacher (owner, 2026-09-27). Reading it, and the
 // Sessions it makes, is for whoever the ClassSubject concerns - the service decides
 // (the school's leaders, its teacher, the Class's homeroom teacher, its students),
-// and answers 404 to anyone else.
+// and answers 404 to anyone else. A student's Session list carries their own count
+// of each Session's Content (teaching-and-learning 06 follow-up 2, 2026-10-06).
 //
 // A Session created already past needs completion (ticket 09): its teacher finds it
 // on the to-do list and answers that it never happened here, or that it did by

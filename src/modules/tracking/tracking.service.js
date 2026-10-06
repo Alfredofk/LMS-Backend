@@ -3,8 +3,9 @@ import { notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
 import { staffStandingOf, semesterSpan } from '../sessions/sessions.service.js';
 import { CONFIRMED_SESSION, attendanceCounts, lastCheckIns } from '../attendance/attendance.service.js';
-import { READABLE_BY_STUDENT, readableByStudent, studentProfileOf } from '../content/content.service.js';
+import { readableByStudent, studentProfileOf } from '../content/content.service.js';
 import { CONTENT_ORDER } from '../content/content.moves.js';
+import { READABLE_BY_STUDENT } from '../content/content.summary.js';
 import { liveClassSubjectsOfStudent } from '../academics/academics.service.js';
 import { CONTENT_VERBS, recordContentEvent } from './tracking.record.js';
 
@@ -309,10 +310,11 @@ async function classSubjectProgress(auth, classSubjectId) {
     };
 }
 
-// A student's own progress in each ClassSubject of the Class they sit in now - the
-// ones GET /api/academics/me/class-subjects lists (liveClassSubjectsOfStudent) -
-// each over its whole slot. Their row alone: the numbers their teacher sees for
-// them, and nothing of anyone else.
+// A student's own progress in each live ClassSubject of the Class they sit in now
+// (liveClassSubjectsOfStudent), each over its whole slot - so an ended assignment's
+// Content counts under its successor's row. Not an earlier Class's, which their
+// subjects list for reading only (teaching-and-learning 12, owner 2026-10-06). Their
+// row alone: the numbers their teacher sees for them, and nothing of anyone else.
 async function ownProgress(auth) {
     const { placement, rows } = await liveClassSubjectsOfStudent(auth.membershipId, slotSelect);
     if (!placement) return { class: null, classSubjects: [] };

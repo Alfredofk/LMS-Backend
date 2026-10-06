@@ -7,6 +7,7 @@ import {
     isHomeroomOf,
     hasActiveRole,
     currentPlacement,
+    placementsOf,
 } from '../../shared/guards.js';
 import {
     assertClassSubjectRetryAllowed,
@@ -16,11 +17,13 @@ import {
 } from '../../shared/approval.js';
 import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
+import { toDay } from '../holidays/holidays.calendar.js';
 import {
     inheritSchedule,
     stopSessionsAhead,
     assertSemesterDatesMayChange,
     regenerateSemester,
+    todayOf,
 } from '../sessions/sessions.service.js';
 import { assertSubjectSelected } from './academics.subjectChoice.js';
 
@@ -231,12 +234,37 @@ async function listAcademicYears() {
     return prisma.academicYear.findMany({ select: yearSelect, orderBy: { startDate: 'desc' } });
 }
 
+// A year closes only once its days are over (registration-and-membership 24, owner
+// 2026-10-06): no Semester of it may run past today, the school's local date.
+// - Closed early, its Sessions ahead would stay SCHEDULED in a closed year, on the
+//   calendars and open to check-ins.
+// - A school that ends early shortens the Semester to end today first
+//   (PATCH /semesters/:id, which cancels the Sessions from tomorrow, ticket 09), and
+//   may close the same day.
+// - It stands in for handoff #60's "both Semesters closed" until Semester closing
+//   comes with Report Cards.
+async function assertYearOver(schoolId, year) {
+    const today = await todayOf(schoolId);
+    const running = year.semesters.filter((semester) => toDay(semester.endDate) > today);
+    if (running.length === 0) return;
+
+    const last = running.at(-1);
+    throw conflict(
+        `Semester ${last.ordinal} of ${year.label} runs until ${toDay(last.endDate)}. ` +
+            'Shorten it to end today first, or close the year once it is over',
+        { semesterId: last.id, endDate: toDay(last.endDate) }
+    );
+}
+
 // ACTIVE -> CLOSED, claimed like every transition here, so closing twice is a
 // conflict. No semester has to be closed first: semester close is two-phase and
-// not built yet (ticket 07 leaves it to its own work).
+// not built yet (ticket 07 leaves it to its own work). Until then the year's days
+// must be over (assertYearOver).
 async function closeAcademicYear(auth, id) {
     await assertPrincipalOrVice(auth);
     const year = await loadYear(id);
+    // Closing twice stays the claim's 409 below.
+    if (year.status === 'ACTIVE') await assertYearOver(auth.schoolId, year);
 
     const claimed = await prisma.academicYear.updateMany({
         where: { id, status: 'ACTIVE' },
@@ -1263,8 +1291,9 @@ async function listClassSubjects(auth, { status, mine }) {
 // The live ClassSubjects of the Class a student is placed in now (teaching-and-
 // learning spec, invariant 6), every semester of its academic year, in the order a
 // student reads them - each with the caller's own select. Nothing PENDING, nothing
-// ended. No placement, no rows. Shared by the student's own subjects below and
-// their progress (teaching-and-learning 06), so both list the same ClassSubjects.
+// ended. No placement, no rows. What a student's own progress lists (teaching-and-
+// learning 06), one row per slot, each counted over its whole slot - an ended
+// assignment's Content included. Their subjects list more (listOwnClassSubjects).
 async function liveClassSubjectsOfStudent(membershipId, select) {
     const placement = await currentPlacement(membershipId);
     if (!placement) return { placement: null, rows: [] };
@@ -1277,21 +1306,49 @@ async function liveClassSubjectsOfStudent(membershipId, select) {
     return { placement, rows };
 }
 
-// A student's own subjects (2026-10-03), and who teaches each. None of the staff's
-// bookkeeping - when it was asked for or decided, an override.
+// A student's own subjects (2026-10-03), and who teaches each, in every Class they
+// are or were placed in here (teaching-and-learning 12, owner 2026-10-06):
+// - current: true for the Class they sit in now. False for an earlier one, which they
+//   read and do nothing in, listing only the Semesters begun before they left it;
+// - ended: true for an assignment that ended - its teacher replaced, or the subject
+//   stopped. Its past Sessions stay with it, so it is listed to be read. A successor
+//   is a row of its own: a slot's numbers may start again with a new teacher.
+// Nothing PENDING, and none of the staff's bookkeeping - when it was asked for or
+// decided, an override. The current Class first, then the earlier ones, the latest
+// left first; in each, by Semester, subject, and the order they were decided.
 async function listOwnClassSubjects(auth) {
-    const { rows } = await liveClassSubjectsOfStudent(auth.membershipId, classSubjectSelect);
-    return rows.map((row) => ({
-        id: row.id,
-        class: { id: row.class.id, name: row.class.name },
-        subject: row.subject,
-        semester: {
-            id: row.semester.id,
-            ordinal: row.semester.ordinal,
-            academicYear: row.semester.academicYear.label,
+    const placements = await placementsOf(auth.membershipId);
+    if (placements.length === 0) return [];
+
+    const rows = await prisma.classSubject.findMany({
+        where: {
+            status: 'ACTIVE',
+            OR: placements.map((placed) => ({
+                classId: placed.classId,
+                ...(placed.leftAt ? { semester: { startDate: { lt: placed.leftAt } } } : {}),
+            })),
         },
-        teacher: { fullName: row.teacher.user.fullName },
-    }));
+        select: classSubjectSelect,
+        orderBy: [{ semester: { ordinal: 'asc' } }, { subject: { code: 'asc' } }, { decidedAt: 'asc' }],
+    });
+
+    const leftAt = new Map(placements.map((placed) => [placed.classId, placed.leftAt]));
+    const recency = (row) => leftAt.get(row.class.id)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+    return rows
+        .sort((a, b) => recency(b) - recency(a))
+        .map((row) => ({
+            id: row.id,
+            class: { id: row.class.id, name: row.class.name },
+            subject: row.subject,
+            semester: {
+                id: row.semester.id,
+                ordinal: row.semester.ordinal,
+                academicYear: row.semester.academicYear.label,
+            },
+            teacher: { fullName: row.teacher.user.fullName },
+            current: leftAt.get(row.class.id) === null,
+            ended: row.endedAt !== null,
+        }));
 }
 
 // A teacher taking their own PENDING request back (the cancellation pattern of

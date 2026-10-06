@@ -1,11 +1,12 @@
 import { prisma } from '../../shared/prisma.js';
 import { runInSchool } from '../../shared/tenantContext.js';
-import { isPrincipalOrVice, isHomeroomOf, currentPlacement } from '../../shared/guards.js';
+import { isPrincipalOrVice, isHomeroomOf, placementsOf } from '../../shared/guards.js';
 import { conflict, forbidden, notFound } from '../../shared/errors.js';
 import { localToUtc, utcToLocal } from '../../shared/timeZone.js';
 import { createLogger } from '../../lib/helpers.js';
 import { toDate, toDay, holidayDatesBetween, daysBetween } from '../holidays/holidays.calendar.js';
 import { moveContentOffHoliday } from '../content/content.moves.js';
+import { summaryBySessionOf } from '../content/content.summary.js';
 
 const log = createLogger('Sessions');
 
@@ -122,6 +123,14 @@ async function semesterSpan(schoolId, semester) {
     return zone
         ? { start: startOf(semester, zone), end: midnightOf(after, zone) }
         : { start: toDate(toDay(semester.startDate)), end: toDate(after) };
+}
+
+// The school's local date today, as YYYY-MM-DD; for a school with no time zone, which
+// has no Session either, the UTC date, as semesterSpan does. Closing a year reads it
+// (registration-and-membership 24).
+async function todayOf(schoolId, now = new Date()) {
+    const zone = await zoneOf(schoolId);
+    return zone ? utcToLocal(now, zone).date : toDay(now);
 }
 
 // ---------------------------------------------------------------------------
@@ -351,13 +360,31 @@ async function staffStandingOf(auth, classSubject) {
     return null;
 }
 
-// Who reads a ClassSubject's timetable and Sessions: its staff (staffStandingOf)
-// and the students placed in the Class now. Anyone else, another school included,
-// gets the same 404.
+// Who reads a ClassSubject's timetable, Sessions and Content - the one rule this
+// module and content.service.js read (2026-10-06; content had its own copy):
+// - its staff, by their staffStandingOf;
+// - 'student': placed in the Class now (spec invariant 6);
+// - 'past-student': placed there once (teaching-and-learning 12, owner 2026-10-06).
+//   They read only what began before they left: given a Session's `startsAt`, a later
+//   one is not theirs. They read and do nothing - no check-in, and nothing they open
+//   is tracked;
+// - null: anyone else, another school included.
+async function readerStandingOf(auth, classSubject, startsAt = null) {
+    const staff = await staffStandingOf(auth, classSubject);
+    if (staff) return staff;
+    const [placed] = await placementsOf(auth.membershipId, classSubject.classId);
+    if (!placed) return null;
+    if (placed.leftAt === null) return 'student';
+    return startsAt === null || startsAt < placed.leftAt ? 'past-student' : null;
+}
+
+// A student's standing, now or from an earlier placement: they read what is
+// published, and their own progress on it.
+const isStudentStanding = (standing) => standing === 'student' || standing === 'past-student';
+
+// Anyone readerStandingOf leaves out gets the same 404 as another school's.
 async function assertCanRead(auth, classSubject) {
-    if (await staffStandingOf(auth, classSubject)) return;
-    if ((await currentPlacement(auth.membershipId))?.classId === classSubject.classId) return;
-    throw notFound('Class subject not found');
+    if (!(await readerStandingOf(auth, classSubject))) throw notFound('Class subject not found');
 }
 
 // ---------------------------------------------------------------------------
@@ -532,14 +559,38 @@ async function getSchedule(auth, classSubjectId) {
     return scheduleView(classSubjectId, await zoneOf(auth.schoolId));
 }
 
+// A ClassSubject's Sessions in number order. A student's list also carries, on each
+// Session, `content: { published, completed }` - their own count of its Content, so
+// the frontend ticks its Session tabs without loading each Session's Content
+// (teaching-and-learning 06 follow-up 2, owner 2026-10-06). Staff lists carry no
+// such field, as their Content lists carry no progress. A student who left the Class
+// gets the Sessions that began before they left, with their counts from then
+// (teaching-and-learning 12).
 async function listSessions(auth, classSubjectId, { status }) {
-    await assertCanRead(auth, await loadClassSubject(classSubjectId));
+    const classSubject = await loadClassSubject(classSubjectId);
+    const standing = await readerStandingOf(auth, classSubject);
+    if (!standing) throw notFound('Class subject not found');
+
+    // The student's placement there, for whose counts and up to when. Gone since the
+    // check above: no longer a reader.
+    const student = isStudentStanding(standing);
+    const [placed] = student ? await placementsOf(auth.membershipId, classSubject.classId) : [];
+    if (student && !placed) throw notFound('Class subject not found');
+
     const zone = await zoneOf(auth.schoolId);
     const rows = await prisma.session.findMany({
-        where: { classSubjectId, ...(status ? { status } : {}) },
+        where: {
+            classSubjectId,
+            ...(status ? { status } : {}),
+            ...(placed?.leftAt ? { startsAt: { lt: placed.leftAt } } : {}),
+        },
         orderBy: { number: 'asc' },
     });
-    return rows.map((row) => sessionView(row, zone));
+    const views = rows.map((row) => sessionView(row, zone));
+    if (!student) return views;
+
+    const summary = await summaryBySessionOf(prisma, placed.studentProfileId, rows.map((row) => row.id));
+    return views.map((view) => ({ ...view, content: summary.get(view.id) }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1128,6 +1179,9 @@ export {
     markNotHeld,
     answeringTeacherOf,
     staffStandingOf,
+    readerStandingOf,
+    isStudentStanding,
+    todayOf,
     semesterSpan,
     sessionSelect,
     loadSession,

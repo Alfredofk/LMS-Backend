@@ -1,14 +1,14 @@
 import sanitizeHtml from 'sanitize-html';
 
 import { prisma } from '../../shared/prisma.js';
-import { currentPlacement } from '../../shared/guards.js';
 import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { getStorage } from '../../shared/storage.js';
 import { MIME } from '../../shared/upload.js';
 import { createLogger } from '../../lib/helpers.js';
-import { staffStandingOf, loadSession, describeSession } from '../sessions/sessions.service.js';
+import { readerStandingOf, isStudentStanding, loadSession, describeSession } from '../sessions/sessions.service.js';
 import { recordEvent, recordContentEvent } from '../tracking/tracking.record.js';
 import { CONTENT_ORDER, lastOrderOf } from './content.moves.js';
+import { READABLE_BY_STUDENT } from './content.summary.js';
 
 const log = createLogger('Content');
 
@@ -20,8 +20,10 @@ const log = createLogger('Content');
 //   own teacher, or the successor once that ended (answeringTeacherOf).
 // - A draft until the teacher publishes it. Students see only what is published;
 //   the Principal, Vice Principals and the homeroom teacher see drafts too.
-// - A student reads the Content of their current Class only (spec invariant 6), a
-//   cancelled Session's included.
+// - A student reads the Content of their current Class (spec invariant 6), a
+//   cancelled Session's included, and of an earlier Class the Sessions that began
+//   before they left it - read only, nothing tracked (teaching-and-learning 12,
+//   owner 2026-10-06).
 // - FILE: PDF, JPG, PNG, DOCX or PPTX, up to 10 MB, the type read from the bytes.
 //   Stored under content/<schoolId>/; the storage key never leaves the server, and
 //   the file is read back through a route that checks access.
@@ -64,26 +66,20 @@ async function loadContent(id) {
 // - 'reader': the Principal, a Vice Principal, the Class's homeroom teacher - they
 //   read all of it, drafts included, and write none of it;
 // - 'student': placed in the Class now - reads what is published;
+// - 'past-student': placed there once - reads what is published of the Sessions
+//   that began before they left, and nothing of it is tracked;
 // - null: anyone else, another school included, who gets a 404.
-// The first two are staffStandingOf's (sessions.service.js), the rule attendance
+// It is the ClassSubject's readerStandingOf (sessions.service.js): the same rule as
+// its timetable and Session list, the first two staffStandingOf's, which attendance
 // and the progress views read too.
-async function standingOf(auth, session) {
-    const staff = await staffStandingOf(auth, session.classSubject);
-    if (staff) return staff;
-    const placement = await currentPlacement(auth.membershipId);
-    return placement?.classId === session.classSubject.classId ? 'student' : null;
-}
-
-// What a student may read: published, and not deleted. The progress views
-// (teaching-and-learning 06) count Content by the same rule.
-const READABLE_BY_STUDENT = { publishedAt: { not: null }, deletedAt: null };
+const standingOf = (auth, session) => readerStandingOf(auth, session.classSubject, session.startsAt);
 
 // A reader is told no (403); anyone the Session does not concern gets the same 404
 // as another school's.
 async function assertManages(auth, session) {
     const standing = await standingOf(auth, session);
     if (standing === 'teacher') return;
-    if (standing === null || standing === 'student') throw notFound('Session not found');
+    if (standing === null || isStudentStanding(standing)) throw notFound('Session not found');
     throw forbidden('Only the teacher of this class subject manages its content');
 }
 
@@ -246,12 +242,12 @@ async function listForSession(auth, sessionId) {
     const rows = await prisma.content.findMany({
         where: {
             sessionId,
-            ...(standing === 'student' ? READABLE_BY_STUDENT : { deletedAt: null }),
+            ...(isStudentStanding(standing) ? READABLE_BY_STUDENT : { deletedAt: null }),
         },
         orderBy: CONTENT_ORDER,
     });
     const answer = { session: sessionView(session), canManage: standing === 'teacher' };
-    if (standing !== 'student') return { ...answer, contents: rows.map(contentView) };
+    if (!isStudentStanding(standing)) return { ...answer, contents: rows.map(contentView) };
 
     const progress = await progressByContentOf(auth, rows);
     return {
@@ -280,7 +276,8 @@ async function progressByContentOf(auth, rows) {
 // A Content a student may act on: live, published, under a Session of the Class
 // they sit in now - what listForSession shows them (spec invariant 6). Null for
 // anything else, another school's included, so the caller answers every miss
-// alike.
+// alike. An earlier Class's Content is read, never acted on: a student who left it
+// is not tracked there (teaching-and-learning 12, owner 2026-10-06).
 async function readableByStudent(auth, contentId) {
     const row = await prisma.content.findFirst({
         where: { id: contentId, ...READABLE_BY_STUDENT },
@@ -303,12 +300,13 @@ async function studentProfileOf(auth) {
 // not exist.
 //
 // A student's fetch is recorded as content.file_downloaded once the bytes are read
-// (ticket 05), and completes the FILE. A staff member's is not tracked.
+// (ticket 05), and completes the FILE. A staff member's is not tracked, nor a
+// student's from an earlier Class (teaching-and-learning 12, owner 2026-10-06).
 async function readFile(auth, contentId) {
     const row = await loadContent(contentId);
     const session = await loadSession(row.sessionId);
     const standing = await standingOf(auth, session);
-    if (!standing || (standing === 'student' && !row.publishedAt)) throw notFound('Content not found');
+    if (!standing || (isStudentStanding(standing) && !row.publishedAt)) throw notFound('Content not found');
     if (row.type !== 'FILE') throw badRequest(`This content is a ${row.type}, not a file`);
 
     const buffer = await getStorage().read(row.payload.storageKey);
@@ -494,7 +492,6 @@ async function remove(auth, contentId) {
 export {
     MAX_FILE_BYTES,
     FILE_TYPES,
-    READABLE_BY_STUDENT,
     cleanText,
     listForSession,
     readFile,

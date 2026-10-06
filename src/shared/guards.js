@@ -100,13 +100,43 @@ async function isGuardianOf(membershipId, studentProfileId) {
 
 // Where a student sits now: their open ClassMembership, on a live profile - at most
 // one, by ClassMembership_one_active_per_student. Null for anyone not placed. What
-// a student reaches - the Sessions and Content of this Class, a check-in, their own
-// subjects - is decided from it (teaching-and-learning spec, invariant 6).
+// a student may do - a check-in, a tracked event on Content - is decided from it
+// (teaching-and-learning spec, invariant 6); what they may read, from placementsOf.
 function currentPlacement(membershipId) {
     return prisma.classMembership.findFirst({
         where: { endedAt: null, studentProfile: { membershipId, endedAt: null } },
         select: { classId: true, studentProfileId: true, class: { select: { id: true, name: true } } },
     });
+}
+
+// Every Class a student is or was placed in, one entry each: { classId,
+// studentProfileId, leftAt }, leftAt null where they sit now, else the latest end of
+// their placements there. On their live profile only: a student who left and joined
+// again does not reach what their earlier stint held. With a classId, that Class's
+// entry alone, if any.
+//
+// What a student may READ of an earlier Class - the Sessions that began before they
+// left it, and their Content - is decided from it (teaching-and-learning 12, owner
+// 2026-10-06). What they may DO - a check-in, a tracked event - stays
+// currentPlacement's.
+async function placementsOf(membershipId, classId = null) {
+    const rows = await prisma.classMembership.findMany({
+        where: { ...(classId ? { classId } : {}), studentProfile: { membershipId, endedAt: null } },
+        select: { classId: true, studentProfileId: true, endedAt: true },
+    });
+
+    // An open placement outweighs any ended one in the same Class.
+    const later = (a, b) => (a === null || b === null ? null : new Date(Math.max(a, b)));
+    const byClass = new Map();
+    for (const row of rows) {
+        const seen = byClass.get(row.classId);
+        byClass.set(row.classId, {
+            classId: row.classId,
+            studentProfileId: row.studentProfileId,
+            leftAt: seen ? later(seen.leftAt, row.endedAt) : row.endedAt,
+        });
+    }
+    return [...byClass.values()];
 }
 
 // The homeroom teacher who may decide a student's or guardian's join request.
@@ -173,6 +203,7 @@ export {
     isTeacherOfClassSubject,
     isGuardianOf,
     currentPlacement,
+    placementsOf,
     requireResource,
     requirePlatformAdmin,
 };
