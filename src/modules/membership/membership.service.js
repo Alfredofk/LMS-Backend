@@ -1977,7 +1977,13 @@ const placementSelect = {
     startedAt: true,
     endedAt: true,
     class: {
-        select: { id: true, name: true, gradeLevel: true, academicYear: { select: { id: true, label: true } } },
+        select: {
+            id: true,
+            name: true,
+            gradeLevel: true,
+            academicYear: { select: { id: true, label: true } },
+            homeroomTeacher: { select: { id: true, user: { select: { fullName: true } } } },
+        },
     },
 };
 
@@ -2015,11 +2021,22 @@ const memberDetailSelect = {
     },
 };
 
+// A placement's Class, with its homeroom teacher - whoever the Class names now, in
+// the shape GET /api/academics/classes gives - and placedAt, when the student was
+// placed in it, as the Class roster names it (ticket 22 follow-up, owner
+// 2026-10-06, asked by the frontend).
 const placementView = (placement) => ({
     id: placement.class.id,
     name: placement.class.name,
     gradeLevel: placement.class.gradeLevel,
     academicYear: placement.class.academicYear.label,
+    homeroomTeacher: placement.class.homeroomTeacher
+        ? {
+            membershipId: placement.class.homeroomTeacher.id,
+            fullName: placement.class.homeroomTeacher.user.fullName,
+        }
+        : null,
+    placedAt: placement.startedAt,
 });
 
 // The Class they sit in now - at most one open placement, by the partial index -
