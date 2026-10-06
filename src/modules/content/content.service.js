@@ -121,6 +121,8 @@ const TEXT_RULES = {
     transformTags: { a: sanitizeHtml.simpleTransform('a', { target: '_blank', rel: 'noopener noreferrer' }) },
 };
 
+// The question bank sanitises a question's body by the same rule (assessment ticket
+// 01): it is shown to children too.
 function cleanText(html) {
     const clean = sanitizeHtml(html, TEXT_RULES).trim();
     const words = sanitizeHtml(clean, { allowedTags: [], allowedAttributes: {} }).trim();
@@ -493,6 +495,7 @@ export {
     MAX_FILE_BYTES,
     FILE_TYPES,
     READABLE_BY_STUDENT,
+    cleanText,
     listForSession,
     readFile,
     readableByStudent,

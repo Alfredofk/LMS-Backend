@@ -442,6 +442,8 @@ model School {
     contents          Content[]
     learningEvents    LearningEvent[]
     contentProgress   ContentProgress[]
+    questions         Question[]
+    questionImages    QuestionImage[]
 
     @@index([deactivatedAt])
 }
@@ -482,6 +484,8 @@ model SchoolMembership {
     leaveRequests   LeaveRequest[]
     notifications   Notification[]
     learningEvents  LearningEvent[]
+    questions       Question[]
+    questionImages  QuestionImage[]
 
     // No @@unique([schoolId, userId]). Dropped on 2026-09-20 (owner), because a
     // TOTAL constraint here contradicts decision #51: a rejected applicant may
@@ -690,6 +694,7 @@ model Subject {
     school        School?        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
     classSubjects ClassSubject[]
     schoolChoices SchoolSubjectChoice[]
+    questions     Question[]
 
     @@unique([schoolId, code])
     @@index([schoolId])
@@ -1050,6 +1055,94 @@ model ContentProgress {
     @@unique([contentId, studentProfileId])
     @@index([schoolId])
     @@index([studentProfileId])
+}
+
+// ---------------------------------------------------------------------------
+// Assessment - the question bank (assessment ticket 01)
+// ---------------------------------------------------------------------------
+
+enum QuestionKind {
+    /// Multiple choice, 2 to 6 options, scored as its McqScoring says.
+    MCQ
+    /// True or false.
+    TF
+    /// A short answer, marked against a list of accepted answers.
+    SHORT
+    /// Marked by hand. The answer is text, a file, or both (ticket 03).
+    ESSAY
+}
+
+/// How an MCQ is scored, the teacher's choice per question (owner, 2026-10-04).
+/// Ticket 03 computes it.
+enum McqScoring {
+    /// Exactly one option is correct.
+    SINGLE
+    /// One or more are correct; the points come only when the chosen set is exactly right.
+    ALL_OR_NOTHING
+    /// One or more are correct; (correct chosen - wrong chosen) / correct x points,
+    /// never below 0.
+    PARTIAL
+}
+
+/// A question in the School's bank, kept per Subject x Grade Level (assessment
+/// ticket 01). Only its author edits it. A teacher teaching that Subject at that
+/// Grade Level now sees it, and the Principal and Vice Principals read all of it.
+/// Archived, never deleted. An Assessment holds a copy of it (ticket 02), so no
+/// change here reaches one.
+///
+/// Two JSON columns, so the key never sits in the JSON a Student may one day be
+/// shown (owner, 2026-10-05). Both carry `v`, the version of their shape:
+/// - payload: { v, body, imageId, options: [{ id, text, imageId }] } - options
+///   for an MCQ only;
+/// - answerKey: MCQ { v, correctOptionIds }, TF { v, value }, SHORT { v, accepted },
+///   null for an ESSAY.
+/// An imageId names a QuestionImage. An option's id is minted by the server and
+/// kept by every edit that keeps the option.
+model Question {
+    id                 String       @id @default(cuid())
+    schoolId           String
+    subjectId          String
+    gradeLevel         Int
+    kind               QuestionKind
+    /// An MCQ's only.
+    mcqScoring         McqScoring?
+    payload            Json
+    answerKey          Json?
+    authorMembershipId String
+    /// The question this one is a duplicate of.
+    duplicatedFromId   String?
+    archivedAt         DateTime?
+    createdAt          DateTime     @default(now())
+    updatedAt          DateTime     @updatedAt
+
+    school         School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    subject        Subject          @relation(fields: [subjectId], references: [id])
+    author         SchoolMembership @relation(fields: [authorMembershipId], references: [id])
+    duplicatedFrom Question?        @relation("QuestionDuplicate", fields: [duplicatedFromId], references: [id], onDelete: SetNull)
+    duplicates     Question[]       @relation("QuestionDuplicate")
+
+    @@index([schoolId, subjectId, gradeLevel])
+    @@index([authorMembershipId])
+}
+
+/// An image for a question or one of its options (assessment ticket 01): JPG or
+/// PNG, typed by its bytes, at most 5 MB. Uploaded before the question is saved,
+/// which then names it by id (owner, 2026-10-05). Never deleted: a duplicate shares
+/// it, and so will an Assessment's copy. The storage key never leaves the server.
+model QuestionImage {
+    id                     String   @id @default(cuid())
+    schoolId               String
+    storageKey             String
+    mimeType               String
+    size                   Int
+    uploadedByMembershipId String
+    createdAt              DateTime @default(now())
+
+    school     School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    uploadedBy SchoolMembership @relation(fields: [uploadedByMembershipId], references: [id])
+
+    @@index([schoolId])
+    @@index([uploadedByMembershipId])
 }
 
 /// A student moved from one class to another inside the school (ticket 16). The

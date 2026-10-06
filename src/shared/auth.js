@@ -2,7 +2,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'node:crypto';
 import bcrypt from 'bcrypt';
 
-import { unauthorized, forbidden } from './errors.js';
+import { unauthorized, forbidden, notFound } from './errors.js';
 import { runInSchool } from './tenantContext.js';
 import { prisma } from './prisma.js';
 
@@ -117,14 +117,25 @@ function requireAuth(req, res, next) {
     return runInSchool(req.auth.schoolId, req.auth.schoolName, () => next());
 }
 
+const holdsAny = (auth, allowed) => allowed.some((role) => (auth.roles ?? []).includes(role));
+
 // Coarse pre-filter. Never the last word on access to a specific row.
 function requireRole(...allowed) {
     return (req, _res, next) => {
         if (!req.auth) return next(unauthorized());
-        const held = req.auth.roles ?? [];
-        if (!allowed.some((role) => held.includes(role))) {
-            return next(forbidden());
-        }
+        if (!holdsAny(req.auth, allowed)) return next(forbidden());
+        return next();
+    };
+}
+
+// The same filter for routes that do not exist for anyone else: they get the 404
+// an unknown route gets, not a 403. The question bank (assessment ticket 01) is
+// the first - a Student reaches none of it, and an upload to it is refused before
+// a byte is read. Still coarse: the service decides on the row.
+function requireRoleHidden(...allowed) {
+    return (req, _res, next) => {
+        if (!req.auth) return next(unauthorized());
+        if (!holdsAny(req.auth, allowed)) return next(notFound('Route not found'));
         return next();
     };
 }
@@ -173,5 +184,6 @@ export {
     readBearer,
     requireAuth,
     requireRole,
+    requireRoleHidden,
     requireActiveMembership,
 };
