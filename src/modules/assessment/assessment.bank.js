@@ -12,9 +12,10 @@ import { cleanText } from '../content/content.service.js';
 const log = createLogger('Assessment');
 
 // The question bank (assessment ticket 01): the questions a School's teachers
-// write, kept per Subject x Grade Level. Assessments (ticket 02) will draw on it by
-// copying a question, so nothing done here reaches an Assessment. Students never
-// reach it: the routes answer them 404 before this file runs.
+// write, kept per Subject x Grade Level. Assessments (ticket 02) draw on it by
+// copying a question (pickableQuestionsOf), so nothing done here reaches an
+// Assessment. Students never reach it: the routes answer them 404 before this file
+// runs.
 //
 // Owner's decisions (2026-10-04, and the build decisions of 2026-10-05):
 // - Who sees a question: a teacher teaching its Subject at its Grade Level now
@@ -218,15 +219,21 @@ async function assertImagesUsable(auth, imageIds, existing) {
 // Views
 // ---------------------------------------------------------------------------
 
-const questionView = (auth, row) => ({
-    id: row.id,
-    subject: row.subject,
-    gradeLevel: row.gradeLevel,
+// A question's content with its key joined in, for the staff, who all see the key:
+// a bank Question, or an Assessment's copy of one (assessment.service.js).
+const questionContentView = (row) => ({
     kind: row.kind,
     mcqScoring: row.mcqScoring,
     body: row.payload.body,
     imageId: row.payload.imageId,
     ...KINDS[row.kind].view(row.payload, row.answerKey),
+});
+
+const questionView = (auth, row) => ({
+    id: row.id,
+    subject: row.subject,
+    gradeLevel: row.gradeLevel,
+    ...questionContentView(row),
     author: {
         membershipId: row.author.id,
         fullName: row.author.user.fullName,
@@ -272,6 +279,17 @@ async function listQuestions(auth, query) {
 
 async function getQuestion(auth, id) {
     return questionView(auth, await loadVisibleQuestion(auth, await bankStandingOf(auth), id));
+}
+
+// The bank questions an Assessment may take, of those named: ones the caller sees,
+// of the Assessment's Subject and Grade Level, not archived (assessment ticket 02).
+// Their content and key, for the copy; the caller checks that every one was found.
+async function pickableQuestionsOf(auth, ids, { subjectId, gradeLevel }) {
+    const standing = await bankStandingOf(auth);
+    return prisma.question.findMany({
+        where: { AND: [visibleWhere(auth, standing), { id: { in: ids }, subjectId, gradeLevel, archivedAt: null }] },
+        select: { id: true, kind: true, mcqScoring: true, payload: true, answerKey: true },
+    });
 }
 
 const reload = async (auth, id) =>
@@ -426,6 +444,11 @@ async function readQuestionImage(auth, id, imageId) {
 export {
     MAX_IMAGE_BYTES,
     IMAGE_TYPES,
+    imageIdsOf,
+    imageFileOf,
+    questionContentView,
+    pickableQuestionsOf,
+    taughtNowOf,
     listQuestions,
     getQuestion,
     createQuestion,

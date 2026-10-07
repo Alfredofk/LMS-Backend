@@ -1,8 +1,9 @@
 import { ok } from '../../shared/errors.js';
 import * as bank from './assessment.bank.js';
+import * as service from './assessment.service.js';
 
 // Thin, like the other controllers. The question bank (ticket 01) lives in
-// assessment.bank.js; the Assessments themselves come with ticket 02.
+// assessment.bank.js; the Assessments (ticket 02) in assessment.service.js.
 
 // ---- the question bank ----
 
@@ -60,6 +61,59 @@ async function readQuestionImage(req, res) {
     return sendImage(res, await bank.readQuestionImage(req.auth, id, imageId));
 }
 
+// ---- Assessments ----
+
+async function listForClassSubject(req, res) {
+    return ok(res, { assessments: await service.listForClassSubject(req.auth, req.validated.params.id) });
+}
+
+async function listCopySources(req, res) {
+    return ok(res, { assessments: await service.listCopySources(req.auth, req.validated.params.id) });
+}
+
+async function createAssessment(req, res) {
+    const assessment = await service.create(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, { assessment }, 201);
+}
+
+async function getAssessment(req, res) {
+    return ok(res, { assessment: await service.getAssessment(req.auth, req.validated.params.id) });
+}
+
+async function updateAssessment(req, res) {
+    const assessment = await service.update(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, { assessment, message: 'Assessment saved.' });
+}
+
+async function replaceQuestions(req, res) {
+    const assessment = await service.replaceQuestions(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, { assessment, message: 'Questions saved.' });
+}
+
+async function publishAssessment(req, res) {
+    const assessment = await service.publish(req.auth, req.validated.params.id);
+    return ok(res, { assessment, message: 'Assessment published.' });
+}
+
+async function copyAssessment(req, res) {
+    return ok(res, { assessments: await service.copy(req.auth, req.validated.params.id, req.validated.body) }, 201);
+}
+
+async function cancelAssessment(req, res) {
+    const assessment = await service.cancel(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, { assessment, message: 'Assessment cancelled.' });
+}
+
+async function removeAssessment(req, res) {
+    await service.remove(req.auth, req.validated.params.id);
+    return ok(res, { message: 'Assessment deleted.' });
+}
+
+async function readAssessmentImage(req, res) {
+    const { id, imageId } = req.validated.params;
+    return sendImage(res, await service.readImage(req.auth, id, imageId));
+}
+
 export {
     listQuestions,
     getQuestion,
@@ -71,4 +125,15 @@ export {
     uploadImage,
     readOwnImage,
     readQuestionImage,
+    listForClassSubject,
+    listCopySources,
+    createAssessment,
+    getAssessment,
+    updateAssessment,
+    replaceQuestions,
+    publishAssessment,
+    copyAssessment,
+    cancelAssessment,
+    removeAssessment,
+    readAssessmentImage,
 };

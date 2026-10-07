@@ -68,8 +68,13 @@ function stampCreateData(data, schoolId) {
 }
 
 function buildClient() {
+    // An Assessment's copy of a question never carries its answer key unless the read
+    // asks for it (assessment ticket 02, owner 2026-10-05): the key must not reach a
+    // Student before release (spec invariant 3), and a read that forgets is the
+    // likely leak. The staff's reads, marking and the released key opt back in.
     const base = new PrismaClient({
         log: ['error'],
+        omit: { assessmentQuestion: { answerKey: true } },
     });
 
     return base.$extends({

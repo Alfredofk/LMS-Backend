@@ -139,7 +139,9 @@ const slotSelect = {
 };
 
 // The where of a slot's Sessions: its own ClassSubject's, and those of every other
-// ACTIVE row in the same Class, Subject and Semester, ended ones included.
+// ACTIVE row in the same Class, Subject and Semester, ended ones included. It fits
+// any row that hangs off a ClassSubject: a slot's Assessments are listed by it too
+// (assessment ticket 02).
 const slotSessionWhere = (classSubject) => ({
     classSubject: {
         classId: classSubject.classId,
@@ -333,4 +335,4 @@ async function ownProgress(auth) {
     return { class: placement.class, classSubjects };
 }
 
-export { recordClientEvents, classSubjectProgress, ownProgress };
+export { recordClientEvents, classSubjectProgress, ownProgress, slotSessionWhere };

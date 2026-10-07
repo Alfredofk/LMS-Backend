@@ -1,8 +1,9 @@
 import { z } from 'zod';
 
-// The question bank (assessment ticket 01). Only the shape is checked here, a
-// question's rules per kind included. Who may write for which Subject and Grade
-// Level, whose images may be named, and sanitising the body are the service's.
+// The question bank (assessment ticket 01) and Assessments (ticket 02). Only the
+// shape is checked here, a question's rules per kind included. Who may write for
+// which Subject and Grade Level, whose images may be named, and sanitising the body
+// are the services'.
 
 const id = z.string().min(1);
 
@@ -102,6 +103,110 @@ const questionListQuery = z.object({
 // The copy keeps the Subject. Without a gradeLevel it keeps that too.
 const duplicateBody = z.strictObject({ gradeLevel: gradeLevel.optional() }).default({});
 
+// ---- Assessments (ticket 02) ----
+
+// Whether the window fits the Semester, and opensAt comes first, is the service's:
+// an edit may move one end only.
+
+const TYPES = ['TUGAS', 'KUIS', 'UTS', 'UAS'];
+
+// An instant, with its offset: '2026-10-12T07:00:00+07:00' or '...Z'.
+const instant = z.iso.datetime({ offset: true }).transform((value) => new Date(value));
+
+const title = z.string().trim().min(1, 'Give the assessment a title').max(200, 'The title is too long');
+
+// HTML, sanitised by the service as a question's body is. Empty or null is none.
+const instructions = z.string().max(20_000, 'The instructions are too long').nullable();
+
+// An ONLINE Assessment's settings (owner, 2026-10-04; ranges 2026-10-07).
+const settings = {
+    maxAttempts: z.number().int().min(1).max(20),
+    acceptLate: z.boolean(),
+    timeLimitMinutes: z.number().int().min(1).max(600).nullable(),
+    shuffleQuestions: z.boolean(),
+    shuffleOptions: z.boolean(),
+    showKeyOnRelease: z.boolean(),
+};
+
+const common = {
+    type: z.enum(TYPES),
+    title,
+    instructions: instructions.optional(),
+    opensAt: instant,
+    closesAt: instant,
+};
+
+// An OFFLINE one has no settings, so naming one is refused rather than ignored.
+const assessmentBody = z.discriminatedUnion('mode', [
+    z.strictObject({
+        mode: z.literal('ONLINE'),
+        ...common,
+        maxAttempts: settings.maxAttempts.default(1),
+        acceptLate: settings.acceptLate.default(false),
+        timeLimitMinutes: settings.timeLimitMinutes.optional(),
+        shuffleQuestions: settings.shuffleQuestions.default(false),
+        shuffleOptions: settings.shuffleOptions.default(false),
+        showKeyOnRelease: settings.showKeyOnRelease.default(false),
+    }),
+    z.strictObject({ mode: z.literal('OFFLINE'), ...common }),
+]);
+
+// The mode never changes. Whether the type or a setting may change is the service's.
+const assessmentPatch = z
+    .strictObject({
+        type: common.type,
+        title,
+        instructions,
+        opensAt: instant,
+        closesAt: instant,
+        ...settings,
+    })
+    .partial()
+    .refine((value) => Object.keys(value).length > 0, 'Send at least one change');
+
+// The whole list, in its order: a copy the Assessment holds by its id, a bank
+// question by its questionId. Points are whole, 1 to 100 (owner, 2026-10-07).
+const points = z.number().int().min(1, 'Points are 1 to 100').max(100, 'Points are 1 to 100');
+
+const questionItem = z.union([
+    z.strictObject({ id, points: points.optional() }),
+    z.strictObject({ questionId: id, points: points.optional() }),
+]);
+
+const named = (list, key) => list.map((item) => item[key]).filter(Boolean);
+const distinct = (values) => new Set(values).size === values.length;
+
+const questionListBody = z.strictObject({
+    questions: z
+        .array(questionItem)
+        .max(200, 'At most 200 questions')
+        .refine((list) => distinct(named(list, 'id')), 'A question is named twice')
+        .refine((list) => distinct(named(list, 'questionId')), 'A bank question is named twice'),
+});
+
+// A new window, both ends or neither: with one, the copies may go to another
+// Semester (owner, 2026-10-07). Whether it fits each target's is the service's.
+const copyBody = z
+    .strictObject({
+        classSubjectIds: z
+            .array(id)
+            .min(1, 'Name at least one class subject')
+            .max(30, 'At most 30 class subjects at once')
+            .refine(distinct, 'A class subject is named twice'),
+        opensAt: instant.optional(),
+        closesAt: instant.optional(),
+    })
+    .refine((value) => (value.opensAt === undefined) === (value.closesAt === undefined), {
+        path: ['closesAt'],
+        message: 'Give a new window as both opensAt and closesAt, or neither',
+    });
+
+const cancelBody = z.strictObject({
+    reason: z.string().trim().min(1, 'Give a reason; the students see it').max(500, 'The reason is too long'),
+});
+
+const assessmentImageParams = z.object({ id, imageId: id });
+
 export {
     idParams,
     imageIdParams,
@@ -110,4 +215,10 @@ export {
     questionEdit,
     questionListQuery,
     duplicateBody,
+    assessmentBody,
+    assessmentPatch,
+    questionListBody,
+    copyBody,
+    cancelBody,
+    assessmentImageParams,
 };

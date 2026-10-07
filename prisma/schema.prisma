@@ -444,6 +444,8 @@ model School {
     contentProgress   ContentProgress[]
     questions         Question[]
     questionImages    QuestionImage[]
+    assessments       Assessment[]
+    assessmentQuestions AssessmentQuestion[]
 
     @@index([deactivatedAt])
 }
@@ -809,6 +811,7 @@ model ClassSubject {
     teacher  SchoolMembership @relation("AssignedTeacher", fields: [teacherMembershipId], references: [id])
     scheduleSlots ClassSubjectSchedule[]
     sessions      Session[]
+    assessments   Assessment[]
 
     @@index([schoolId, status])
     @@index([teacherMembershipId, status])
@@ -1120,6 +1123,7 @@ model Question {
     author         SchoolMembership @relation(fields: [authorMembershipId], references: [id])
     duplicatedFrom Question?        @relation("QuestionDuplicate", fields: [duplicatedFromId], references: [id], onDelete: SetNull)
     duplicates     Question[]       @relation("QuestionDuplicate")
+    snapshots      AssessmentQuestion[]
 
     @@index([schoolId, subjectId, gradeLevel])
     @@index([authorMembershipId])
@@ -1143,6 +1147,111 @@ model QuestionImage {
 
     @@index([schoolId])
     @@index([uploadedByMembershipId])
+}
+
+// ---------------------------------------------------------------------------
+// Assessment - Assessments and their questions (assessment ticket 02)
+// ---------------------------------------------------------------------------
+
+/// A label the grading slice weights (owner, 2026-10-04).
+enum AssessmentType {
+    TUGAS
+    KUIS
+    UTS
+    UAS
+}
+
+enum AssessmentMode {
+    /// Questions, answered in the app (ticket 03).
+    ONLINE
+    /// No questions and no Submission: the teacher enters a 0-100 mark per Student
+    /// (ticket 04) - a paper exam, an oral test, a practical.
+    OFFLINE
+}
+
+/// One Assessment on a ClassSubject (assessment ticket 02, owner 2026-10-04). Managed
+/// by the ClassSubject's Answering Teacher - the successor once it ended - and read by
+/// the Class's homeroom teacher, the Principal and the Vice Principals, who change
+/// nothing. It has its own window, inside the Semester, and is not tied to a Session.
+///
+/// A draft until publishedAt. A draft may be deleted (deletedAt); a published one
+/// never is: it is cancelled, with a reason its Students see, and nothing changes in
+/// it afterwards. The settings are an ONLINE one's; an OFFLINE one keeps their
+/// defaults and uses none of them.
+model Assessment {
+    id                String         @id @default(cuid())
+    schoolId          String
+    classSubjectId    String
+    type              AssessmentType
+    mode              AssessmentMode
+    title             String
+    /// HTML, sanitised as a question's body is.
+    instructions      String?
+    opensAt           DateTime
+    closesAt          DateTime
+    maxAttempts       Int            @default(1)
+    acceptLate        Boolean        @default(false)
+    timeLimitMinutes  Int?
+    shuffleQuestions  Boolean        @default(false)
+    shuffleOptions    Boolean        @default(false)
+    /// Whether the answer key is shown with the Score at release (ticket 04).
+    showKeyOnRelease  Boolean        @default(false)
+    publishedAt       DateTime?
+    cancelledAt       DateTime?
+    cancelReason      String?
+    cancelledByUserId String?
+    /// Drafts only.
+    deletedAt         DateTime?
+    createdByUserId   String
+    /// The Assessment this one was copied from, into another Class.
+    copiedFromId      String?
+    createdAt         DateTime       @default(now())
+    updatedAt         DateTime       @updatedAt
+
+    school       School               @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    classSubject ClassSubject         @relation(fields: [classSubjectId], references: [id], onDelete: Cascade)
+    copiedFrom   Assessment?          @relation("AssessmentCopy", fields: [copiedFromId], references: [id], onDelete: SetNull)
+    copies       Assessment[]         @relation("AssessmentCopy")
+    questions    AssessmentQuestion[]
+
+    @@index([schoolId])
+    @@index([classSubjectId])
+}
+
+/// A question as an Assessment holds it: a copy of a bank Question, made when it was
+/// put in (assessment ticket 02). No change to the bank reaches it, and nothing reads
+/// the bank at answer or marking time - that is what makes a Score reproducible.
+///
+/// The shape is the bank's (owner, 2026-10-05): kind, mcqScoring, and copies of
+/// payload and answerKey, each with its `v`. Option ids are copied as they are, and
+/// ticket 03's answers point at them. Images are shared by imageId.
+///
+/// answerKey is left out of every read by a global omit in src/shared/prisma.js;
+/// only the staff's reads, marking and the released key ask for it. Removed softly
+/// (removedAt), since a Submission's answers will point here (ticket 03).
+model AssessmentQuestion {
+    id               String       @id @default(cuid())
+    schoolId         String
+    assessmentId     String
+    order            Int
+    /// Whole points, 1 to 100 (owner, 2026-10-07).
+    points           Int
+    /// The bank question it was copied from, for history only.
+    sourceQuestionId String?
+    kind             QuestionKind
+    mcqScoring       McqScoring?
+    payload          Json
+    answerKey        Json?
+    removedAt        DateTime?
+    createdAt        DateTime     @default(now())
+    updatedAt        DateTime     @updatedAt
+
+    school         School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    assessment     Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+    sourceQuestion Question?  @relation(fields: [sourceQuestionId], references: [id], onDelete: SetNull)
+
+    @@index([assessmentId, order])
+    @@index([schoolId])
 }
 
 /// A student moved from one class to another inside the school (ticket 16). The
