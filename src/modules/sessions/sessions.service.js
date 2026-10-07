@@ -40,6 +40,8 @@ const log = createLogger('Sessions');
 
 const MINUTES_PER_HOUR = 60;
 const DAY_MS = 24 * 60 * 60 * 1000;
+// Check-in opens this long before a Session starts (owner, 2026-10-08).
+const CHECK_IN_EARLY_MS = 30 * 60 * 1000;
 
 const toMinute = (hhmm) => {
     const [hours, minutes] = hhmm.split(':').map(Number);
@@ -619,6 +621,13 @@ const calendarFields = (classSubject) => ({
     subject: classSubject.subject,
 });
 
+// When a Session's check-in opens: 30 minutes before its start (owner, 2026-10-08;
+// at the start before that, teaching-and-learning 03). It closes at the Session's
+// end, or at the teacher's confirmation if sooner. Attendance's checkIn enforces it,
+// and a student's calendar shows it as canCheckIn - one rule for both. Being late
+// still counts from the start.
+const checkInOpeningOf = (session) => new Date(session.startsAt.getTime() - CHECK_IN_EARLY_MS);
+
 // A student's Sessions over days of the school's calendar: one day, a range of up to
 // six weeks for a calendar, or today (owner, 2026-10-02).
 //
@@ -633,7 +642,8 @@ const calendarFields = (classSubject) => ({
 //   GET /api/holidays, which every member reads.
 // - Each carries the student's own attendance, and canCheckIn: whether a check-in
 //   would be taken now, by the server's clock - the window
-//   POST /api/attendance/sessions/:id/check-in enforces, current Class included.
+//   POST /api/attendance/sessions/:id/check-in enforces (checkInOpeningOf), current
+//   Class included.
 const ownAttendanceView = (row) => ({
     id: row.id,
     status: row.status,
@@ -704,7 +714,7 @@ async function listMine(auth, { date, from, to }) {
         row.classSubject.classId === current?.classId &&
         row.status === 'SCHEDULED' &&
         row.completedAt === null &&
-        now >= row.startsAt &&
+        now >= checkInOpeningOf(row) &&
         now < row.endsAt;
 
     return {
@@ -1186,6 +1196,7 @@ export {
     sessionSelect,
     loadSession,
     describeSession,
+    checkInOpeningOf,
     inheritSchedule,
     stopSessionsAhead,
     onCalendarChanged,

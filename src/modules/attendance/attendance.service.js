@@ -3,7 +3,14 @@ import { currentPlacement } from '../../shared/guards.js';
 import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { distanceMeters } from '../../shared/geo.js';
 import { createLogger } from '../../lib/helpers.js';
-import { answeringTeacherOf, staffStandingOf, sessionSelect, loadSession, describeSession } from '../sessions/sessions.service.js';
+import {
+    answeringTeacherOf,
+    staffStandingOf,
+    sessionSelect,
+    loadSession,
+    describeSession,
+    checkInOpeningOf,
+} from '../sessions/sessions.service.js';
 import { recordEvent } from '../tracking/tracking.record.js';
 
 const log = createLogger('Attendance');
@@ -12,9 +19,10 @@ const log = createLogger('Attendance');
 // or Alpa for each student.
 //
 // Owner's decisions (2026-09-27 and 2026-09-30):
-// - The student checks in; the teacher confirms. Check-in opens at the Session's
-//   start and closes at its end, or when the teacher confirms if that is sooner.
-//   After the first 30 minutes it is accepted and flagged late.
+// - The student checks in; the teacher confirms. Check-in opens 30 minutes before
+//   the Session's start (owner, 2026-10-08; at the start until then) and closes at
+//   its end, or when the teacher confirms if that is sooner (checkInOpeningOf). More
+//   than 30 minutes after the start it is accepted and flagged late.
 // - The device's location is checked against the school's point with a fixed
 //   150 m radius, accepted and flagged outsideSchool beyond it. Only the flags are
 //   stored: no coordinates, no distance, and nothing of either in a log line.
@@ -112,7 +120,7 @@ async function checkIn(auth, sessionId, { latitude, longitude }) {
     const now = new Date();
     if (session.status !== 'SCHEDULED') throw conflict(`${describeSession(session)} was cancelled`);
     if (session.completedAt) throw conflict('The teacher has already confirmed this attendance');
-    if (now < session.startsAt) throw conflict('Check-in opens when the session starts');
+    if (now < checkInOpeningOf(session)) throw conflict('Check-in opens 30 minutes before the session starts');
     if (now >= session.endsAt) throw conflict('The session has ended, so check-in is closed');
 
     // School is above tenancy, so this reads without a scope.
