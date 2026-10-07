@@ -1101,6 +1101,10 @@ enum McqScoring {
 ///   null for an ESSAY.
 /// An imageId names a QuestionImage. An option's id is minted by the server and
 /// kept by every edit that keeps the option.
+///
+/// Private until privateUntil (owner, 2026-10-07): up to that day, the school's own
+/// date, included, only its author and the leaders see it; an Assessment holding it
+/// stays closed to the other teachers who could copy it (ticket 02).
 model Question {
     id                 String       @id @default(cuid())
     schoolId           String
@@ -1115,6 +1119,8 @@ model Question {
     /// The question this one is a duplicate of.
     duplicatedFromId   String?
     archivedAt         DateTime?
+    /// A day at midnight UTC, at most a year ahead when set. NULL is never private.
+    privateUntil       DateTime?
     createdAt          DateTime     @default(now())
     updatedAt          DateTime     @updatedAt
 

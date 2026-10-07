@@ -8,6 +8,8 @@ import { getStorage } from '../../shared/storage.js';
 import { MIME } from '../../shared/upload.js';
 import { createLogger } from '../../lib/helpers.js';
 import { cleanText } from '../content/content.service.js';
+import { todayOf } from '../sessions/sessions.service.js';
+import { toDate, toDay } from '../holidays/holidays.calendar.js';
 
 const log = createLogger('Assessment');
 
@@ -36,6 +38,10 @@ const log = createLogger('Assessment');
 //   Grade Level they teach, and shares the original's images.
 // - Images, JPG or PNG up to 5 MB, are uploaded first and named by id when the
 //   question is saved (2026-10-05). Never deleted, as Content's files are not.
+// - Its author may make a question private up to a day, at most a year ahead
+//   (2026-10-07). Until then only the author and the leaders see it, so a test's
+//   questions stay with its teacher until it is over; then it opens by itself. A
+//   duplicate keeps it, or a leader who teaches could hand a private one round.
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const IMAGE_TYPES = ['jpg', 'png'];
@@ -55,6 +61,7 @@ const questionSelect = {
     authorMembershipId: true,
     duplicatedFromId: true,
     archivedAt: true,
+    privateUntil: true,
     createdAt: true,
     updatedAt: true,
     subject: { select: { id: true, code: true, name: true } },
@@ -87,19 +94,50 @@ async function taughtNowOf(membershipId) {
     return [...pairs.values()];
 }
 
-// What the caller is to the bank: a reader (the Principal or a Vice Principal), and
-// the pairs they teach now. A leader who teaches has both.
+// What the caller is to the bank: a reader (the Principal or a Vice Principal), the
+// pairs they teach now, and the school's date today, which privacy is read against.
+// A leader who teaches has both.
 async function bankStandingOf(auth) {
-    const [reader, pairs] = await Promise.all([isPrincipalOrVice(auth.membershipId), taughtNowOf(auth.membershipId)]);
-    return { reader, pairs };
+    const [reader, pairs, today] = await Promise.all([
+        isPrincipalOrVice(auth.membershipId),
+        taughtNowOf(auth.membershipId),
+        todayOf(auth.schoolId),
+    ]);
+    return { reader, pairs, today };
 }
 
-// The questions a caller sees, as a where. A reader sees all of them. A teacher
-// sees their own, archived ones included, and the live ones of a pair they teach.
+// A question is private on every day up to its privateUntil, included (owner,
+// 2026-10-07). today is the school's date, YYYY-MM-DD. Written as an OR with null,
+// not a NOT: NOT on a NULL column would leave out every question never private.
+const notPrivateWhere = (today) => ({ OR: [{ privateUntil: null }, { privateUntil: { lt: toDate(today) } }] });
+
+// The questions still private to someone other than this member, as a where.
+// Assessments read it: one holding such a question stays closed to that member as a
+// copier (ticket 02).
+const privateFromWhere = (membershipId, today) => ({
+    privateUntil: { gte: toDate(today) },
+    authorMembershipId: { not: membershipId },
+});
+
+// The questions a caller sees, as a where. A reader sees all of them, private ones
+// included (owner, 2026-10-07). A teacher sees their own, archived and private ones
+// included, and the live ones of a pair they teach that are not private.
 function visibleWhere(auth, standing) {
     if (standing.reader) return {};
-    const taughtLive = standing.pairs.length ? [{ archivedAt: null, OR: standing.pairs }] : [];
+    const taughtLive = standing.pairs.length
+        ? [{ archivedAt: null, AND: [{ OR: standing.pairs }, notPrivateWhere(standing.today)] }]
+        : [];
     return { OR: [{ authorMembershipId: auth.membershipId }, ...taughtLive] };
+}
+
+// A day to be private until: not one already past, and at most a year from today
+// (owner, 2026-10-07). YYYY-MM-DD compares as text. A year from 29 February is
+// 1 March.
+function assertPrivateUntil(today, day) {
+    if (day < today) throw badRequest('privateUntil cannot be a day already past');
+    const [year, month, date] = today.split('-').map(Number);
+    const limit = toDay(new Date(Date.UTC(year + 1, month - 1, date)));
+    if (day > limit) throw badRequest(`A question is private for at most a year: until ${limit}`);
 }
 
 // A question the caller sees, or the 404 a question of another school gets.
@@ -243,6 +281,8 @@ const questionView = (auth, row) => ({
     canEdit: row.authorMembershipId === auth.membershipId,
     archived: row.archivedAt !== null,
     archivedAt: row.archivedAt,
+    // A day, YYYY-MM-DD, as it was sent; a past one no longer hides it.
+    privateUntil: row.privateUntil ? toDay(row.privateUntil) : null,
     duplicatedFromId: row.duplicatedFromId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -300,7 +340,9 @@ const reload = async (auth, id) =>
 // ---------------------------------------------------------------------------
 
 async function createQuestion(auth, body) {
-    assertTeaches(await bankStandingOf(auth), body.subjectId, body.gradeLevel);
+    const standing = await bankStandingOf(auth);
+    assertTeaches(standing, body.subjectId, body.gradeLevel);
+    if (body.privateUntil) assertPrivateUntil(standing.today, body.privateUntil);
     const { payload, answerKey } = await payloadAndKeyOf(auth, body);
 
     const row = await prisma.question.create({
@@ -312,11 +354,24 @@ async function createQuestion(auth, body) {
             payload,
             answerKey,
             authorMembershipId: auth.membershipId,
+            privateUntil: body.privateUntil ? toDate(body.privateUntil) : null,
         },
         select: questionSelect,
     });
-    log.info(`${describe(row)} written`);
+    log.info(`${describe(row)} written${row.privateUntil ? `, private until ${toDay(row.privateUntil)}` : ''}`);
     return questionView(auth, row);
+}
+
+// What an edit writes to privateUntil: left out keeps it, null opens it, a day sets
+// it. The day it already has passes as it is, past or not, so a form that sends the
+// question back whole is not refused for a privacy that has run out.
+async function privacyChangeOf(auth, row, privateUntil) {
+    if (privateUntil === undefined) return {};
+    if (privateUntil === null) return { privateUntil: null };
+    if (row.privateUntil === null || privateUntil !== toDay(row.privateUntil)) {
+        assertPrivateUntil(await todayOf(auth.schoolId), privateUntil);
+    }
+    return { privateUntil: toDate(privateUntil) };
 }
 
 // The whole content again, of the kind the question has: its Subject and Grade
@@ -325,11 +380,12 @@ async function createQuestion(auth, body) {
 async function updateQuestion(auth, id, body) {
     const row = await loadOwnQuestion(auth, id);
     if (body.kind !== row.kind) throw badRequest(`A question's kind never changes: this one is ${row.kind}`);
+    const privacy = await privacyChangeOf(auth, row, body.privateUntil);
     const { payload, answerKey } = await payloadAndKeyOf(auth, body, row);
 
     const claimed = await prisma.question.updateMany({
         where: { id: row.id, authorMembershipId: auth.membershipId, updatedAt: row.updatedAt },
-        data: { mcqScoring: body.kind === 'MCQ' ? body.mcqScoring : null, payload, answerKey },
+        data: { mcqScoring: body.kind === 'MCQ' ? body.mcqScoring : null, payload, answerKey, ...privacy },
     });
     if (claimed.count === 0) throw conflict('This question was changed meanwhile. Reload it and edit again');
     log.info(`${describe(row)} edited`);
@@ -338,7 +394,8 @@ async function updateQuestion(auth, id, body) {
 
 // A copy owned by the caller, of a question they see, into a Grade Level of the
 // same Subject they teach now - its own, unless another is named. The images are
-// shared, not copied: files are never deleted, so sharing is safe.
+// shared, not copied: files are never deleted, so sharing is safe. It stays private
+// as long as the original (2026-10-07): a leader who teaches sees a private one.
 async function duplicateQuestion(auth, id, { gradeLevel }) {
     const standing = await bankStandingOf(auth);
     const source = await loadVisibleQuestion(auth, standing, id);
@@ -355,6 +412,7 @@ async function duplicateQuestion(auth, id, { gradeLevel }) {
             answerKey: source.answerKey ?? Prisma.DbNull,
             authorMembershipId: auth.membershipId,
             duplicatedFromId: source.id,
+            privateUntil: source.privateUntil,
         },
         select: questionSelect,
     });
@@ -449,6 +507,7 @@ export {
     questionContentView,
     pickableQuestionsOf,
     taughtNowOf,
+    privateFromWhere,
     listQuestions,
     getQuestion,
     createQuestion,

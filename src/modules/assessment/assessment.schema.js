@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { date } from '../holidays/holidays.schema.js';
+
 // The question bank (assessment ticket 01) and Assessments (ticket 02). Only the
 // shape is checked here, a question's rules per kind included. Who may write for
 // which Subject and Grade Level, whose images may be named, and sanitising the body
@@ -52,9 +54,15 @@ const accepted = z
     .min(1, 'Give at least one accepted answer')
     .max(20, 'At most 20 accepted answers');
 
+// Private to its author and the leaders up to this day, 'YYYY-MM-DD', included;
+// null is not private (owner, 2026-10-07). On an edit, left out keeps what it was.
+// Whether the day lies within a year from today is the service's: today is the
+// school's own date.
+const privateUntil = date.nullable().optional();
+
 // The four kinds, each with what it holds and nothing else. `extra` is what a
 // new question names besides: its Subject and Grade Level, which an edit never
-// changes.
+// changes, and whether it is private, which both name.
 const questionUnion = (extra) =>
     z.discriminatedUnion('kind', [
         z
@@ -79,12 +87,12 @@ const questionUnion = (extra) =>
         z.strictObject({ kind: z.literal('ESSAY'), ...extra, body, imageId: id.optional() }),
     ]);
 
-const questionBody = questionUnion({ subjectId: id, gradeLevel });
+const questionBody = questionUnion({ subjectId: id, gradeLevel, privateUntil });
 
 // An edit sends the question's whole content again. Its kind is named so the shape
 // can be checked, and must be the one it has; Subject and Grade Level are refused -
 // duplicating is the way to another level.
-const questionEdit = questionUnion({});
+const questionEdit = questionUnion({ privateUntil });
 
 const flag = z
     .enum(['true', 'false'])

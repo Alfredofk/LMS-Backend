@@ -64,6 +64,7 @@ const jointLeaveBody = z.strictObject({ observesJointLeave: z.boolean() });
 const jointLeaveDayBody = z.strictObject({ observed: z.boolean().nullable() });
 
 export {
+    date,
     idParams,
     yearQuery,
     fetchBody,

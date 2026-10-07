@@ -13,6 +13,7 @@ import {
     questionContentView,
     pickableQuestionsOf,
     taughtNowOf,
+    privateFromWhere,
 } from './assessment.bank.js';
 
 const log = createLogger('Assessment');
@@ -51,7 +52,9 @@ const log = createLogger('Assessment');
 // - An Assessment whose Semester is over follows the bank's rule for who sees a
 //   question (2026-10-07): a teacher of its Subject at its Grade Level now reads it
 //   and may copy it, whoever made it - a departed teacher's quizzes included. While
-//   its Semester runs it stays its staff's, so no colleague reads a test ahead.
+//   its Semester runs it stays its staff's, so no colleague reads a test ahead. One
+//   still holding a question private to someone else stays closed to them whole, as
+//   if its Semester still ran, until that privacy ends (2026-10-07).
 // - The staff's view says of each question whether the bank's has changed, or been
 //   archived, since it was copied (2026-10-07): a copy of last year's quiz carries
 //   last year's wording and key, and its teacher swaps the bank's in through the list.
@@ -161,20 +164,28 @@ function assertTeacherStanding(standing, missing) {
 // The bank's rule for who sees a question, held by an Assessment whose Semester is
 // over (owner, 2026-10-07): a teacher of its Subject at its Grade Level now. Such a
 // teacher reads it and may copy it, whoever made it, and changes nothing in it.
-async function isCopyableBy(auth, classSubject) {
-    if (toDay(classSubject.semester.endDate) >= (await todayOf(auth.schoolId))) return false;
+// While it holds a question still private to someone else, it stays closed to them
+// whole (owner, 2026-10-07): no quiz with holes, and the bank's privacy holds here too.
+async function isCopyableBy(auth, row) {
+    const { classSubject } = row;
+    const today = await todayOf(auth.schoolId);
+    if (toDay(classSubject.semester.endDate) >= today) return false;
     const pairs = await taughtNowOf(auth.membershipId);
-    return pairs.some(
+    const teaches = pairs.some(
         (pair) => pair.subjectId === classSubject.subjectId && pair.gradeLevel === classSubject.class.gradeLevel
     );
+    if (!teaches) return false;
+    const privateHeld = await prisma.assessmentQuestion.count({
+        where: { assessmentId: row.id, ...LIVE, sourceQuestion: privateFromWhere(auth.membershipId, today) },
+    });
+    return privateHeld === 0;
 }
 
 // Its staff read it, and so does a teacher who may copy it ('copier').
 async function loadReadable(auth, id) {
     const row = await loadAssessment(id);
     const standing =
-        (await staffStandingOf(auth, row.classSubject)) ??
-        ((await isCopyableBy(auth, row.classSubject)) ? 'copier' : null);
+        (await staffStandingOf(auth, row.classSubject)) ?? ((await isCopyableBy(auth, row)) ? 'copier' : null);
     if (!standing) throw notFound('Assessment not found');
     return { row, standing };
 }
@@ -191,7 +202,7 @@ async function loadManaged(auth, id) {
 async function loadCopySource(auth, id) {
     const row = await loadAssessment(id);
     const standing = await staffStandingOf(auth, row.classSubject);
-    if (standing !== 'teacher' && !(await isCopyableBy(auth, row.classSubject))) {
+    if (standing !== 'teacher' && !(await isCopyableBy(auth, row))) {
         assertTeacherStanding(standing, 'Assessment not found');
     }
     return row;
@@ -350,7 +361,8 @@ const sameSlot = (a, b) => a.classId === b.classId && a.subjectId === b.subjectI
 // What its teacher may copy into a ClassSubject (2026-10-07), of its Subject at its
 // Grade Level: every Assessment they manage, in any Semester - a slot holding a live
 // ClassSubject of theirs, as answeringTeacherOf decides - and every one of a Semester
-// that is over, whoever made it (isCopyableBy: the target is a pair they teach now).
+// that is over, whoever made it (isCopyableBy: the target is a pair they teach now),
+// unless it holds a question still private to someone else.
 // Not its own slot's, which its list holds; cancelled ones with their status, deleted
 // ones not. The latest Semester first. Only where a new Assessment may go.
 async function listCopySources(auth, classSubjectId) {
@@ -372,7 +384,10 @@ async function listCopySources(auth, classSubjectId) {
             classSubject: pair,
             OR: [
                 ...managed.map(slotSessionWhere),
-                { classSubject: { semester: { endDate: { lt: toDate(today) } } } },
+                {
+                    classSubject: { semester: { endDate: { lt: toDate(today) } } },
+                    questions: { none: { ...LIVE, sourceQuestion: privateFromWhere(auth.membershipId, today) } },
+                },
             ],
         },
         select: assessmentSelect,
