@@ -1,9 +1,11 @@
 import { ok } from '../../shared/errors.js';
 import * as bank from './assessment.bank.js';
 import * as service from './assessment.service.js';
+import * as answering from './assessment.submission.js';
 
 // Thin, like the other controllers. The question bank (ticket 01) lives in
-// assessment.bank.js; the Assessments (ticket 02) in assessment.service.js.
+// assessment.bank.js; the Assessments (ticket 02) in assessment.service.js; a
+// Student's Submissions (ticket 03) in assessment.submission.js.
 
 // ---- the question bank ----
 
@@ -90,6 +92,12 @@ async function replaceQuestions(req, res) {
     return ok(res, { assessment, message: 'Questions saved.' });
 }
 
+async function editQuestion(req, res) {
+    const { id, questionId } = req.validated.params;
+    const assessment = await service.editQuestion(req.auth, id, questionId, req.validated.body);
+    return ok(res, { assessment, message: 'Question saved.' });
+}
+
 async function publishAssessment(req, res) {
     const assessment = await service.publish(req.auth, req.validated.params.id);
     return ok(res, { assessment, message: 'Assessment published.' });
@@ -114,6 +122,54 @@ async function readAssessmentImage(req, res) {
     return sendImage(res, await service.readImage(req.auth, id, imageId));
 }
 
+// ---- answering (ticket 03) ----
+
+// The outline, the questions with what was saved, and a hand-in each come back as
+// the service shaped them.
+async function getOutline(req, res) {
+    return ok(res, await answering.outlineForStudent(req.auth, req.validated.params.id));
+}
+
+async function startSubmission(req, res) {
+    return ok(res, await answering.start(req.auth, req.validated.params.id), 201);
+}
+
+async function getSubmission(req, res) {
+    return ok(res, await answering.submissionForStudent(req.auth, req.validated.params.id));
+}
+
+async function saveAnswer(req, res) {
+    const { id, questionId } = req.validated.params;
+    return ok(res, { answer: await answering.saveAnswer(req.auth, id, questionId, req.validated.body) });
+}
+
+async function saveEssayFile(req, res) {
+    const { id, questionId } = req.validated.params;
+    return ok(res, { answer: await answering.saveEssayFile(req.auth, id, questionId, req.file) });
+}
+
+// The file itself, outside the envelope, as a Content file is: PDF and images open
+// in the browser, DOCX and PPTX download under the name they were sent with.
+async function readEssayFile(req, res) {
+    const { id, questionId } = req.validated.params;
+    const { buffer, contentType, fileName, inline } = await answering.readEssayFile(req.auth, id, questionId);
+    res.set({
+        'Content-Type': contentType,
+        'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+        'Cache-Control': 'private, no-store',
+    });
+    return res.send(buffer);
+}
+
+async function readSubmissionImage(req, res) {
+    const { id, imageId } = req.validated.params;
+    return sendImage(res, await answering.readImage(req.auth, id, imageId));
+}
+
+async function handIn(req, res) {
+    return ok(res, await answering.handIn(req.auth, req.validated.params.id));
+}
+
 export {
     listQuestions,
     getQuestion,
@@ -131,9 +187,18 @@ export {
     getAssessment,
     updateAssessment,
     replaceQuestions,
+    editQuestion,
     publishAssessment,
     copyAssessment,
     cancelAssessment,
     removeAssessment,
     readAssessmentImage,
+    getOutline,
+    startSubmission,
+    getSubmission,
+    saveAnswer,
+    saveEssayFile,
+    readEssayFile,
+    readSubmissionImage,
+    handIn,
 };

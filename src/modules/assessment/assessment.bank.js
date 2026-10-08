@@ -504,6 +504,7 @@ export {
     IMAGE_TYPES,
     imageIdsOf,
     imageFileOf,
+    payloadAndKeyOf,
     questionContentView,
     pickableQuestionsOf,
     taughtNowOf,

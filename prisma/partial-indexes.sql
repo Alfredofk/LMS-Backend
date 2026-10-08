@@ -68,3 +68,10 @@ CREATE UNIQUE INDEX "TeacherProfile_live_nip_per_school"
 CREATE UNIQUE INDEX "TeacherProfile_live_nuptk_per_school"
     ON "TeacherProfile" ("schoolId", "nuptk")
     WHERE "endedAt" IS NULL;
+
+-- One Submission in progress per Student and Assessment (assessment ticket 03). A
+-- handed-in or void one must repeat: max attempts allows several, and a void one is
+-- kept beside the next - added in 20261007183237_add_submissions.
+CREATE UNIQUE INDEX "Submission_one_in_progress_per_student"
+    ON "Submission" ("assessmentId", "studentProfileId")
+    WHERE "submittedAt" IS NULL AND "voidedAt" IS NULL;

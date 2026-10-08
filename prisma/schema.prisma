@@ -446,6 +446,9 @@ model School {
     questionImages    QuestionImage[]
     assessments       Assessment[]
     assessmentQuestions AssessmentQuestion[]
+    submissions       Submission[]
+    submissionAnswers SubmissionAnswer[]
+    submissionAnswerOptions SubmissionAnswerOption[]
 
     @@index([deactivatedAt])
 }
@@ -551,6 +554,7 @@ model StudentProfile {
     guardianLinks    GuardianStudent[]
     attendances      Attendance[]
     contentProgress  ContentProgress[]
+    submissions      Submission[]
 
     @@index([schoolId])
 }
@@ -1219,6 +1223,7 @@ model Assessment {
     copiedFrom   Assessment?          @relation("AssessmentCopy", fields: [copiedFromId], references: [id], onDelete: SetNull)
     copies       Assessment[]         @relation("AssessmentCopy")
     questions    AssessmentQuestion[]
+    submissions  Submission[]
 
     @@index([schoolId])
     @@index([classSubjectId])
@@ -1255,8 +1260,119 @@ model AssessmentQuestion {
     school         School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
     assessment     Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
     sourceQuestion Question?  @relation(fields: [sourceQuestionId], references: [id], onDelete: SetNull)
+    answers        SubmissionAnswer[]
+    chosenOptions  SubmissionAnswerOption[]
 
     @@index([assessmentId, order])
+    @@index([schoolId])
+}
+
+// ---------------------------------------------------------------------------
+// Assessment - Submissions (assessment ticket 03)
+// ---------------------------------------------------------------------------
+
+/// How a Submission closed (assessment ticket 03).
+enum SubmissionClose {
+    /// The Student handed it in.
+    STUDENT
+    /// Its deadline passed. Closed the first time anything touched it after that,
+    /// with the deadline as its submittedAt (owner, 2026-10-08).
+    TIME
+}
+
+/// One Student's attempt at an ONLINE Assessment (assessment ticket 03): started,
+/// answered question by question, then closed - handed in, or by time. Never
+/// deleted: a change to a question under it voids it (voidedAt, voidReason), and a
+/// void one does not count toward maxAttempts.
+///
+/// At most one in progress - submittedAt and voidedAt both null - per Student and
+/// Assessment: a partial unique index in migration SQL.
+///
+/// shownOrder is what the Student was shown, drawn once at the start (owner,
+/// 2026-10-08): { v, questions: [AssessmentQuestion id], options: { [AssessmentQuestion
+/// id]: [option id] } }. Shuffled when the Assessment says so, and kept either way, so
+/// neither a reload nor the teacher reordering the list moves anything.
+model Submission {
+    id               String           @id @default(cuid())
+    schoolId         String
+    assessmentId     String
+    studentProfileId String
+    /// 1, 2, ... per Student and Assessment, void ones included.
+    attempt          Int
+    startedAt        DateTime
+    /// The time limit after startedAt, capped by the hard end - closesAt, or the
+    /// Semester's end with acceptLate; the hard end alone with no time limit.
+    deadlineAt       DateTime
+    submittedAt      DateTime?
+    closedBy         SubmissionClose?
+    /// Closed after the Assessment's closesAt, which acceptLate allows.
+    late             Boolean          @default(false)
+    voidedAt         DateTime?
+    voidReason       String?
+    shownOrder       Json
+    createdAt        DateTime         @default(now())
+    updatedAt        DateTime         @updatedAt
+
+    school         School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    assessment     Assessment         @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+    studentProfile StudentProfile     @relation(fields: [studentProfileId], references: [id], onDelete: Cascade)
+    answers        SubmissionAnswer[]
+
+    @@unique([assessmentId, studentProfileId, attempt])
+    @@index([schoolId])
+    @@index([studentProfileId])
+}
+
+/// A Submission's answer to one question (assessment ticket 03), saved as the Student
+/// goes. An MCQ's chosen options are rows (SubmissionAnswerOption); a TF's is value; a
+/// SHORT's is text; an ESSAY's is plain text - at most 20,000 characters, owner
+/// 2026-10-08 - a file, or both. The file's storage key never leaves the server.
+///
+/// autoPoints is the automatic mark, a draft until release (ticket 04): written when
+/// the Submission closes, and again when the key or the points change. Null for an
+/// ESSAY, which the teacher marks.
+model SubmissionAnswer {
+    id                   String    @id @default(cuid())
+    schoolId             String
+    submissionId         String
+    assessmentQuestionId String
+    value                Boolean?
+    text                 String?
+    fileStorageKey       String?
+    fileName             String?
+    fileMimeType         String?
+    fileSize             Int?
+    autoPoints           Decimal?  @db.Decimal(7, 4)
+    savedAt              DateTime
+    createdAt            DateTime  @default(now())
+    updatedAt            DateTime  @updatedAt
+
+    school             School                   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    submission         Submission               @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+    assessmentQuestion AssessmentQuestion       @relation(fields: [assessmentQuestionId], references: [id], onDelete: Cascade)
+    chosenOptions      SubmissionAnswerOption[]
+
+    @@unique([submissionId, assessmentQuestionId])
+    @@index([schoolId])
+    @@index([assessmentQuestionId])
+}
+
+/// An option chosen in an MCQ answer, a row each (owner, 2026-10-05), so which is
+/// chosen most stays one Prisma groupBy. optionId is the Assessment's copy's option,
+/// never the bank's.
+model SubmissionAnswerOption {
+    id                   String @id @default(cuid())
+    schoolId             String
+    answerId             String
+    assessmentQuestionId String
+    optionId             String
+
+    school             School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    answer             SubmissionAnswer   @relation(fields: [answerId], references: [id], onDelete: Cascade)
+    assessmentQuestion AssessmentQuestion @relation(fields: [assessmentQuestionId], references: [id], onDelete: Cascade)
+
+    @@unique([answerId, optionId])
+    @@index([assessmentQuestionId, optionId])
     @@index([schoolId])
 }
 

@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { requireAuth, requireActiveMembership, requireRoleHidden } from '../../shared/auth.js';
 import { validate } from '../../shared/validate.js';
 import { singleFile } from '../../shared/upload.js';
+import { MAX_FILE_BYTES, FILE_TYPES } from '../content/content.service.js';
 import * as controller from './assessment.controller.js';
 import { MAX_IMAGE_BYTES, IMAGE_TYPES } from './assessment.bank.js';
 import {
@@ -16,12 +17,15 @@ import {
     assessmentBody,
     assessmentPatch,
     questionListBody,
+    questionCopyEdit,
+    questionParams,
     copyBody,
     cancelBody,
     assessmentImageParams,
+    answerBody,
 } from './assessment.schema.js';
 
-// Mounted at /api/assessments (assessment tickets 01 and 02).
+// Mounted at /api/assessments (assessment tickets 01, 02 and 03).
 //
 // The question bank: teachers write questions per Subject x Grade Level, for what
 // they teach now, and read the ones of what they teach now along with their own.
@@ -37,15 +41,25 @@ import {
 // read and copied by whoever teaches its Subject at its Grade Level now; a
 // ClassSubject's copy-sources lists what its teacher may copy in (2026-10-07).
 //
-// staff is the coarse filter on every route, and it answers 404, not 403: a
-// Student or a Guardian reaches none of these, the upload included. The services
-// decide, from the database, which questions and Assessments the caller sees and
-// may change. Students answer Assessments through routes of their own (ticket 03).
+// A copy in an Assessment is edited in place by its teacher; with Submissions, the
+// change voids them or marks them again (ticket 03).
+//
+// Answering (ticket 03): a Student of the Class reads an Assessment's outline -
+// never its questions - starts an attempt, saves answers one by one (an ESSAY's file
+// too), and hands it in. The questions come inside the attempt, without their key.
+//
+// staff is the coarse filter on the staff's routes, and student on the Student's;
+// each answers 404, not 403, to everyone else - a Guardian reaches none of these,
+// the uploads included. The services decide, from the database, which questions,
+// Assessments and Submissions the caller sees and may change.
 
 const router = Router();
 
 const staff = requireRoleHidden('TEACHER', 'PRINCIPAL', 'VICE_PRINCIPAL');
+const student = requireRoleHidden('STUDENT');
 const imageUpload = singleFile('image', { maxBytes: MAX_IMAGE_BYTES, types: IMAGE_TYPES });
+// An ESSAY's file follows Content's rules: PDF, JPG, PNG, DOCX or PPTX, 10 MB, no macros.
+const essayUpload = singleFile('file', { maxBytes: MAX_FILE_BYTES, types: FILE_TYPES });
 
 router.use(requireAuth, requireActiveMembership);
 
@@ -77,6 +91,40 @@ router.post(
 router.post('/questions/:id/archive', staff, validate({ params: idParams }), controller.archiveQuestion);
 router.post('/questions/:id/restore', staff, validate({ params: idParams }), controller.restoreQuestion);
 
+// ---- answering (ticket 03) ----
+
+// Before the staff's /:id routes, so /submissions is never read as an Assessment's id.
+router.get('/submissions/:id', student, validate({ params: idParams }), controller.getSubmission);
+router.put(
+    '/submissions/:id/answers/:questionId',
+    student,
+    validate({ params: questionParams, body: answerBody }),
+    controller.saveAnswer
+);
+// The upload sits after the role check, as the bank's image upload does.
+router.post(
+    '/submissions/:id/answers/:questionId/file',
+    student,
+    validate({ params: questionParams }),
+    essayUpload,
+    controller.saveEssayFile
+);
+router.get(
+    '/submissions/:id/answers/:questionId/file',
+    student,
+    validate({ params: questionParams }),
+    controller.readEssayFile
+);
+router.get(
+    '/submissions/:id/images/:imageId',
+    student,
+    validate({ params: assessmentImageParams }),
+    controller.readSubmissionImage
+);
+router.post('/submissions/:id/submit', student, validate({ params: idParams }), controller.handIn);
+router.get('/:id/mine', student, validate({ params: idParams }), controller.getOutline);
+router.post('/:id/submissions', student, validate({ params: idParams }), controller.startSubmission);
+
 // ---- Assessments ----
 
 // After the bank's routes, so /questions is never read as an Assessment's id.
@@ -101,6 +149,12 @@ router.put(
     staff,
     validate({ params: idParams, body: questionListBody }),
     controller.replaceQuestions
+);
+router.put(
+    '/:id/questions/:questionId',
+    staff,
+    validate({ params: questionParams, body: questionCopyEdit }),
+    controller.editQuestion
 );
 router.post('/:id/publish', staff, validate({ params: idParams }), controller.publishAssessment);
 router.post('/:id/copies', staff, validate({ params: idParams, body: copyBody }), controller.copyAssessment);

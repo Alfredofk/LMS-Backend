@@ -2,10 +2,10 @@ import { z } from 'zod';
 
 import { date } from '../holidays/holidays.schema.js';
 
-// The question bank (assessment ticket 01) and Assessments (ticket 02). Only the
-// shape is checked here, a question's rules per kind included. Who may write for
-// which Subject and Grade Level, whose images may be named, and sanitising the body
-// are the services'.
+// The question bank (assessment ticket 01), Assessments (ticket 02) and answering
+// them (ticket 03). Only the shape is checked here, a question's rules per kind
+// included. Who may write for which Subject and Grade Level, whose images may be
+// named, sanitising the body, and which answer a question takes are the services'.
 
 const id = z.string().min(1);
 
@@ -184,13 +184,36 @@ const questionItem = z.union([
 const named = (list, key) => list.map((item) => item[key]).filter(Boolean);
 const distinct = (values) => new Set(values).size === values.length;
 
+// closesAt moves in the same request when the change voids Submissions and the
+// window has closed, so their Students can answer again (ticket 03).
 const questionListBody = z.strictObject({
     questions: z
         .array(questionItem)
         .max(200, 'At most 200 questions')
         .refine((list) => distinct(named(list, 'id')), 'A question is named twice')
         .refine((list) => distinct(named(list, 'questionId')), 'A bank question is named twice'),
+    closesAt: instant.optional(),
 });
+
+// One copy edited in place (ticket 03, owner 2026-10-08): the bank's shape, of the
+// kind the copy has, with its points and, as above, a closesAt.
+const questionCopyEdit = questionUnion({ points: points.optional(), closesAt: instant.optional() });
+
+const questionParams = z.object({ id, questionId: id });
+
+// ---- answering (ticket 03) ----
+
+// One question's answer: an MCQ's chosen option ids, a TF's value, a SHORT's or an
+// ESSAY's text; null or [] clears it. Which of the three a question takes, and a
+// SHORT's shorter limit, are the service's: only it knows the kind.
+const answerBody = z
+    .strictObject({
+        optionIds: z.array(id).max(6, 'An MCQ has at most 6 options').refine(distinct, 'An option is chosen twice'),
+        value: z.boolean().nullable(),
+        text: z.string().max(20_000, 'An answer is at most 20,000 characters').nullable(),
+    })
+    .partial()
+    .refine((value) => Object.keys(value).length === 1, 'Send one answer: optionIds, value or text');
 
 // A new window, both ends or neither: with one, the copies may go to another
 // Semester (owner, 2026-10-07). Whether it fits each target's is the service's.
@@ -226,7 +249,10 @@ export {
     assessmentBody,
     assessmentPatch,
     questionListBody,
+    questionCopyEdit,
+    questionParams,
     copyBody,
     cancelBody,
     assessmentImageParams,
+    answerBody,
 };

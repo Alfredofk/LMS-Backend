@@ -10,17 +10,25 @@ import { toDate, toDay } from '../holidays/holidays.calendar.js';
 import {
     imageIdsOf,
     imageFileOf,
+    payloadAndKeyOf,
     questionContentView,
     pickableQuestionsOf,
     taughtNowOf,
     privateFromWhere,
 } from './assessment.bank.js';
+import {
+    voidSubmissions,
+    remarkQuestions,
+    liveSubmissionCountOf,
+    submissionCountOf,
+} from './assessment.submission.js';
 
 const log = createLogger('Assessment');
 
 // Assessments (assessment ticket 02): one graded exercise on a ClassSubject - its
 // type, its mode, its window and settings, and its questions as copies taken from
-// the bank. Submissions, marking and Scores come with tickets 03 and 04.
+// the bank. Its Submissions are assessment.submission.js's (ticket 03); marking by
+// hand and Scores come with ticket 04.
 //
 // Owner's decisions (2026-10-04, and the build decisions of 2026-10-07):
 // - On the ClassSubject, with its own window inside the Semester; not tied to a
@@ -42,9 +50,16 @@ const log = createLogger('Assessment');
 //   never deleted - it is cancelled, with a reason its Students see, and nothing in
 //   it changes afterwards.
 // - After publishing a setting changes freely and never voids (answered question 6);
-//   closesAt moves either way but never to before now, and the type is fixed. The
-//   question list still changes until release (2026-10-07): no Submission exists
-//   yet, and ticket 03 adds the re-grading and voiding where it changes.
+//   closesAt moves either way but never to before now, opensAt only while no
+//   Submission exists (ticket 03), and the type is fixed.
+// - The questions still change until release (2026-10-07), and with Submissions not
+//   void (ticket 03, spec "Changes after publishing"): a change to what a Student is
+//   shown - a question added or removed, its text, an option, an image, its scoring -
+//   voids them all, saved only while closesAt is ahead or moved ahead in the same
+//   request, so everyone can answer again; a change to a key or to points alone
+//   re-marks them, and nobody answers again. A copy is edited in place, the bank
+//   untouched (editQuestion, owner 2026-10-08). An option or an accepted answer only
+//   moved does neither (2026-10-09).
 // - One action copies an Assessment into several of the teacher's own live
 //   ClassSubjects of the same Subject, Grade Level and Semester; each copy is a
 //   draft that then stands alone. All of them, or none. Given a new window, the
@@ -292,15 +307,35 @@ const assessmentView = (row, standing) => ({
     updatedAt: row.updatedAt,
 });
 
-const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// jsonb keeps keys in an order of its own, so a payload just built and one read back
+// compare with their keys sorted, at every level.
+const canonical = (value) => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value === null || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+};
+const sameContent = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+
+// A copy's payload or key as a change to it is judged (owner, 2026-10-09): its
+// options, correct options and accepted answers in any order. Each Submission keeps
+// the order it was shown and names an option by its id, so an option or an accepted
+// answer moved voids nothing and re-marks nothing; new attempts take the new order.
+const byId = (a, b) => a.id.localeCompare(b.id);
+const unorderedOf = (value) =>
+    value && {
+        ...value,
+        ...(value.options ? { options: [...value.options].sort(byId) } : {}),
+        ...(value.correctOptionIds ? { correctOptionIds: [...value.correctOptionIds].sort() } : {}),
+        ...(value.accepted ? { accepted: [...value.accepted].sort() } : {}),
+    };
+const sameInAnyOrder = (a, b) => sameContent(unorderedOf(a), unorderedOf(b));
 
 // How the bank's question stands against this copy now, or null with none. Compared
-// by content, not by time: archiving moves a question's updatedAt too. Both columns
-// are jsonb, which keeps keys in one order, so the strings compare.
+// by content, not by time: archiving moves a question's updatedAt too.
 const bankStateOf = (copy, source) =>
     source
         ? {
-            changed: !sameJson(copy.payload, source.payload) || !sameJson(copy.answerKey, source.answerKey),
+            changed: !sameContent(copy.payload, source.payload) || !sameContent(copy.answerKey, source.answerKey),
             archived: source.archivedAt !== null,
         }
         : null;
@@ -407,7 +442,8 @@ async function getAssessment(auth, id) {
 }
 
 // An image one of its questions holds, for its staff, who may not see the bank
-// question it came from. Ticket 03 lets its Students read them too.
+// question it came from. Its Students read them through their own Submission
+// (assessment.submission.js, ticket 03).
 async function readImage(auth, id, imageId) {
     const { row } = await loadReadable(auth, id);
     const questions = await prisma.assessmentQuestion.findMany({
@@ -453,7 +489,8 @@ async function create(auth, classSubjectId, body) {
 // Title, instructions, window and settings; the type only while a draft, and the
 // mode never - an OFFLINE one has no settings. Published, closesAt may close it
 // early or keep it open longer, never to before now (answered question 6). opensAt
-// moves freely: ticket 03 holds it once a Submission exists.
+// moves only while no Submission exists (ticket 03): an attempt already started
+// would have begun before it opened.
 async function update(auth, id, patch) {
     const row = await loadManaged(auth, id);
     assertNotCancelled(row);
@@ -468,6 +505,10 @@ async function update(auth, id, patch) {
     }
     if (row.publishedAt && patch.closesAt && patch.closesAt < new Date()) {
         throw badRequest(`${describe(row)} is published; closesAt can be brought forward, but not to before now`);
+    }
+    const opensMoves = patch.opensAt && patch.opensAt.getTime() !== row.opensAt.getTime();
+    if (opensMoves && (await submissionCountOf(row.id)) > 0) {
+        throw conflict(`${describe(row)} has submissions; its opensAt is fixed`);
     }
 
     const data = 'instructions' in patch ? { ...patch, instructions: instructionsOf(patch.instructions) } : patch;
@@ -488,15 +529,58 @@ const copyOf = (question) => ({
     answerKey: question.answerKey ?? Prisma.DbNull,
 });
 
+// A closesAt sent along with a change to the questions, checked as an edit's is.
+async function assertClosesAt(auth, row, closesAt, now) {
+    await assertWindow(auth, row.classSubject, row.opensAt, closesAt);
+    if (row.publishedAt && closesAt < now) {
+        throw badRequest(`${describe(row)} is published; closesAt can be brought forward, but not to before now`);
+    }
+}
+
+// What a change to a published Assessment's questions does to its Submissions not
+// void (ticket 03): 'void' when what a Student is shown changed, 'remark' when only a
+// key or points did, or null. Voiding needs closesAt ahead - the one sent in the same
+// request, else the Assessment's own - so everyone can answer again. After the first
+// release the questions are locked: ticket 04 refuses here.
+async function submissionEffectOf(row, { shownChanged, markChanged, closesAt }, now) {
+    if (!row.publishedAt) return null;
+    if (shownChanged) {
+        const live = await liveSubmissionCountOf(row.id);
+        if (live > 0 && (closesAt ?? row.closesAt) <= now) {
+            throw conflict(
+                `This change voids ${live} submission(s) to ${describe(row)}; ` +
+                    'send a closesAt still ahead with it, so its students can answer again'
+            );
+        }
+        return 'void';
+    }
+    return markChanged ? 'remark' : null;
+}
+
+// The effect, in the caller's transaction. Voiding catches a Submission started
+// since the count above too.
+async function applySubmissionEffect(tx, row, effect, { reason, questionIds }, now) {
+    if (effect === 'void') return voidSubmissions(tx, row.id, reason, now);
+    if (effect === 'remark') return remarkQuestions(tx, questionIds);
+    return 0;
+}
+
+const effectNote = (effect, count) => {
+    if (effect === 'void' && count) return `, ${count} submission(s) voided`;
+    if (effect === 'remark' && count) return `, ${count} answer(s) marked again`;
+    return '';
+};
+
 // The whole question list, in its order. A copy the Assessment holds is named by its
 // id, keeping its content; a bank question by its questionId, copied now - one of
 // the Assessment's Subject and Grade Level, not archived, that the caller sees. A
 // copy left out is removed, softly. Points are kept unless given; a new one gets 1.
+// A copy's own wording, options or key change in place: editQuestion.
 //
-// To change a question's wording, fix it in the bank and put it in again in place of
-// the old copy (2026-10-07): editing a copy in place comes with ticket 03, which says
-// what that does to the Submissions.
-async function replaceQuestions(auth, id, { questions }) {
+// Published, with Submissions (ticket 03): a question added or removed voids them;
+// points changed re-mark them; a new order changes nothing, since each Submission
+// keeps the order it was shown.
+async function replaceQuestions(auth, id, { questions, closesAt }) {
     const row = await loadManaged(auth, id);
     assertNotCancelled(row);
     if (row.mode === 'OFFLINE') throw conflict(`${describe(row)} is offline; it has no questions`);
@@ -524,10 +608,25 @@ async function replaceQuestions(auth, id, { questions }) {
     }
 
     const now = new Date();
-    await prisma.$transaction(async (tx) => {
+    if (closesAt) await assertClosesAt(auth, row, closesAt, now);
+    const keptIds = new Set(kept.map((question) => question.id));
+    const pointsChanged = questions
+        .filter((item) => item.id && item.points && item.points !== held.get(item.id).points)
+        .map((item) => item.id);
+    const effect = await submissionEffectOf(
+        row,
+        {
+            shownChanged: fromBank.length > 0 || row.questions.some((question) => !keptIds.has(question.id)),
+            markChanged: pointsChanged.length > 0,
+            closesAt,
+        },
+        now
+    );
+
+    const affected = await prisma.$transaction(async (tx) => {
         const claimed = await tx.assessment.updateMany({
             where: { id: row.id, deletedAt: null, cancelledAt: null, updatedAt: row.updatedAt },
-            data: { updatedAt: now },
+            data: { updatedAt: now, ...(closesAt ? { closesAt } : {}) },
         });
         if (claimed.count === 0) throw conflict(CHANGED_MEANWHILE);
 
@@ -553,9 +652,72 @@ async function replaceQuestions(auth, id, { questions }) {
             }
         }
         if (fresh.length) await tx.assessmentQuestion.createMany({ data: fresh });
+        return applySubmissionEffect(
+            tx,
+            row,
+            effect,
+            { reason: 'A question was added or removed', questionIds: pointsChanged },
+            now
+        );
     });
 
-    log.info(`${describe(row)}: questions saved, ${questions.length} in it`);
+    log.info(`${describe(row)}: questions saved, ${questions.length} in it${effectNote(effect, affected)}`);
+    return detailOf(row.id, 'teacher');
+}
+
+// A copy's own content, key or points, changed in place (owner, 2026-10-08); the
+// bank's question is untouched, and the staff's view then shows it changed. The body
+// is a bank question's, of the kind the copy has, its options sent back by id.
+//
+// Published, with Submissions (ticket 03): a change to what a Student is shown - the
+// text, an option, an image, or the scoring, which turns a choice of one into a
+// choice of several - voids them; a change to the key or the points alone re-marks
+// them, and nobody answers again. Say 20 handed in and the key of question 3 should
+// have been B: fixed here, the 20 are marked again. Options moved, the same ids and
+// text, change nothing for them (sameInAnyOrder, 2026-10-09).
+async function editQuestion(auth, id, questionId, body) {
+    const row = await loadManaged(auth, id);
+    assertNotCancelled(row);
+    const copy = await prisma.assessmentQuestion.findFirst({
+        where: { id: questionId, assessmentId: row.id, ...LIVE },
+        select: snapshotSelect,
+    });
+    if (!copy) throw notFound('Question not found');
+    if (body.kind !== copy.kind) throw badRequest(`A question's kind never changes: this one is ${copy.kind}`);
+
+    const { points = copy.points, closesAt } = body;
+    const { payload, answerKey } = await payloadAndKeyOf(auth, body, copy);
+    const mcqScoring = body.kind === 'MCQ' ? body.mcqScoring : null;
+    // An ESSAY has no key: the copy reads back null, and payloadAndKeyOf gives DbNull.
+    const key = answerKey === Prisma.DbNull ? null : answerKey;
+    const now = new Date();
+    if (closesAt) await assertClosesAt(auth, row, closesAt, now);
+    const effect = await submissionEffectOf(
+        row,
+        {
+            shownChanged: !sameInAnyOrder(payload, copy.payload) || mcqScoring !== copy.mcqScoring,
+            markChanged: !sameInAnyOrder(key, copy.answerKey) || points !== copy.points,
+            closesAt,
+        },
+        now
+    );
+
+    const affected = await prisma.$transaction(async (tx) => {
+        const claimed = await tx.assessment.updateMany({
+            where: { id: row.id, deletedAt: null, cancelledAt: null, updatedAt: row.updatedAt },
+            data: { updatedAt: now, ...(closesAt ? { closesAt } : {}) },
+        });
+        if (claimed.count === 0) throw conflict(CHANGED_MEANWHILE);
+
+        await tx.assessmentQuestion.updateMany({
+            where: { id: copy.id, assessmentId: row.id, ...LIVE },
+            data: { mcqScoring, payload, answerKey, points },
+        });
+        const reason = 'A question was changed';
+        return applySubmissionEffect(tx, row, effect, { reason, questionIds: [copy.id] }, now);
+    });
+
+    log.info(`${describe(row)}: a question edited${effectNote(effect, affected)}`);
     return detailOf(row.id, 'teacher');
 }
 
@@ -708,6 +870,7 @@ export {
     create,
     update,
     replaceQuestions,
+    editQuestion,
     publish,
     copy,
     cancel,

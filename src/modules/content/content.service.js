@@ -492,6 +492,8 @@ async function remove(auth, contentId) {
 export {
     MAX_FILE_BYTES,
     FILE_TYPES,
+    INLINE_TYPES,
+    fileNameOf,
     cleanText,
     listForSession,
     readFile,
