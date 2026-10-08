@@ -88,6 +88,14 @@ const SETTINGS = [
 
 const CHANGED_MEANWHILE = 'This assessment was changed meanwhile. Reload it and try again';
 
+// Every change is made to the version its caller read, named by the updatedAt they
+// send back (frontend note #12, owner 2026-10-09). The claim's own updatedAt only
+// caught two requests racing on the server; a second tab's save, read minutes before,
+// overwrote the first - a stale question list voiding every Submission with it.
+function assertSeen(row, seen) {
+    if (seen.getTime() !== row.updatedAt.getTime()) throw conflict(CHANGED_MEANWHILE);
+}
+
 const LIVE = { removedAt: null };
 
 const classSubjectSelect = {
@@ -491,9 +499,10 @@ async function create(auth, classSubjectId, body) {
 // early or keep it open longer, never to before now (answered question 6). opensAt
 // moves only while no Submission exists (ticket 03): an attempt already started
 // would have begun before it opened.
-async function update(auth, id, patch) {
+async function update(auth, id, { updatedAt, ...patch }) {
     const row = await loadManaged(auth, id);
     assertNotCancelled(row);
+    assertSeen(row, updatedAt);
     if (row.publishedAt && patch.type && patch.type !== row.type) {
         throw conflict(`${describe(row)} is published; its type is fixed`);
     }
@@ -580,9 +589,10 @@ const effectNote = (effect, count) => {
 // Published, with Submissions (ticket 03): a question added or removed voids them;
 // points changed re-mark them; a new order changes nothing, since each Submission
 // keeps the order it was shown.
-async function replaceQuestions(auth, id, { questions, closesAt }) {
+async function replaceQuestions(auth, id, { questions, closesAt, updatedAt }) {
     const row = await loadManaged(auth, id);
     assertNotCancelled(row);
+    assertSeen(row, updatedAt);
     if (row.mode === 'OFFLINE') throw conflict(`${describe(row)} is offline; it has no questions`);
 
     const held = new Map(row.questions.map((question) => [question.id, question]));
@@ -678,6 +688,7 @@ async function replaceQuestions(auth, id, { questions, closesAt }) {
 async function editQuestion(auth, id, questionId, body) {
     const row = await loadManaged(auth, id);
     assertNotCancelled(row);
+    assertSeen(row, body.updatedAt);
     const copy = await prisma.assessmentQuestion.findFirst({
         where: { id: questionId, assessmentId: row.id, ...LIVE },
         select: snapshotSelect,
@@ -721,11 +732,13 @@ async function editQuestion(auth, id, questionId, body) {
     return detailOf(row.id, 'teacher');
 }
 
-// Once only. An ONLINE one needs a question; an OFFLINE one has none. The claim
-// holds the version read, so a list emptied meanwhile is not published.
-async function publish(auth, id) {
+// Once only. An ONLINE one needs a question; an OFFLINE one has none. What is
+// published is the version the caller read (assertSeen), not one changed since in
+// another tab; the claim holds it too, so a list emptied meanwhile is not published.
+async function publish(auth, id, { updatedAt }) {
     const row = await loadManaged(auth, id);
     if (row.publishedAt) throw conflict(`${describe(row)} is published already`);
+    assertSeen(row, updatedAt);
     if (row.mode === 'ONLINE' && row.questions.length === 0) {
         throw conflict(`Add at least one question to ${describe(row)} before publishing it`);
     }
@@ -750,6 +763,11 @@ async function publish(auth, id) {
 // in another Semester - last year's quiz used again this year. The source is one the
 // caller manages - a closed year ends no ClassSubject, so its teacher keeps it - or
 // one of a Semester that is over, of a pair they teach now (loadCopySource).
+//
+// Never into the source's own slot, by Class, Subject and Semester, so a successor's
+// ClassSubject there is refused too (frontend note #13, owner 2026-10-09): a twin
+// would be graded as a second assessment, and another try for one Student is a
+// make-up or a remedial on the same one (ticket 05). copy-sources leaves it out alike.
 async function copy(auth, id, body) {
     const source = await loadCopySource(auth, id);
     const { subject, class: sourceClass, semester } = source.classSubject;
@@ -780,6 +798,12 @@ async function copy(auth, id, body) {
                 : `Copy only to your own live class subjects of ${where} ${sameSemester}, or give a new window`,
             { classSubjectIds: refused }
         );
+    }
+    const ownSlot = targets.filter((target) => sameSlot(target, source.classSubject)).map((target) => target.id);
+    if (ownSlot.length) {
+        throw badRequest(`${describe(source)} is in that class already; copy it to another class`, {
+            classSubjectIds: ownSlot,
+        });
     }
     targets.forEach(assertTakesNew);
     // The window fits each target's Semester, checked once per Semester: without a

@@ -19,6 +19,7 @@ import {
     questionListBody,
     questionCopyEdit,
     questionParams,
+    publishBody,
     copyBody,
     cancelBody,
     assessmentImageParams,
@@ -43,6 +44,9 @@ import {
 //
 // A copy in an Assessment is edited in place by its teacher; with Submissions, the
 // change voids them or marks them again (ticket 03).
+//
+// Every edit of a question or an Assessment, and publishing, sends back the updatedAt
+// the caller last read; one changed since gets 409 (frontend note #12, 2026-10-09).
 //
 // Answering (ticket 03): a Student of the Class reads an Assessment's outline -
 // never its questions - starts an attempt, saves answers one by one (an ESSAY's file
@@ -156,7 +160,7 @@ router.put(
     validate({ params: questionParams, body: questionCopyEdit }),
     controller.editQuestion
 );
-router.post('/:id/publish', staff, validate({ params: idParams }), controller.publishAssessment);
+router.post('/:id/publish', staff, validate({ params: idParams, body: publishBody }), controller.publishAssessment);
 router.post('/:id/copies', staff, validate({ params: idParams, body: copyBody }), controller.copyAssessment);
 router.post('/:id/cancel', staff, validate({ params: idParams, body: cancelBody }), controller.cancelAssessment);
 router.get(

@@ -15,6 +15,18 @@ const questionImageParams = z.object({ id, imageId: id });
 
 const gradeLevel = z.coerce.number().int().min(1).max(13);
 
+// An instant, with its offset: '2026-10-12T07:00:00+07:00' or '...Z'.
+const instant = z.iso.datetime({ offset: true }).transform((value) => new Date(value));
+
+// The updatedAt the caller last read, sent back with every change to a question or an
+// Assessment: one saved meanwhile - in another tab, say - is refused with 409 rather
+// than overwritten (frontend note #12, owner 2026-10-09).
+const seen = {
+    updatedAt: z.iso
+        .datetime({ offset: true, error: 'Send back the updatedAt you last read' })
+        .transform((value) => new Date(value)),
+};
+
 const KINDS = ['MCQ', 'TF', 'SHORT', 'ESSAY'];
 const MCQ_SCORINGS = ['SINGLE', 'ALL_OR_NOTHING', 'PARTIAL'];
 
@@ -89,10 +101,10 @@ const questionUnion = (extra) =>
 
 const questionBody = questionUnion({ subjectId: id, gradeLevel, privateUntil });
 
-// An edit sends the question's whole content again. Its kind is named so the shape
-// can be checked, and must be the one it has; Subject and Grade Level are refused -
-// duplicating is the way to another level.
-const questionEdit = questionUnion({ privateUntil });
+// An edit sends the question's whole content again, with the updatedAt it was read
+// at. Its kind is named so the shape can be checked, and must be the one it has;
+// Subject and Grade Level are refused - duplicating is the way to another level.
+const questionEdit = questionUnion({ privateUntil, ...seen });
 
 const flag = z
     .enum(['true', 'false'])
@@ -117,9 +129,6 @@ const duplicateBody = z.strictObject({ gradeLevel: gradeLevel.optional() }).defa
 // an edit may move one end only.
 
 const TYPES = ['TUGAS', 'KUIS', 'UTS', 'UAS'];
-
-// An instant, with its offset: '2026-10-12T07:00:00+07:00' or '...Z'.
-const instant = z.iso.datetime({ offset: true }).transform((value) => new Date(value));
 
 const title = z.string().trim().min(1, 'Give the assessment a title').max(200, 'The title is too long');
 
@@ -170,7 +179,8 @@ const assessmentPatch = z
         ...settings,
     })
     .partial()
-    .refine((value) => Object.keys(value).length > 0, 'Send at least one change');
+    .extend(seen)
+    .refine((value) => Object.keys(value).some((key) => key !== 'updatedAt'), 'Send at least one change');
 
 // The whole list, in its order: a copy the Assessment holds by its id, a bank
 // question by its questionId. Points are whole, 1 to 100 (owner, 2026-10-07).
@@ -193,11 +203,15 @@ const questionListBody = z.strictObject({
         .refine((list) => distinct(named(list, 'id')), 'A question is named twice')
         .refine((list) => distinct(named(list, 'questionId')), 'A bank question is named twice'),
     closesAt: instant.optional(),
+    ...seen,
 });
 
 // One copy edited in place (ticket 03, owner 2026-10-08): the bank's shape, of the
 // kind the copy has, with its points and, as above, a closesAt.
-const questionCopyEdit = questionUnion({ points: points.optional(), closesAt: instant.optional() });
+const questionCopyEdit = questionUnion({ points: points.optional(), closesAt: instant.optional(), ...seen });
+
+// Publishing what the caller last read, not a version changed since in another tab.
+const publishBody = z.strictObject(seen);
 
 const questionParams = z.object({ id, questionId: id });
 
@@ -251,6 +265,7 @@ export {
     questionListBody,
     questionCopyEdit,
     questionParams,
+    publishBody,
     copyBody,
     cancelBody,
     assessmentImageParams,

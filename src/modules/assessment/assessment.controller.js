@@ -99,7 +99,7 @@ async function editQuestion(req, res) {
 }
 
 async function publishAssessment(req, res) {
-    const assessment = await service.publish(req.auth, req.validated.params.id);
+    const assessment = await service.publish(req.auth, req.validated.params.id, req.validated.body);
     return ok(res, { assessment, message: 'Assessment published.' });
 }
 

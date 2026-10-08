@@ -50,6 +50,8 @@ const IMAGE_TYPES = ['jpg', 'png'];
 // already stored raises it, so old rows can be told from new ones.
 const SHAPE_VERSION = 1;
 
+const CHANGED_MEANWHILE = 'This question was changed meanwhile. Reload it and edit again';
+
 const questionSelect = {
     id: true,
     subjectId: true,
@@ -375,10 +377,13 @@ async function privacyChangeOf(auth, row, privateUntil) {
 }
 
 // The whole content again, of the kind the question has: its Subject and Grade
-// Level never change (the schema refuses them). The claim holds the version read,
-// so of two edits at once the second is told to reload rather than overwrite.
+// Level never change (the schema refuses them). It is saved over the version the
+// caller read, named by the updatedAt they send back (frontend note #12, owner
+// 2026-10-09): an edit saved meanwhile in another tab is not overwritten, and of two
+// edits at once the claim tells the second to reload.
 async function updateQuestion(auth, id, body) {
     const row = await loadOwnQuestion(auth, id);
+    if (body.updatedAt.getTime() !== row.updatedAt.getTime()) throw conflict(CHANGED_MEANWHILE);
     if (body.kind !== row.kind) throw badRequest(`A question's kind never changes: this one is ${row.kind}`);
     const privacy = await privacyChangeOf(auth, row, body.privateUntil);
     const { payload, answerKey } = await payloadAndKeyOf(auth, body, row);
@@ -387,7 +392,7 @@ async function updateQuestion(auth, id, body) {
         where: { id: row.id, authorMembershipId: auth.membershipId, updatedAt: row.updatedAt },
         data: { mcqScoring: body.kind === 'MCQ' ? body.mcqScoring : null, payload, answerKey, ...privacy },
     });
-    if (claimed.count === 0) throw conflict('This question was changed meanwhile. Reload it and edit again');
+    if (claimed.count === 0) throw conflict(CHANGED_MEANWHILE);
     log.info(`${describe(row)} edited`);
     return reload(auth, row.id);
 }
