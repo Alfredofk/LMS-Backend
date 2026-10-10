@@ -22,13 +22,14 @@ import {
     liveSubmissionCountOf,
     submissionCountOf,
 } from './assessment.submission.js';
+import { claimClosedSubmissions, scaleTeacherPoints, correctReleased } from './assessment.score.js';
 
 const log = createLogger('Assessment');
 
 // Assessments (assessment ticket 02): one graded exercise on a ClassSubject - its
 // type, its mode, its window and settings, and its questions as copies taken from
-// the bank. Its Submissions are assessment.submission.js's (ticket 03); marking by
-// hand and Scores come with ticket 04.
+// the bank. Its Submissions are assessment.submission.js's (ticket 03); marking,
+// release and Scores are assessment.marking.js's and assessment.score.js's (ticket 04).
 //
 // Owner's decisions (2026-10-04, and the build decisions of 2026-10-07):
 // - On the ClassSubject, with its own window inside the Semester; not tied to a
@@ -73,6 +74,11 @@ const log = createLogger('Assessment');
 // - The staff's view says of each question whether the bank's has changed, or been
 //   archived, since it was copied (2026-10-07): a copy of last year's quiz carries
 //   last year's wording and key, and its teacher swaps the bank's in through the list.
+// - After its first release the questions are locked (ticket 04, answered question
+//   1): the list is refused whole, and a copy's own edit may fix only its key or its
+//   points, with a reason. Every released Submission whose mark that moves gets a
+//   Score correction with it; the others are marked again as drafts (2026-10-09). A
+//   question's points changed keep each teacher's mark at its share of the question.
 
 const DEFAULT_POINTS = 1;
 
@@ -130,6 +136,7 @@ const assessmentSelect = {
     shuffleOptions: true,
     showKeyOnRelease: true,
     publishedAt: true,
+    releasedAt: true,
     cancelledAt: true,
     cancelReason: true,
     copiedFromId: true,
@@ -305,6 +312,7 @@ const assessmentView = (row, standing) => ({
     settings: settingsView(row),
     status: statusOf(row),
     publishedAt: row.publishedAt,
+    releasedAt: row.releasedAt,
     cancelledAt: row.cancelledAt,
     cancelReason: row.cancelReason,
     copiedFromId: row.copiedFromId,
@@ -546,13 +554,25 @@ async function assertClosesAt(auth, row, closesAt, now) {
     }
 }
 
+// After the first release (ticket 04): what is left to change is a key or points.
+const lockedNote = (row) =>
+    `${describe(row)} is released; its questions are locked. Fix a key or points with a reason, or cancel it`;
+
 // What a change to a published Assessment's questions does to its Submissions not
 // void (ticket 03): 'void' when what a Student is shown changed, 'remark' when only a
 // key or points did, or null. Voiding needs closesAt ahead - the one sent in the same
 // request, else the Assessment's own - so everyone can answer again. After the first
-// release the questions are locked: ticket 04 refuses here.
-async function submissionEffectOf(row, { shownChanged, markChanged, closesAt }, now) {
+// release (ticket 04) nothing a Student is shown changes, and a key or points fix
+// corrects released Scores, so it carries a reason.
+async function submissionEffectOf(row, { shownChanged, markChanged, closesAt, reason }, now) {
     if (!row.publishedAt) return null;
+    if (row.releasedAt) {
+        if (shownChanged) throw conflict(lockedNote(row));
+        if (markChanged && !reason) {
+            throw badRequest(`${describe(row)} is released; give a reason, which its corrected scores carry`);
+        }
+        return markChanged ? 'remark' : null;
+    }
     if (shownChanged) {
         const live = await liveSubmissionCountOf(row.id);
         if (live > 0 && (closesAt ?? row.closesAt) <= now) {
@@ -567,18 +587,29 @@ async function submissionEffectOf(row, { shownChanged, markChanged, closesAt }, 
 }
 
 // The effect, in the caller's transaction. Voiding catches a Submission started
-// since the count above too.
-async function applySubmissionEffect(tx, row, effect, { reason, questionIds }, now) {
-    if (effect === 'void') return voidSubmissions(tx, row.id, reason, now);
-    if (effect === 'remark') return remarkQuestions(tx, questionIds);
-    return 0;
+// since the count above too. Marking again takes the closed Submissions first, so
+// marking by hand or a release at the same moment waits for it (ticket 04); the
+// teacher's points follow a question's points, and after release each Score the fix
+// moves is corrected with its reason.
+async function applySubmissionEffect(tx, row, effect, change, now) {
+    if (effect === 'void') return { voided: await voidSubmissions(tx, row.id, change.voidReason, now) };
+    if (effect !== 'remark') return {};
+
+    await claimClosedSubmissions(tx, row.id, now);
+    const remarked = await remarkQuestions(tx, change.questionIds);
+    await scaleTeacherPoints(tx, change.pointsChanges);
+    const corrected = row.releasedAt
+        ? await correctReleased(tx, { assessmentId: row.id }, { reason: change.reason, userId: change.userId })
+        : 0;
+    return { remarked, corrected };
 }
 
-const effectNote = (effect, count) => {
-    if (effect === 'void' && count) return `, ${count} submission(s) voided`;
-    if (effect === 'remark' && count) return `, ${count} answer(s) marked again`;
-    return '';
-};
+const effectNote = ({ voided, remarked, corrected }) =>
+    [
+        voided ? `, ${voided} submission(s) voided` : '',
+        remarked ? `, ${remarked} answer(s) marked again` : '',
+        corrected ? `, ${corrected} score(s) corrected` : '',
+    ].join('');
 
 // The whole question list, in its order. A copy the Assessment holds is named by its
 // id, keeping its content; a bank question by its questionId, copied now - one of
@@ -594,6 +625,8 @@ async function replaceQuestions(auth, id, { questions, closesAt, updatedAt }) {
     assertNotCancelled(row);
     assertSeen(row, updatedAt);
     if (row.mode === 'OFFLINE') throw conflict(`${describe(row)} is offline; it has no questions`);
+    // The list adds, removes and re-points; none of it is left after release (ticket 04).
+    if (row.releasedAt) throw conflict(lockedNote(row));
 
     const held = new Map(row.questions.map((question) => [question.id, question]));
     const stray = questions.filter((item) => item.id && !held.has(item.id)).map((item) => item.id);
@@ -620,14 +653,14 @@ async function replaceQuestions(auth, id, { questions, closesAt, updatedAt }) {
     const now = new Date();
     if (closesAt) await assertClosesAt(auth, row, closesAt, now);
     const keptIds = new Set(kept.map((question) => question.id));
-    const pointsChanged = questions
+    const pointsChanges = questions
         .filter((item) => item.id && item.points && item.points !== held.get(item.id).points)
-        .map((item) => item.id);
+        .map((item) => ({ id: item.id, from: held.get(item.id).points, to: item.points }));
     const effect = await submissionEffectOf(
         row,
         {
             shownChanged: fromBank.length > 0 || row.questions.some((question) => !keptIds.has(question.id)),
-            markChanged: pointsChanged.length > 0,
+            markChanged: pointsChanges.length > 0,
             closesAt,
         },
         now
@@ -666,12 +699,16 @@ async function replaceQuestions(auth, id, { questions, closesAt, updatedAt }) {
             tx,
             row,
             effect,
-            { reason: 'A question was added or removed', questionIds: pointsChanged },
+            {
+                voidReason: 'A question was added or removed',
+                questionIds: pointsChanges.map((change) => change.id),
+                pointsChanges,
+            },
             now
         );
     });
 
-    log.info(`${describe(row)}: questions saved, ${questions.length} in it${effectNote(effect, affected)}`);
+    log.info(`${describe(row)}: questions saved, ${questions.length} in it${effectNote(affected)}`);
     return detailOf(row.id, 'teacher');
 }
 
@@ -685,6 +722,10 @@ async function replaceQuestions(auth, id, { questions, closesAt, updatedAt }) {
 // them, and nobody answers again. Say 20 handed in and the key of question 3 should
 // have been B: fixed here, the 20 are marked again. Options moved, the same ids and
 // text, change nothing for them (sameInAnyOrder, 2026-10-09).
+//
+// Released (ticket 04): only the key or the points change, with a reason. Each
+// released Submission whose mark that moves gets a Score correction carrying it; the
+// fix lands here on the copy, which next year's copy is taken from.
 async function editQuestion(auth, id, questionId, body) {
     const row = await loadManaged(auth, id);
     assertNotCancelled(row);
@@ -696,7 +737,7 @@ async function editQuestion(auth, id, questionId, body) {
     if (!copy) throw notFound('Question not found');
     if (body.kind !== copy.kind) throw badRequest(`A question's kind never changes: this one is ${copy.kind}`);
 
-    const { points = copy.points, closesAt } = body;
+    const { points = copy.points, closesAt, reason } = body;
     const { payload, answerKey } = await payloadAndKeyOf(auth, body, copy);
     const mcqScoring = body.kind === 'MCQ' ? body.mcqScoring : null;
     // An ESSAY has no key: the copy reads back null, and payloadAndKeyOf gives DbNull.
@@ -709,6 +750,7 @@ async function editQuestion(auth, id, questionId, body) {
             shownChanged: !sameInAnyOrder(payload, copy.payload) || mcqScoring !== copy.mcqScoring,
             markChanged: !sameInAnyOrder(key, copy.answerKey) || points !== copy.points,
             closesAt,
+            reason,
         },
         now
     );
@@ -724,11 +766,17 @@ async function editQuestion(auth, id, questionId, body) {
             where: { id: copy.id, assessmentId: row.id, ...LIVE },
             data: { mcqScoring, payload, answerKey, points },
         });
-        const reason = 'A question was changed';
-        return applySubmissionEffect(tx, row, effect, { reason, questionIds: [copy.id] }, now);
+        const change = {
+            voidReason: 'A question was changed',
+            questionIds: [copy.id],
+            pointsChanges: points === copy.points ? [] : [{ id: copy.id, from: copy.points, to: points }],
+            reason,
+            userId: auth.userId,
+        };
+        return applySubmissionEffect(tx, row, effect, change, now);
     });
 
-    log.info(`${describe(row)}: a question edited${effectNote(effect, affected)}`);
+    log.info(`${describe(row)}: a question edited${effectNote(affected)}`);
     return detailOf(row.id, 'teacher');
 }
 
@@ -887,6 +935,11 @@ async function remove(auth, id) {
 }
 
 export {
+    loadAssessment,
+    assertTeacherStanding,
+    assertNotCancelled,
+    describe,
+    assessmentView,
     listForClassSubject,
     listCopySources,
     getAssessment,

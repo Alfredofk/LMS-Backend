@@ -449,6 +449,7 @@ model School {
     submissions       Submission[]
     submissionAnswers SubmissionAnswer[]
     submissionAnswerOptions SubmissionAnswerOption[]
+    scores            Score[]
 
     @@index([deactivatedAt])
 }
@@ -1207,6 +1208,9 @@ model Assessment {
     /// Whether the answer key is shown with the Score at release (ticket 04).
     showKeyOnRelease  Boolean        @default(false)
     publishedAt       DateTime?
+    /// When a release first recorded a Score (ticket 04). From then its questions
+    /// are locked: only a key or points may be fixed, as Score corrections.
+    releasedAt        DateTime?
     cancelledAt       DateTime?
     cancelReason      String?
     cancelledByUserId String?
@@ -1278,6 +1282,9 @@ enum SubmissionClose {
     /// Its deadline passed. Closed the first time anything touched it after that,
     /// with the deadline as its submittedAt (owner, 2026-10-08).
     TIME
+    /// An OFFLINE Assessment's mark, entered by its teacher (ticket 04, owner
+    /// 2026-10-09): a Submission without answers, closed as it is made.
+    TEACHER
 }
 
 /// One Student's attempt at an ONLINE Assessment (assessment ticket 03): started,
@@ -1310,6 +1317,14 @@ model Submission {
     voidedAt         DateTime?
     voidReason       String?
     shownOrder       Json
+    /// An OFFLINE Assessment's mark, 0-100, entered by its teacher (ticket 04): a
+    /// draft until release, then a Score. Null on an ONLINE one's.
+    offlineMark      Decimal?         @db.Decimal(5, 2)
+    /// The teacher's comment on the whole Submission (ticket 04), shown at release.
+    comment          String?
+    /// When a release recorded its first Score (ticket 04). Claimed, so a release
+    /// pressed twice at once records no Score twice.
+    releasedAt       DateTime?
     createdAt        DateTime         @default(now())
     updatedAt        DateTime         @updatedAt
 
@@ -1317,6 +1332,7 @@ model Submission {
     assessment     Assessment         @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
     studentProfile StudentProfile     @relation(fields: [studentProfileId], references: [id], onDelete: Cascade)
     answers        SubmissionAnswer[]
+    scores         Score[]
 
     @@unique([assessmentId, studentProfileId, attempt])
     @@index([schoolId])
@@ -1343,6 +1359,12 @@ model SubmissionAnswer {
     fileMimeType         String?
     fileSize             Int?
     autoPoints           Decimal?  @db.Decimal(7, 4)
+    /// The teacher's points (ticket 04): an ESSAY's mark, or a SHORT's automatic
+    /// one overridden - 0 to the question's points. Counts in place of autoPoints
+    /// when set, and survives a key fix. A draft until release.
+    teacherPoints        Decimal?  @db.Decimal(7, 4)
+    /// The teacher's comment on this answer (ticket 04), shown at release.
+    comment              String?
     savedAt              DateTime
     createdAt            DateTime  @default(now())
     updatedAt            DateTime  @updatedAt
@@ -1373,6 +1395,45 @@ model SubmissionAnswerOption {
 
     @@unique([answerId, optionId])
     @@index([assessmentQuestionId, optionId])
+    @@index([schoolId])
+}
+
+// ---------------------------------------------------------------------------
+// Assessment - Scores (assessment ticket 04)
+// ---------------------------------------------------------------------------
+
+/// A Submission's mark as a release recorded it (assessment ticket 04): 0-100, the
+/// points earned / the total of the questions it showed x 100, or an OFFLINE mark
+/// as entered. What its Student sees, and what the grading slice will count.
+///
+/// Append-only (handoff #26, owner 2026-10-04): a correction is a new row with a
+/// required reason, the old one stays, and the newest counts. Written only by
+/// src/modules/assessment/assessment.score.js. The database refuses it too: a
+/// trigger in the _add_scores migration raises on every UPDATE, and on every DELETE
+/// unless the transaction has set lms.allow_score_delete - which only the test-data
+/// cleanup does. A Submission, an Assessment or a school deleted by hand therefore
+/// fails on its Scores.
+///
+/// The Score that counts for a Student on an Assessment is the highest of the
+/// newest Scores of their released Submissions not void.
+model Score {
+    id               String   @id @default(cuid())
+    schoolId         String
+    submissionId     String
+    /// 0-100, two decimals.
+    value            Decimal  @db.Decimal(5, 2)
+    /// An ONLINE Submission's points earned and total; null for an OFFLINE mark.
+    pointsEarned     Decimal? @db.Decimal(9, 4)
+    pointsTotal      Int?
+    /// Null on the first Score of a Submission; required on every correction.
+    reason           String?
+    recordedAt       DateTime @default(now())
+    recordedByUserId String
+
+    school     School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    submission Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+    @@index([submissionId, recordedAt])
     @@index([schoolId])
 }
 

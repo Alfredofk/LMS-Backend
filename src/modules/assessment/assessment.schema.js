@@ -2,10 +2,11 @@ import { z } from 'zod';
 
 import { date } from '../holidays/holidays.schema.js';
 
-// The question bank (assessment ticket 01), Assessments (ticket 02) and answering
-// them (ticket 03). Only the shape is checked here, a question's rules per kind
-// included. Who may write for which Subject and Grade Level, whose images may be
-// named, sanitising the body, and which answer a question takes are the services'.
+// The question bank (assessment ticket 01), Assessments (ticket 02), answering them
+// (ticket 03), and marking and releasing them (ticket 04). Only the shape is checked
+// here, a question's rules per kind included. Who may write for which Subject and
+// Grade Level, whose images may be named, sanitising the body, which answer a
+// question takes, and how many points it is worth are the services'.
 
 const id = z.string().min(1);
 
@@ -206,9 +207,18 @@ const questionListBody = z.strictObject({
     ...seen,
 });
 
+// Why a released mark changed (ticket 04): every Score correction carries one.
+const reason = z.string().trim().min(1, 'Give a reason').max(500, 'The reason is too long');
+
 // One copy edited in place (ticket 03, owner 2026-10-08): the bank's shape, of the
-// kind the copy has, with its points and, as above, a closesAt.
-const questionCopyEdit = questionUnion({ points: points.optional(), closesAt: instant.optional(), ...seen });
+// kind the copy has, with its points and, as above, a closesAt. Once released, a key
+// or points fix names the reason its corrected Scores carry (ticket 04).
+const questionCopyEdit = questionUnion({
+    points: points.optional(),
+    closesAt: instant.optional(),
+    reason: reason.optional(),
+    ...seen,
+});
 
 // Publishing what the caller last read, not a version changed since in another tab.
 const publishBody = z.strictObject(seen);
@@ -252,6 +262,61 @@ const cancelBody = z.strictObject({
 
 const assessmentImageParams = z.object({ id, imageId: id });
 
+// ---- marking, release and Scores (ticket 04) ----
+
+const submissionParams = z.object({ id, submissionId: id });
+const submissionAnswerParams = z.object({ id, submissionId: id, questionId: id });
+
+// Points given by hand and offline marks take at most two decimals, as 7.5 (owner,
+// 2026-10-09). Whether points fit the question is the service's.
+const twoDecimals = (value) => Math.abs(value * 100 - Math.round(value * 100)) < 1e-6;
+const decimal = z.number().min(0, 'A mark is 0 or more').refine(twoDecimals, 'At most two decimals');
+
+// Plain text; empty or null clears it.
+const comment = z
+    .string()
+    .trim()
+    .max(2_000, 'A comment is at most 2,000 characters')
+    .nullable()
+    .transform((value) => value || null);
+
+// The teacher's points on an answer - null takes them back - and a comment; either or
+// both, per question named.
+const answerMark = z
+    .strictObject({
+        questionId: id,
+        points: decimal.max(100, 'A question is worth at most 100 points').nullable().optional(),
+        comment: comment.optional(),
+    })
+    .refine((value) => value.points !== undefined || value.comment !== undefined, 'Give points or a comment');
+
+const markBody = z
+    .strictObject({
+        answers: z
+            .array(answerMark)
+            .max(200, 'At most 200 answers')
+            .refine((list) => distinct(named(list, 'questionId')), 'A question is named twice')
+            .optional(),
+        comment: comment.optional(),
+        reason: reason.optional(),
+    })
+    .refine((value) => value.answers?.length || value.comment !== undefined, 'Send a mark or a comment');
+
+const offlineMarksBody = z.strictObject({
+    marks: z
+        .array(
+            z.strictObject({
+                studentProfileId: id,
+                value: decimal.max(100, 'A mark is 0 to 100'),
+                comment: comment.optional(),
+            })
+        )
+        .min(1, 'Enter at least one mark')
+        .max(200, 'At most 200 marks at once')
+        .refine((list) => distinct(named(list, 'studentProfileId')), 'A student is named twice'),
+    reason: reason.optional(),
+});
+
 export {
     idParams,
     imageIdParams,
@@ -270,4 +335,8 @@ export {
     cancelBody,
     assessmentImageParams,
     answerBody,
+    submissionParams,
+    submissionAnswerParams,
+    markBody,
+    offlineMarksBody,
 };

@@ -2,10 +2,12 @@ import { ok } from '../../shared/errors.js';
 import * as bank from './assessment.bank.js';
 import * as service from './assessment.service.js';
 import * as answering from './assessment.submission.js';
+import * as marking from './assessment.marking.js';
 
 // Thin, like the other controllers. The question bank (ticket 01) lives in
 // assessment.bank.js; the Assessments (ticket 02) in assessment.service.js; a
-// Student's Submissions (ticket 03) in assessment.submission.js.
+// Student's Submissions (ticket 03) in assessment.submission.js; marking, release and
+// Scores (ticket 04) in assessment.marking.js.
 
 // ---- the question bank ----
 
@@ -148,17 +150,20 @@ async function saveEssayFile(req, res) {
     return ok(res, { answer: await answering.saveEssayFile(req.auth, id, questionId, req.file) });
 }
 
-// The file itself, outside the envelope, as a Content file is: PDF and images open
-// in the browser, DOCX and PPTX download under the name they were sent with.
-async function readEssayFile(req, res) {
-    const { id, questionId } = req.validated.params;
-    const { buffer, contentType, fileName, inline } = await answering.readEssayFile(req.auth, id, questionId);
+// An ESSAY's file itself, outside the envelope, as a Content file is: PDF and images
+// open in the browser, DOCX and PPTX download under the name they were sent with.
+const sendEssayFile = (res, { buffer, contentType, fileName, inline }) => {
     res.set({
         'Content-Type': contentType,
         'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(fileName)}`,
         'Cache-Control': 'private, no-store',
     });
     return res.send(buffer);
+};
+
+async function readEssayFile(req, res) {
+    const { id, questionId } = req.validated.params;
+    return sendEssayFile(res, await answering.readEssayFile(req.auth, id, questionId));
 }
 
 async function readSubmissionImage(req, res) {
@@ -168,6 +173,40 @@ async function readSubmissionImage(req, res) {
 
 async function handIn(req, res) {
     return ok(res, await answering.handIn(req.auth, req.validated.params.id));
+}
+
+// ---- marking, release and Scores (ticket 04) ----
+
+// The results, one Submission for marking, a release's outcome: each comes back as
+// the service shaped it.
+async function listResults(req, res) {
+    return ok(res, await marking.results(req.auth, req.validated.params.id));
+}
+
+async function getMarking(req, res) {
+    const { id, submissionId } = req.validated.params;
+    return ok(res, await marking.submissionForMarking(req.auth, id, submissionId));
+}
+
+async function readMarkingFile(req, res) {
+    const { id, submissionId, questionId } = req.validated.params;
+    return sendEssayFile(res, await marking.readEssayFile(req.auth, id, submissionId, questionId));
+}
+
+async function markSubmission(req, res) {
+    const { id, submissionId } = req.validated.params;
+    const marked = await marking.mark(req.auth, id, submissionId, req.validated.body);
+    return ok(res, { ...marked, message: 'Marks saved.' });
+}
+
+async function enterOfflineMarks(req, res) {
+    const results = await marking.enterOfflineMarks(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, { ...results, message: 'Marks saved.' });
+}
+
+async function releaseAssessment(req, res) {
+    const outcome = await marking.release(req.auth, req.validated.params.id);
+    return ok(res, { ...outcome, message: 'Released.' });
 }
 
 export {
@@ -201,4 +240,10 @@ export {
     readEssayFile,
     readSubmissionImage,
     handIn,
+    listResults,
+    getMarking,
+    readMarkingFile,
+    markSubmission,
+    enterOfflineMarks,
+    releaseAssessment,
 };

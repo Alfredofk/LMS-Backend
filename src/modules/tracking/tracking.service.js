@@ -218,7 +218,8 @@ async function progressOf(classSubject, studentProfileIds) {
 // left stays, placedNow false: the record is the slot's, and a past year's view
 // keeps its students once Rollover ends their placements. The per-Content counts
 // therefore match ContentProgress. The attendance roster keeps its own the same
-// way (rosterView).
+// way (rosterView). An Assessment's results and its offline marks take their
+// Students from here too (assessment ticket 04).
 async function rosterOf(auth, classSubject) {
     const { start, end } = await semesterSpan(auth.schoolId, classSubject.semester);
     const sessionWhere = slotSessionWhere(classSubject);
@@ -335,4 +336,4 @@ async function ownProgress(auth) {
     return { class: placement.class, classSubjects };
 }
 
-export { recordClientEvents, classSubjectProgress, ownProgress, slotSessionWhere };
+export { recordClientEvents, classSubjectProgress, ownProgress, slotSessionWhere, rosterOf };

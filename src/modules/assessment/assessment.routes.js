@@ -24,9 +24,13 @@ import {
     cancelBody,
     assessmentImageParams,
     answerBody,
+    submissionParams,
+    submissionAnswerParams,
+    markBody,
+    offlineMarksBody,
 } from './assessment.schema.js';
 
-// Mounted at /api/assessments (assessment tickets 01, 02 and 03).
+// Mounted at /api/assessments (assessment tickets 01 to 04).
 //
 // The question bank: teachers write questions per Subject x Grade Level, for what
 // they teach now, and read the ones of what they teach now along with their own.
@@ -51,6 +55,14 @@ import {
 // Answering (ticket 03): a Student of the Class reads an Assessment's outline -
 // never its questions - starts an attempt, saves answers one by one (an ESSAY's file
 // too), and hands it in. The questions come inside the attempt, without their key.
+// Once their attempt is released (ticket 04) they read its Score, its marks and the
+// comments there, and the key if the teacher shows it.
+//
+// Marking (ticket 04): the teacher who answers for the ClassSubject marks ESSAY and
+// SHORT answers, comments, enters an offline Assessment's marks, and releases, which
+// records the Scores; after that a mark changes only with a reason, as a correction.
+// The homeroom teacher, the Principal and the Vice Principals read the results and
+// each Submission, and change nothing.
 //
 // staff is the coarse filter on the staff's routes, and student on the Student's;
 // each answers 404, not 403, to everyone else - a Guardian reaches none of these,
@@ -169,5 +181,29 @@ router.get(
     validate({ params: assessmentImageParams }),
     controller.readAssessmentImage
 );
+
+// ---- marking, release and Scores (ticket 04) ----
+
+router.get('/:id/submissions', staff, validate({ params: idParams }), controller.listResults);
+router.get('/:id/submissions/:submissionId', staff, validate({ params: submissionParams }), controller.getMarking);
+router.get(
+    '/:id/submissions/:submissionId/answers/:questionId/file',
+    staff,
+    validate({ params: submissionAnswerParams }),
+    controller.readMarkingFile
+);
+router.put(
+    '/:id/submissions/:submissionId/marks',
+    staff,
+    validate({ params: submissionParams, body: markBody }),
+    controller.markSubmission
+);
+router.put(
+    '/:id/offline-marks',
+    staff,
+    validate({ params: idParams, body: offlineMarksBody }),
+    controller.enterOfflineMarks
+);
+router.post('/:id/release', staff, validate({ params: idParams }), controller.releaseAssessment);
 
 export default router;

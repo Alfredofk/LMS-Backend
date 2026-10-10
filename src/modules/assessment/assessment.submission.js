@@ -10,6 +10,7 @@ import { semesterSpan } from '../sessions/sessions.service.js';
 import { INLINE_TYPES, fileNameOf, studentProfileOf } from '../content/content.service.js';
 import { imageIdsOf, imageFileOf } from './assessment.bank.js';
 import { autoPointsOf } from './assessment.grading.js';
+import { scoresOf, currentScoreOf, countedScoreOf, scoreView, pointsOf } from './assessment.score.js';
 
 const log = createLogger('Assessment');
 
@@ -42,6 +43,10 @@ const log = createLogger('Assessment');
 //   without their key.
 // - Saving an answer writes no Learning Event (answered question 4). Starting and
 //   handing in will, from ticket 06.
+// - Once its Submission is released (ticket 04) the Student reads its Score - the
+//   newest, with the newest correction's reason - the points each answer earned and
+//   the comments, and the key only if the teacher chose to show it. Before that,
+//   none of them; and nothing of anyone else's, ever (spec invariant 8).
 
 const SHAPE_VERSION = 1;
 const MINUTE_MS = 60 * 1000;
@@ -69,6 +74,7 @@ const studentAssessmentSelect = {
     timeLimitMinutes: true,
     shuffleQuestions: true,
     shuffleOptions: true,
+    showKeyOnRelease: true,
     cancelledAt: true,
     cancelReason: true,
     classSubject: {
@@ -99,6 +105,8 @@ const submissionSelect = {
     voidedAt: true,
     voidReason: true,
     shownOrder: true,
+    comment: true,
+    releasedAt: true,
 };
 
 // A saved answer, without its points: they stay with the staff until release.
@@ -112,6 +120,10 @@ const answerSelect = {
     savedAt: true,
     chosenOptions: { select: { optionId: true } },
 };
+
+// The same, with its marks, read for a Student only once their Submission is
+// released (ticket 04).
+const releasedAnswerSelect = { ...answerSelect, autoPoints: true, teacherPoints: true, comment: true };
 
 // What marking reads: the answer, and its copy with the key.
 const markingSelect = {
@@ -181,7 +193,7 @@ const submissionCountOf = (assessmentId) => prisma.submission.count({ where: { a
 
 // The Submissions among `where` whose deadline has passed, closed as of that
 // deadline, and marked (owner, 2026-10-08). Whoever touches one first - its Student,
-// the staff's list (ticket 07), a release (ticket 04) - closes it, and gets what a
+// the staff's results or marking, a release (ticket 04) - closes it, and gets what a
 // clock would have written. Each is claimed, so two readers at once close it once.
 async function closeExpiredSubmissions(where, now = new Date()) {
     const expired = await prisma.submission.findMany({
@@ -313,7 +325,9 @@ const statusOf = (row) => {
     return row.submittedAt ? 'SUBMITTED' : 'IN_PROGRESS';
 };
 
-const ownSubmissionView = (row) => ({
+// A Student's own Submission. Its Score and the teacher's comment only once it is
+// released (ticket 04): `score` is the newest Score row.
+const ownSubmissionView = (row, score = null) => ({
     id: row.id,
     attempt: row.attempt,
     status: statusOf(row),
@@ -324,6 +338,9 @@ const ownSubmissionView = (row) => ({
     late: row.late,
     voidedAt: row.voidedAt,
     voidReason: row.voidReason,
+    released: row.releasedAt !== null,
+    score: row.releasedAt ? scoreView(score) : null,
+    comment: row.releasedAt ? row.comment : null,
 });
 
 // The outline a Student reads: never a question.
@@ -403,9 +420,18 @@ const ANSWERS = {
 
 const answerView = (kind, row) => (row ? { ...ANSWERS[kind].view(row), savedAt: row.savedAt } : null);
 
+// A copy's key as a released Student may be shown it: the copy's own, without its
+// shape version; an ESSAY has none.
+const keyView = (question) => {
+    if (!question.answerKey) return null;
+    const { v: _version, ...key } = question.answerKey;
+    return key;
+};
+
 // A question as this Submission shows it: its options in the order drawn, none
-// marked, and the Student's own saved answer.
-function studentQuestionView(question, optionOrder, answer) {
+// marked, and the Student's own saved answer. Released (ticket 04): the points it
+// earned and the teacher's comment, and with showKeyOnRelease its key.
+function studentQuestionView(question, optionOrder, answer, { released = false, showKey = false } = {}) {
     const { body, imageId, options } = question.payload;
     const byId = new Map((options ?? []).map((option) => [option.id, option]));
     return {
@@ -419,6 +445,8 @@ function studentQuestionView(question, optionOrder, answer) {
             ? { options: (optionOrder ?? []).map((optionId) => byId.get(optionId)).filter(Boolean) }
             : {}),
         answer: answerView(question.kind, answer),
+        marks: released ? { points: pointsOf(answer), comment: answer?.comment ?? null } : null,
+        key: released && showKey ? keyView(question) : null,
     };
 }
 
@@ -443,6 +471,10 @@ async function outlineForStudent(auth, id) {
 
     const used = submissions.filter((submission) => !submission.voidedAt).length;
     const inProgress = submissions.find(isInProgress) ?? null;
+    const scores = await scoresOf(
+        prisma,
+        submissions.filter((submission) => submission.releasedAt).map((submission) => submission.id)
+    );
     return {
         assessment: studentAssessmentView(row),
         attemptsUsed: used,
@@ -450,35 +482,60 @@ async function outlineForStudent(auth, id) {
         attemptsLeft: row.mode === 'ONLINE' ? Math.max(0, row.maxAttempts - used) : 0,
         inProgressId: inProgress?.id ?? null,
         canStart: startRefusalOf(row, { used, inProgress, now, hardEnd }) === null,
-        submissions: submissions.map(ownSubmissionView),
+        // The Score that counts: the highest of the released ones (ticket 04), else null.
+        score: countedScoreOf(submissions, scores),
+        submissions: submissions.map((submission) =>
+            ownSubmissionView(submission, currentScoreOf(scores, submission.id))
+        ),
     };
 }
 
 // One of the Student's own Submissions with its questions as shown, and what they
-// saved. Never a key, never points earned; a closed or void one reads the same.
+// saved. Before release never a key and never points earned; a closed or void one
+// reads the same. Released (ticket 04): its Score, each answer's points and comment,
+// and the key when the teacher shows it - read with it only then.
 async function submissionForStudent(auth, id) {
     const submission = await loadOwnSubmission(auth, id);
+    const released = submission.releasedAt !== null;
+    const assessment = await loadPublished(submission.assessmentId);
+    const showKey = released && assessment.showKeyOnRelease;
     const questionIds = submission.shownOrder.questions;
-    const [assessment, questions, answers] = await Promise.all([
-        loadPublished(submission.assessmentId),
-        prisma.assessmentQuestion.findMany({ where: { id: { in: questionIds } }, select: studentQuestionSelect }),
-        prisma.submissionAnswer.findMany({ where: { submissionId: submission.id }, select: answerSelect }),
+    const [questions, answers, scores] = await Promise.all([
+        prisma.assessmentQuestion.findMany({
+            where: { id: { in: questionIds } },
+            select: showKey ? { ...studentQuestionSelect, answerKey: true } : studentQuestionSelect,
+        }),
+        prisma.submissionAnswer.findMany({
+            where: { submissionId: submission.id },
+            select: released ? releasedAnswerSelect : answerSelect,
+        }),
+        scoresOf(prisma, released ? [submission.id] : []),
     ]);
 
     const questionById = new Map(questions.map((question) => [question.id, question]));
     const answerById = new Map(answers.map((answer) => [answer.assessmentQuestionId, answer]));
     return {
-        submission: ownSubmissionView(submission),
+        submission: ownSubmissionView(submission, currentScoreOf(scores, submission.id)),
         assessment: studentAssessmentView(assessment),
         questions: questionIds.map((questionId) =>
             studentQuestionView(
                 questionById.get(questionId),
                 submission.shownOrder.options[questionId],
-                answerById.get(questionId)
+                answerById.get(questionId),
+                { released, showKey }
             )
         ),
     };
 }
+
+// An ESSAY's file, as a route sends it: PDF and images open in the browser, DOCX and
+// PPTX download. For its Student here, and for the staff (ticket 04).
+const essayFileOf = async (answer) => ({
+    buffer: await getStorage().read(answer.fileStorageKey),
+    contentType: answer.fileMimeType,
+    fileName: answer.fileName,
+    inline: INLINE_TYPES.has(TYPE_OF_MIME[answer.fileMimeType]),
+});
 
 // An ESSAY's file, back to the Student who sent it.
 async function readEssayFile(auth, submissionId, questionId) {
@@ -490,13 +547,7 @@ async function readEssayFile(auth, submissionId, questionId) {
         })
         : null;
     if (!answer?.fileStorageKey) throw notFound('File not found');
-
-    return {
-        buffer: await getStorage().read(answer.fileStorageKey),
-        contentType: answer.fileMimeType,
-        fileName: answer.fileName,
-        inline: INLINE_TYPES.has(TYPE_OF_MIME[answer.fileMimeType]),
-    };
+    return essayFileOf(answer);
 }
 
 // An image one of its questions holds, for the Student answering it. One no question
@@ -706,6 +757,8 @@ async function handIn(auth, submissionId) {
 }
 
 export {
+    answerView,
+    essayFileOf,
     closeExpiredSubmissions,
     voidSubmissions,
     remarkQuestions,
