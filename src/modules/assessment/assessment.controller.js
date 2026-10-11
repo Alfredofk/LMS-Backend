@@ -3,11 +3,13 @@ import * as bank from './assessment.bank.js';
 import * as service from './assessment.service.js';
 import * as answering from './assessment.submission.js';
 import * as marking from './assessment.marking.js';
+import * as exceptions from './assessment.exception.js';
 
 // Thin, like the other controllers. The question bank (ticket 01) lives in
 // assessment.bank.js; the Assessments (ticket 02) in assessment.service.js; a
 // Student's Submissions (ticket 03) in assessment.submission.js; marking, release and
-// Scores (ticket 04) in assessment.marking.js.
+// Scores (ticket 04) in assessment.marking.js; make-up and remedial (ticket 05) in
+// assessment.exception.js.
 
 // ---- the question bank ----
 
@@ -209,6 +211,24 @@ async function releaseAssessment(req, res) {
     return ok(res, { ...outcome, message: 'Released.' });
 }
 
+// ---- make-up and remedial (ticket 05) ----
+
+async function listExceptions(req, res) {
+    return ok(res, { exceptions: await exceptions.listExceptions(req.auth, req.validated.params.id) });
+}
+
+async function setException(req, res) {
+    const { id, studentProfileId } = req.validated.params;
+    const exception = await exceptions.setException(req.auth, id, studentProfileId, req.validated.body);
+    return ok(res, { exception, message: 'Exception saved.' });
+}
+
+async function removeException(req, res) {
+    const { id, studentProfileId } = req.validated.params;
+    await exceptions.removeException(req.auth, id, studentProfileId);
+    return ok(res, { message: 'Exception removed.' });
+}
+
 export {
     listQuestions,
     getQuestion,
@@ -246,4 +266,7 @@ export {
     markSubmission,
     enterOfflineMarks,
     releaseAssessment,
+    listExceptions,
+    setException,
+    removeException,
 };

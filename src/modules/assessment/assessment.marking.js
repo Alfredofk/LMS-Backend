@@ -11,7 +11,14 @@ import {
     describe,
     assessmentView,
 } from './assessment.service.js';
-import { answerView, essayFileOf, closeExpiredSubmissions } from './assessment.submission.js';
+import {
+    exceptionsOf,
+    ownTermsOf,
+    exceptionView,
+    answerView,
+    essayFileOf,
+    closeExpiredSubmissions,
+} from './assessment.submission.js';
 import {
     markedSubmissionSelect,
     numberOf,
@@ -58,8 +65,9 @@ const log = createLogger('Assessment');
 //   who sat the paper and moved since still gets theirs. One per Student.
 // - The results list every Student of that roster, and anyone with a Submission:
 //   status, attempts, what waits, and the Score that counts. One with no Submission
-//   once the window has closed "did not submit": no Score, which is not 0. Ticket 07
-//   adds the integrity counts (06) and the make-up windows (05) to it.
+//   once the window has closed "did not submit": no Score, which is not 0. The window
+//   is the Student's own - a make-up's, if any - and each Student carries their
+//   exception (ticket 05, 2026-10-10). Ticket 07 adds the integrity counts (06).
 // - Nothing in a cancelled Assessment is marked, released or corrected; its Scores
 //   stay.
 
@@ -75,6 +83,7 @@ const staffSubmissionSelect = {
     deadlineAt: true,
     submittedAt: true,
     late: true,
+    remedial: true,
     voidedAt: true,
     voidReason: true,
     comment: true,
@@ -191,6 +200,8 @@ const attemptView = (row, mark, score) => ({
     submittedAt: row.submittedAt,
     closedBy: row.closedBy,
     late: row.late,
+    // Started under a remedial exception (2026-10-11), for the grading slice's rule.
+    remedial: row.remedial,
     voidReason: row.voidReason,
     releasedAt: row.releasedAt,
     waitingForMarking: mark?.unmarked ?? 0,
@@ -199,14 +210,15 @@ const attemptView = (row, mark, score) => ({
 });
 
 // Where one Student stands: released when a Score counts, else the furthest their
-// attempts got. With none, before the window closes they have not started; after it
-// they did not submit - no Score, which is not 0 (spec).
-function studentStatusOf(attempts, countedScore, row, now) {
+// attempts got. With none, before their window closes - a make-up's, if any (ticket
+// 05) - they have not started; after it they did not submit - no Score, which is not
+// 0 (spec).
+function studentStatusOf(attempts, countedScore, closesAt, now) {
     if (countedScore !== null) return 'RELEASED';
     for (const status of ['WAITING_FOR_MARKING', 'WAITING_FOR_RELEASE', 'IN_PROGRESS']) {
         if (attempts.some((attempt) => attempt.status === status)) return status;
     }
-    return now < row.closesAt ? 'NOT_STARTED' : 'DID_NOT_SUBMIT';
+    return now < closesAt ? 'NOT_STARTED' : 'DID_NOT_SUBMIT';
 }
 
 const markingQuestionView = (copy, answer) => ({
@@ -276,14 +288,16 @@ async function results(auth, id) {
     const { row, standing } = await loadForStaff(auth, id);
     const now = new Date();
     await closeExpiredSubmissions({ assessmentId: row.id }, now);
-    const [roster, submissions] = await Promise.all([
+    const [roster, submissions, exceptions] = await Promise.all([
         rosterOf(auth, row.classSubject),
         prisma.submission.findMany({
             where: { assessmentId: row.id },
             select: staffSubmissionSelect,
             orderBy: { attempt: 'asc' },
         }),
+        exceptionsOf({ assessmentId: row.id }),
     ]);
+    const exceptionOfStudent = new Map(exceptions.map((exception) => [exception.studentProfileId, exception]));
     const closed = submissions.filter(isClosed);
     const [marks, scores] = await Promise.all([
         marksOf(prisma, closed),
@@ -301,12 +315,14 @@ async function results(auth, id) {
             attemptView(submission, marks.get(submission.id), currentScoreOf(scores, submission.id))
         );
         const countedScore = countedScoreOf(own, scores);
+        const exception = exceptionOfStudent.get(studentProfileId) ?? null;
         return {
             studentProfileId,
             fullName: nameOf.get(studentProfileId) ?? null,
             placedNow: roster.placedNow(studentProfileId),
-            status: studentStatusOf(attempts, countedScore, row, now),
+            status: studentStatusOf(attempts, countedScore, ownTermsOf(row, exception).closesAt, now),
             countedScore,
+            exception: exceptionView(exception),
             attempts,
         };
     });
@@ -556,4 +572,4 @@ async function release(auth, id) {
     return { assessment: assessmentView(await loadAssessment(row.id), 'teacher'), ...outcome };
 }
 
-export { results, submissionForMarking, readEssayFile, mark, enterOfflineMarks, release };
+export { loadForStaff, results, submissionForMarking, readEssayFile, mark, enterOfflineMarks, release };

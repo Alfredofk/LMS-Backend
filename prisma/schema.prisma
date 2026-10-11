@@ -450,6 +450,7 @@ model School {
     submissionAnswers SubmissionAnswer[]
     submissionAnswerOptions SubmissionAnswerOption[]
     scores            Score[]
+    assessmentExceptions AssessmentException[]
 
     @@index([deactivatedAt])
 }
@@ -556,6 +557,7 @@ model StudentProfile {
     attendances      Attendance[]
     contentProgress  ContentProgress[]
     submissions      Submission[]
+    assessmentExceptions AssessmentException[]
 
     @@index([schoolId])
 }
@@ -1228,6 +1230,7 @@ model Assessment {
     copies       Assessment[]         @relation("AssessmentCopy")
     questions    AssessmentQuestion[]
     submissions  Submission[]
+    exceptions   AssessmentException[]
 
     @@index([schoolId])
     @@index([classSubjectId])
@@ -1314,6 +1317,11 @@ model Submission {
     closedBy         SubmissionClose?
     /// Closed after the Assessment's closesAt, which acceptLate allows.
     late             Boolean          @default(false)
+    /// Started under a remedial Assessment Exception (ticket 05's follow-up, owner
+    /// 2026-10-11), copied from it at the start: a later change to the exception
+    /// leaves this attempt as it was. The grading slice applies the school's
+    /// remedial rule (a KKTP cap, the highest, or an average) to these.
+    remedial         Boolean          @default(false)
     voidedAt         DateTime?
     voidReason       String?
     shownOrder       Json
@@ -1435,6 +1443,53 @@ model Score {
 
     @@index([submissionId, recordedAt])
     @@index([schoolId])
+}
+
+// ---------------------------------------------------------------------------
+// Assessment - make-up and remedial (assessment ticket 05)
+// ---------------------------------------------------------------------------
+
+/// One Student's exception on an ONLINE Assessment (assessment ticket 05, owner
+/// 2026-10-04), set by its Answering Teacher for a Student placed in its Class now:
+/// - a make-up (susulan): opensAt and closesAt, both or neither - the Student's own
+///   window, inside the Semester, in place of the Class's (2026-10-10). Late is
+///   counted from its closesAt, and with acceptLate runs to the Semester's end;
+/// - extraAttempts, added to the Assessment's maxAttempts. The highest Score counts
+///   (ticket 04), so a better result counts by itself;
+/// - remedial (owner, 2026-10-11): whether the attempts started under it are a
+///   remedial, copied to each Submission at its start. A remedial gives its
+///   extraAttempts alone, at least one, counting only the remedial attempts, and only
+///   once the Class's window has closed. A make-up for the sick, or extra attempts
+///   after a lost connection, is not one.
+///
+/// One live row per Student and Assessment, changed in place (2026-10-10): a partial
+/// unique index in migration SQL. It holds no mark, so the Score rule does not bind
+/// it. Removed softly (removedAt), and only while the Student has started no
+/// Submission since it was set.
+model AssessmentException {
+    id               String    @id @default(cuid())
+    schoolId         String
+    assessmentId     String
+    studentProfileId String
+    opensAt          DateTime?
+    closesAt         DateTime?
+    /// 0 to 20, added to maxAttempts.
+    extraAttempts    Int       @default(0)
+    remedial         Boolean   @default(false)
+    /// Who set it, or changed it last.
+    setByUserId      String
+    removedAt        DateTime?
+    removedByUserId  String?
+    createdAt        DateTime  @default(now())
+    updatedAt        DateTime  @updatedAt
+
+    school         School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    assessment     Assessment     @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+    studentProfile StudentProfile @relation(fields: [studentProfileId], references: [id], onDelete: Cascade)
+
+    @@index([schoolId])
+    @@index([assessmentId])
+    @@index([studentProfileId])
 }
 
 /// A student moved from one class to another inside the school (ticket 16). The

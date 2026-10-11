@@ -3,10 +3,11 @@ import { z } from 'zod';
 import { date } from '../holidays/holidays.schema.js';
 
 // The question bank (assessment ticket 01), Assessments (ticket 02), answering them
-// (ticket 03), and marking and releasing them (ticket 04). Only the shape is checked
-// here, a question's rules per kind included. Who may write for which Subject and
-// Grade Level, whose images may be named, sanitising the body, which answer a
-// question takes, and how many points it is worth are the services'.
+// (ticket 03), marking and releasing them (ticket 04), and a Student's make-up and
+// remedial (ticket 05). Only the shape is checked here, a question's rules per kind
+// included. Who may write for which Subject and Grade Level, whose images may be
+// named, sanitising the body, which answer a question takes, and how many points it
+// is worth are the services'.
 
 const id = z.string().min(1);
 
@@ -317,6 +318,39 @@ const offlineMarksBody = z.strictObject({
     reason: reason.optional(),
 });
 
+// ---- make-up and remedial (ticket 05) ----
+
+const exceptionParams = z.object({ id, studentProfileId: id });
+
+// The whole exception, every field named: a make-up window or null, the extra
+// attempts, and whether it is a remedial (owner, 2026-10-11) - named too, so a form
+// that forgets it is refused rather than turning a remedial into none. A change
+// sends back the updatedAt it read; a first one sends none. Whether the window fits
+// the Semester, whether the Class's window has closed for a remedial, and whether a
+// change is stale, are the service's. A remedial is its extra attempts alone
+// (2026-10-11), so it gives at least one.
+const exceptionBody = z
+    .strictObject({
+        makeUp: z
+            .strictObject({ opensAt: instant, closesAt: instant })
+            .refine((value) => value.opensAt < value.closesAt, {
+                path: ['closesAt'],
+                message: 'A make-up window closes after it opens',
+            })
+            .nullable(),
+        extraAttempts: z.number().int().min(0, 'Extra attempts are 0 to 20').max(20, 'Extra attempts are 0 to 20'),
+        remedial: z.boolean({ error: 'Say whether this is a remedial: true or false' }),
+        updatedAt: seen.updatedAt.optional(),
+    })
+    .refine(
+        (value) => value.makeUp !== null || value.extraAttempts > 0,
+        'Give a make-up window or extra attempts; to take an exception back, remove it'
+    )
+    .refine((value) => !value.remedial || value.extraAttempts > 0, {
+        path: ['extraAttempts'],
+        message: 'A remedial gives its extra attempts alone: 1 to 20',
+    });
+
 export {
     idParams,
     imageIdParams,
@@ -339,4 +373,6 @@ export {
     submissionAnswerParams,
     markBody,
     offlineMarksBody,
+    exceptionParams,
+    exceptionBody,
 };

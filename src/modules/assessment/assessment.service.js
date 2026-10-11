@@ -938,6 +938,7 @@ export {
     loadAssessment,
     assertTeacherStanding,
     assertNotCancelled,
+    assertWindow,
     describe,
     assessmentView,
     listForClassSubject,

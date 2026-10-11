@@ -26,7 +26,8 @@ const log = createLogger('Assessment');
 //   them, and starts or answers nothing more.
 // - When: from opensAt to closesAt. With acceptLate, starting and handing in stay
 //   open until the end of the Semester's last day, flagged late (answered question 3).
-// - Max attempts count the Submissions not void.
+// - Max attempts count the Submissions not void. Under a remedial exception only the
+//   remedial ones, against its extra attempts alone (2026-10-11).
 // - The time limit runs from the start, capped by that hard end. Answers are saved
 //   one by one, so a lost connection loses nothing. A Submission whose deadline has
 //   passed is closed the first time anything touches it, as of its deadline, and
@@ -47,6 +48,14 @@ const log = createLogger('Assessment');
 //   newest, with the newest correction's reason - the points each answer earned and
 //   the comments, and the key only if the teacher chose to show it. Before that,
 //   none of them; and nothing of anyone else's, ever (spec invariant 8).
+// - A Student's exception (ticket 05, set in assessment.exception.js) changes their
+//   terms alone (ownTermsOf): a make-up's window replaces the Class's, so starting,
+//   the hard end and late all follow it (2026-10-10); its extra attempts add to
+//   maxAttempts. Their outline shows their own terms, never the Class's.
+// - An attempt started under a remedial exception is a remedial (owner, 2026-10-11):
+//   start() copies the flag to the Submission, so a later change to the exception
+//   leaves it as it was, and the grading slice knows which Scores the school's
+//   remedial rule applies to.
 
 const SHAPE_VERSION = 1;
 const MINUTE_MS = 60 * 1000;
@@ -96,12 +105,14 @@ const studentQuestionSelect = { id: true, kind: true, mcqScoring: true, points: 
 const submissionSelect = {
     id: true,
     assessmentId: true,
+    studentProfileId: true,
     attempt: true,
     startedAt: true,
     deadlineAt: true,
     submittedAt: true,
     closedBy: true,
     late: true,
+    remedial: true,
     voidedAt: true,
     voidReason: true,
     shownOrder: true,
@@ -134,11 +145,68 @@ const markingSelect = {
     assessmentQuestion: { select: { kind: true, mcqScoring: true, points: true, answerKey: true } },
 };
 
+// A Student's exception (ticket 05), as the rule below and the staff's routes read it.
+const exceptionSelect = {
+    id: true,
+    assessmentId: true,
+    studentProfileId: true,
+    opensAt: true,
+    closesAt: true,
+    extraAttempts: true,
+    remedial: true,
+    setByUserId: true,
+    createdAt: true,
+    updatedAt: true,
+};
+
 // 'KUIS "Bab 3" of MTK in 11A', for messages and log lines.
 const describe = (row) =>
     `${row.type} "${row.title}" of ${row.classSubject.subject.code} in ${row.classSubject.class.name}`;
 
 const isInProgress = (row) => row.submittedAt === null && row.voidedAt === null;
+
+// ---------------------------------------------------------------------------
+// A Student's own terms (ticket 05)
+// ---------------------------------------------------------------------------
+
+// The live exceptions among `where`: at most one per Student and Assessment, by the
+// partial unique index AssessmentException_one_live_per_student.
+const exceptionsOf = (where) =>
+    prisma.assessmentException.findMany({ where: { ...where, ...LIVE }, select: exceptionSelect });
+
+const exceptionOf = (assessmentId, studentProfileId) =>
+    prisma.assessmentException.findFirst({
+        where: { assessmentId, studentProfileId, ...LIVE },
+        select: exceptionSelect,
+    });
+
+// The window and attempts that hold for one Student: a make-up's window in place of
+// the Class's (2026-10-10), and its extra attempts on top of maxAttempts - or, under
+// a remedial, its extra attempts alone (owner, 2026-10-11): a remedial comes after the
+// Class's window, so the Assessment's own attempts are spent or closed. With no
+// exception, the Assessment's own.
+const ownTermsOf = (row, exception) => ({
+    opensAt: exception?.opensAt ?? row.opensAt,
+    closesAt: exception?.closesAt ?? row.closesAt,
+    maxAttempts: exception?.remedial ? exception.extraAttempts : row.maxAttempts + (exception?.extraAttempts ?? 0),
+});
+
+// The attempts counted against those terms: every one not void, or under a remedial
+// only the remedial ones (2026-10-11). A Student who left attempts unused gets no more
+// of a remedial than one who used them all.
+const usedAttemptsOf = (exception, submissions) =>
+    submissions.filter((submission) => !submission.voidedAt && (!exception?.remedial || submission.remedial)).length;
+
+const exceptionView = (exception) =>
+    exception
+        ? {
+            makeUp: exception.opensAt ? { opensAt: exception.opensAt, closesAt: exception.closesAt } : null,
+            extraAttempts: exception.extraAttempts,
+            remedial: exception.remedial,
+        }
+        : null;
+
+const pairKey = (row) => `${row.assessmentId}:${row.studentProfileId}`;
 
 // ---------------------------------------------------------------------------
 // Marking
@@ -195,16 +263,31 @@ const submissionCountOf = (assessmentId) => prisma.submission.count({ where: { a
 // deadline, and marked (owner, 2026-10-08). Whoever touches one first - its Student,
 // the staff's results or marking, a release (ticket 04) - closes it, and gets what a
 // clock would have written. Each is claimed, so two readers at once close it once.
+// Late is counted from the Student's own closesAt: a make-up's, if any (ticket 05).
 async function closeExpiredSubmissions(where, now = new Date()) {
     const expired = await prisma.submission.findMany({
         where: { ...where, ...IN_PROGRESS, deadlineAt: { lte: now } },
-        select: { id: true, attempt: true, deadlineAt: true, assessment: { select: studentAssessmentSelect } },
+        select: {
+            id: true,
+            assessmentId: true,
+            studentProfileId: true,
+            attempt: true,
+            deadlineAt: true,
+            assessment: { select: studentAssessmentSelect },
+        },
     });
+    if (expired.length === 0) return;
+    const exceptions = await exceptionsOf({
+        OR: expired.map((row) => ({ assessmentId: row.assessmentId, studentProfileId: row.studentProfileId })),
+    });
+    const exceptionByPair = new Map(exceptions.map((exception) => [pairKey(exception), exception]));
+
     for (const row of expired) {
+        const { closesAt } = ownTermsOf(row.assessment, exceptionByPair.get(pairKey(row)));
         const closed = await prisma.$transaction(async (tx) => {
             const claimed = await tx.submission.updateMany({
                 where: { id: row.id, ...IN_PROGRESS },
-                data: { submittedAt: row.deadlineAt, closedBy: 'TIME', late: row.deadlineAt > row.assessment.closesAt },
+                data: { submittedAt: row.deadlineAt, closedBy: 'TIME', late: row.deadlineAt > closesAt },
             });
             if (claimed.count === 0) return false;
             await markSubmission(tx, row.id);
@@ -295,24 +378,26 @@ async function claimOpen(tx, submissionId, now) {
     if (claimed.count === 0) throw conflict('This attempt was closed meanwhile');
 }
 
-// The hard end no Submission passes: closesAt, or with acceptLate the end of the
-// Semester's last day in the school's zone (answered question 3).
-async function hardEndOf(auth, assessment) {
-    if (!assessment.acceptLate) return assessment.closesAt;
+// The hard end no Submission passes: the Student's closesAt - a make-up's, if any
+// (ticket 05) - or with acceptLate the end of the Semester's last day in the school's
+// zone (answered question 3).
+async function hardEndOf(auth, assessment, terms) {
+    if (!assessment.acceptLate) return terms.closesAt;
     return (await semesterSpan(auth.schoolId, assessment.classSubject.semester)).end;
 }
 
 // Why the Student may not start an attempt now, as the error start() throws, or null:
-// one rule for start() and the outline's canStart. Lowering maxAttempts below what a
-// Student used keeps what they did, and they start no new one (answered question 6).
-function startRefusalOf(row, { used, inProgress, now, hardEnd }) {
+// one rule for start() and the outline's canStart, on the Student's own terms (ticket
+// 05). Lowering maxAttempts below what a Student used keeps what they did, and they
+// start no new one (answered question 6).
+function startRefusalOf(row, terms, { used, inProgress, now, hardEnd }) {
     if (row.mode === 'OFFLINE') return badRequest(`${describe(row)} is offline: the teacher enters its marks`);
     if (row.cancelledAt) return conflict(`${describe(row)} was cancelled`);
     if (row.questions.length === 0) return conflict(`${describe(row)} has no questions`);
     if (inProgress) return conflict('You have an attempt in progress; continue it');
-    if (now < row.opensAt) return conflict(`${describe(row)} is not open yet`);
+    if (now < terms.opensAt) return conflict(`${describe(row)} is not open yet`);
     if (now >= hardEnd) return conflict(`${describe(row)} is closed`);
-    if (used >= row.maxAttempts) return conflict(`You have used every attempt at ${describe(row)}`);
+    if (used >= terms.maxAttempts) return conflict(`You have used every attempt at ${describe(row)}`);
     return null;
 }
 
@@ -336,6 +421,7 @@ const ownSubmissionView = (row, score = null) => ({
     submittedAt: row.submittedAt,
     closedBy: row.closedBy,
     late: row.late,
+    remedial: row.remedial,
     voidedAt: row.voidedAt,
     voidReason: row.voidReason,
     released: row.releasedAt !== null,
@@ -343,8 +429,9 @@ const ownSubmissionView = (row, score = null) => ({
     comment: row.releasedAt ? row.comment : null,
 });
 
-// The outline a Student reads: never a question.
-const studentAssessmentView = (row) => ({
+// The outline a Student reads: never a question. The window and maxAttempts are the
+// Student's own (ticket 05), and `exception` says when they differ from the Class's.
+const studentAssessmentView = (row, exception) => ({
     id: row.id,
     classSubject: {
         id: row.classSubject.id,
@@ -360,11 +447,10 @@ const studentAssessmentView = (row) => ({
     mode: row.mode,
     title: row.title,
     instructions: row.instructions,
-    opensAt: row.opensAt,
-    closesAt: row.closesAt,
+    ...ownTermsOf(row, exception),
     acceptLate: row.acceptLate,
     timeLimitMinutes: row.timeLimitMinutes,
-    maxAttempts: row.maxAttempts,
+    exception: exceptionView(exception),
     status: row.cancelledAt ? 'CANCELLED' : 'PUBLISHED',
     cancelReason: row.cancelReason,
     questionCount: row.questions.length,
@@ -454,34 +540,36 @@ function studentQuestionView(question, optionOrder, answer, { released = false, 
 // Reading
 // ---------------------------------------------------------------------------
 
-// Before starting: the outline, what the Student may still do, and their own
-// Submissions to it. No question (2026-10-08).
+// Before starting: the outline on the Student's own terms, what they may still do,
+// and their own Submissions to it. No question (2026-10-08).
 async function outlineForStudent(auth, id) {
     const { row, studentProfileId } = await loadForStudent(auth, id);
     const now = new Date();
     await closeExpiredSubmissions({ assessmentId: row.id, studentProfileId }, now);
-    const [submissions, hardEnd] = await Promise.all([
+    const [submissions, exception] = await Promise.all([
         prisma.submission.findMany({
             where: { assessmentId: row.id, studentProfileId },
             select: submissionSelect,
             orderBy: { attempt: 'asc' },
         }),
-        hardEndOf(auth, row),
+        exceptionOf(row.id, studentProfileId),
     ]);
+    const terms = ownTermsOf(row, exception);
+    const hardEnd = await hardEndOf(auth, row, terms);
 
-    const used = submissions.filter((submission) => !submission.voidedAt).length;
+    const used = usedAttemptsOf(exception, submissions);
     const inProgress = submissions.find(isInProgress) ?? null;
     const scores = await scoresOf(
         prisma,
         submissions.filter((submission) => submission.releasedAt).map((submission) => submission.id)
     );
     return {
-        assessment: studentAssessmentView(row),
+        assessment: studentAssessmentView(row, exception),
         attemptsUsed: used,
         // An OFFLINE one takes no attempt: the teacher enters its marks.
-        attemptsLeft: row.mode === 'ONLINE' ? Math.max(0, row.maxAttempts - used) : 0,
+        attemptsLeft: row.mode === 'ONLINE' ? Math.max(0, terms.maxAttempts - used) : 0,
         inProgressId: inProgress?.id ?? null,
-        canStart: startRefusalOf(row, { used, inProgress, now, hardEnd }) === null,
+        canStart: startRefusalOf(row, terms, { used, inProgress, now, hardEnd }) === null,
         // The Score that counts: the highest of the released ones (ticket 04), else null.
         score: countedScoreOf(submissions, scores),
         submissions: submissions.map((submission) =>
@@ -497,7 +585,10 @@ async function outlineForStudent(auth, id) {
 async function submissionForStudent(auth, id) {
     const submission = await loadOwnSubmission(auth, id);
     const released = submission.releasedAt !== null;
-    const assessment = await loadPublished(submission.assessmentId);
+    const [assessment, exception] = await Promise.all([
+        loadPublished(submission.assessmentId),
+        exceptionOf(submission.assessmentId, submission.studentProfileId),
+    ]);
     const showKey = released && assessment.showKeyOnRelease;
     const questionIds = submission.shownOrder.questions;
     const [questions, answers, scores] = await Promise.all([
@@ -516,7 +607,7 @@ async function submissionForStudent(auth, id) {
     const answerById = new Map(answers.map((answer) => [answer.assessmentQuestionId, answer]));
     return {
         submission: ownSubmissionView(submission, currentScoreOf(scores, submission.id)),
-        assessment: studentAssessmentView(assessment),
+        assessment: studentAssessmentView(assessment, exception),
         questions: questionIds.map((questionId) =>
             studentQuestionView(
                 questionById.get(questionId),
@@ -596,21 +687,25 @@ function shownOrderOf(row, questions) {
     return { v: SHAPE_VERSION, questions: row.shuffleQuestions ? shuffled(questionIds) : questionIds, options };
 }
 
-// A new attempt. A second one in progress is impossible, even racing: the partial
-// unique index Submission_one_in_progress_per_student, and the attempt number's.
+// A new attempt, on the Student's own terms (ticket 05), and a remedial when their
+// exception is one, as it stands now (2026-10-11). A second one in progress is
+// impossible, even racing: the partial unique index
+// Submission_one_in_progress_per_student, and the attempt number's.
 async function start(auth, id) {
     const { row, studentProfileId } = await loadForStudent(auth, id);
     const now = new Date();
     await closeExpiredSubmissions({ assessmentId: row.id, studentProfileId }, now);
-    const [submissions, hardEnd] = await Promise.all([
+    const [submissions, exception] = await Promise.all([
         prisma.submission.findMany({
             where: { assessmentId: row.id, studentProfileId },
-            select: { submittedAt: true, voidedAt: true },
+            select: { submittedAt: true, voidedAt: true, remedial: true },
         }),
-        hardEndOf(auth, row),
+        exceptionOf(row.id, studentProfileId),
     ]);
-    const used = submissions.filter((submission) => !submission.voidedAt).length;
-    const refusal = startRefusalOf(row, { used, inProgress: submissions.some(isInProgress), now, hardEnd });
+    const terms = ownTermsOf(row, exception);
+    const hardEnd = await hardEndOf(auth, row, terms);
+    const used = usedAttemptsOf(exception, submissions);
+    const refusal = startRefusalOf(row, terms, { used, inProgress: submissions.some(isInProgress), now, hardEnd });
     if (refusal) throw refusal;
 
     const limit = row.timeLimitMinutes ? new Date(now.getTime() + row.timeLimitMinutes * MINUTE_MS) : hardEnd;
@@ -620,6 +715,7 @@ async function start(auth, id) {
         orderBy: { order: 'asc' },
     });
     const attempt = submissions.length + 1;
+    const remedial = exception?.remedial ?? false;
 
     let created;
     try {
@@ -631,6 +727,7 @@ async function start(auth, id) {
                     attempt,
                     startedAt: now,
                     deadlineAt: limit < hardEnd ? limit : hardEnd,
+                    remedial,
                     shownOrder: shownOrderOf(row, questions),
                 },
                 select: { id: true },
@@ -643,7 +740,7 @@ async function start(auth, id) {
         throw conflict('An attempt was started meanwhile; continue it');
     }
 
-    log.info(`${describe(row)}: attempt ${attempt} started`);
+    log.info(`${describe(row)}: ${remedial ? 'remedial ' : ''}attempt ${attempt} started`);
     return submissionForStudent(auth, created.id);
 }
 
@@ -736,12 +833,14 @@ async function saveEssayFile(auth, submissionId, questionId, file) {
 }
 
 // The Student hands it in, before its deadline: marked in the same transaction, and
-// late after closesAt, which only acceptLate allows. Past the deadline it was closed
-// by time already, and this is refused.
+// late after their own closesAt - a make-up's, if any (ticket 05) - which only
+// acceptLate allows. Past the deadline it was closed by time already, and this is
+// refused.
 async function handIn(auth, submissionId) {
     const { submission, assessment } = await loadAnswerable(auth, submissionId);
+    const exception = await exceptionOf(assessment.id, submission.studentProfileId);
     const now = new Date();
-    const late = now > assessment.closesAt;
+    const late = now > ownTermsOf(assessment, exception).closesAt;
     await prisma.$transaction(async (tx) => {
         const claimed = await tx.submission.updateMany({
             where: { id: submission.id, ...IN_PROGRESS, deadlineAt: { gt: now } },
@@ -757,6 +856,11 @@ async function handIn(auth, submissionId) {
 }
 
 export {
+    exceptionSelect,
+    exceptionsOf,
+    exceptionOf,
+    ownTermsOf,
+    exceptionView,
     answerView,
     essayFileOf,
     closeExpiredSubmissions,

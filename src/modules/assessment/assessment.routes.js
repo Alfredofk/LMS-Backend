@@ -28,9 +28,11 @@ import {
     submissionAnswerParams,
     markBody,
     offlineMarksBody,
+    exceptionParams,
+    exceptionBody,
 } from './assessment.schema.js';
 
-// Mounted at /api/assessments (assessment tickets 01 to 04).
+// Mounted at /api/assessments (assessment tickets 01 to 05).
 //
 // The question bank: teachers write questions per Subject x Grade Level, for what
 // they teach now, and read the ones of what they teach now along with their own.
@@ -63,6 +65,11 @@ import {
 // records the Scores; after that a mark changes only with a reason, as a correction.
 // The homeroom teacher, the Principal and the Vice Principals read the results and
 // each Submission, and change nothing.
+//
+// Make-up and remedial (ticket 05): the same teacher gives one Student of the Class
+// their own window, extra attempts, or both, on a published online Assessment, saying
+// whether it is a remedial, and changes or removes it; the same readers read them and
+// change nothing.
 //
 // staff is the coarse filter on the staff's routes, and student on the Student's;
 // each answers 404, not 403, to everyone else - a Guardian reaches none of these,
@@ -205,5 +212,21 @@ router.put(
     controller.enterOfflineMarks
 );
 router.post('/:id/release', staff, validate({ params: idParams }), controller.releaseAssessment);
+
+// ---- make-up and remedial (ticket 05) ----
+
+router.get('/:id/exceptions', staff, validate({ params: idParams }), controller.listExceptions);
+router.put(
+    '/:id/exceptions/:studentProfileId',
+    staff,
+    validate({ params: exceptionParams, body: exceptionBody }),
+    controller.setException
+);
+router.delete(
+    '/:id/exceptions/:studentProfileId',
+    staff,
+    validate({ params: exceptionParams }),
+    controller.removeException
+);
 
 export default router;

@@ -75,3 +75,11 @@ CREATE UNIQUE INDEX "TeacherProfile_live_nuptk_per_school"
 CREATE UNIQUE INDEX "Submission_one_in_progress_per_student"
     ON "Submission" ("assessmentId", "studentProfileId")
     WHERE "submittedAt" IS NULL AND "voidedAt" IS NULL;
+
+-- One live exception - a make-up, a remedial, or both - per Student and Assessment
+-- (assessment ticket 05), changed in place. A removed one must repeat, so an
+-- exception taken back may be set again - added in
+-- 20261010104445_add_assessment_exceptions.
+CREATE UNIQUE INDEX "AssessmentException_one_live_per_student"
+    ON "AssessmentException" ("assessmentId", "studentProfileId")
+    WHERE "removedAt" IS NULL;
