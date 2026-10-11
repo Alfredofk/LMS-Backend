@@ -204,6 +204,10 @@ const attemptView = (row, mark, score) => ({
     remedial: row.remedial,
     voidReason: row.voidReason,
     releasedAt: row.releasedAt,
+    // The teacher's comment on the whole attempt, in the results too (owner, 2026-10-11):
+    // a form of offline marks fills from one read, and one that saves a mark with an
+    // empty comment it could not fill would clear the comment saved before.
+    comment: row.comment,
     waitingForMarking: mark?.unmarked ?? 0,
     mark: mark ? { value: mark.value, pointsEarned: mark.pointsEarned, pointsTotal: mark.pointsTotal } : null,
     score: scoreView(score),
@@ -266,7 +270,6 @@ async function markingViewOf(row, standing, submission) {
             deadlineAt: submission.deadlineAt,
             voidedAt: submission.voidedAt,
             offlineMark: numberOf(submission.offlineMark),
-            comment: submission.comment,
         },
         scores: history.map((score) => ({
             ...scoreView(score),
