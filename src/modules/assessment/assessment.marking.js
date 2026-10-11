@@ -2,13 +2,16 @@ import { prisma } from '../../shared/prisma.js';
 import { badRequest, conflict, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
 import { staffStandingOf } from '../sessions/sessions.service.js';
-import { rosterOf } from '../tracking/tracking.service.js';
+import { rosterOf, slotSessionWhere } from '../tracking/tracking.service.js';
 import { questionContentView } from './assessment.bank.js';
 import {
+    assessmentSelect,
+    loadClassSubject,
     loadAssessment,
     assertTeacherStanding,
     assertNotCancelled,
     describe,
+    classSubjectView,
     assessmentView,
 } from './assessment.service.js';
 import {
@@ -67,7 +70,11 @@ const log = createLogger('Assessment');
 //   status, attempts, what waits, and the Score that counts. One with no Submission
 //   once the window has closed "did not submit": no Score, which is not 0. The window
 //   is the Student's own - a make-up's, if any - and each Student carries their
-//   exception (ticket 05, 2026-10-10). Ticket 07 adds the integrity counts (06).
+//   exception (ticket 05, 2026-10-10). Ticket 06 adds the integrity counts (moved
+//   from ticket 07, owner 2026-10-11).
+// - A ClassSubject's recap (ticket 07, owner 2026-10-11) puts the slot's roster
+//   against its published Assessments, each cell what that Assessment's results say:
+//   one read (standingsOf) behind both.
 // - Nothing in a cancelled Assessment is marked, released or corrected; its Scores
 //   stay.
 
@@ -121,6 +128,8 @@ const markingAnswerSelect = {
 const isClosed = (row) => row.submittedAt !== null && row.voidedAt === null;
 
 const fullNameOf = (row) => row.studentProfile.membership.user.fullName;
+
+const pairOf = (assessmentId, studentProfileId) => `${assessmentId}:${studentProfileId}`;
 
 const correctionNote = (corrected) => (corrected ? `, ${corrected} score(s) corrected` : '');
 
@@ -283,52 +292,70 @@ async function markingViewOf(row, standing, submission) {
 // Reading
 // ---------------------------------------------------------------------------
 
+// Each Student's standing on each of these Assessments of one slot, for its staff, by
+// Assessment id: every Student of the slot's roster, with placedNow, and anyone else
+// with a Submission in it - their status, attempts, what waits, their exception and
+// the Score that counts. Past deadlines are closed first. One read behind an
+// Assessment's results and its ClassSubject's recap (ticket 07, owner 2026-10-11), so
+// the two never disagree.
+async function standingsOf(rows, roster, now) {
+    const assessmentIds = rows.map((row) => row.id);
+    await closeExpiredSubmissions({ assessmentId: { in: assessmentIds } }, now);
+    const [submissions, exceptions] = await Promise.all([
+        prisma.submission.findMany({
+            where: { assessmentId: { in: assessmentIds } },
+            select: staffSubmissionSelect,
+            orderBy: { attempt: 'asc' },
+        }),
+        exceptionsOf({ assessmentId: { in: assessmentIds } }),
+    ]);
+    const exceptionOfPair = new Map(
+        exceptions.map((exception) => [pairOf(exception.assessmentId, exception.studentProfileId), exception])
+    );
+    const closed = submissions.filter(isClosed);
+    const [marks, scores] = await Promise.all([
+        marksOf(prisma, closed),
+        scoresOf(prisma, closed.map((submission) => submission.id)),
+    ]);
+    const nameOf = new Map(roster.nameOf);
+    for (const submission of submissions) nameOf.set(submission.studentProfileId, fullNameOf(submission));
+
+    const standingsOfRow = (row) => {
+        const ofRow = submissions.filter((submission) => submission.assessmentId === row.id);
+        const studentProfileIds = [
+            ...new Set([...roster.studentProfileIds, ...ofRow.map((submission) => submission.studentProfileId)]),
+        ];
+        return studentProfileIds.map((studentProfileId) => {
+            const own = ofRow.filter((submission) => submission.studentProfileId === studentProfileId);
+            const attempts = own.map((submission) =>
+                attemptView(submission, marks.get(submission.id), currentScoreOf(scores, submission.id))
+            );
+            const countedScore = countedScoreOf(own, scores);
+            const exception = exceptionOfPair.get(pairOf(row.id, studentProfileId)) ?? null;
+            return {
+                studentProfileId,
+                fullName: nameOf.get(studentProfileId) ?? null,
+                placedNow: roster.placedNow(studentProfileId),
+                status: studentStatusOf(attempts, countedScore, ownTermsOf(row, exception).closesAt, now),
+                countedScore,
+                exception: exceptionView(exception),
+                attempts,
+            };
+        });
+    };
+    return new Map(rows.map((row) => [row.id, standingsOfRow(row)]));
+}
+
+const byName = (a, b) => (a.fullName ?? '').localeCompare(b.fullName ?? '');
+
 // An Assessment's results for its staff: every Student of the Class's roster over the
 // Semester, with placedNow, and anyone else with a Submission - each with their
 // status, attempts, what waits, and the Score that counts. What waits, counted, is
 // what a release would do now. Never a Student's to read (spec invariant 8).
 async function results(auth, id) {
     const { row, standing } = await loadForStaff(auth, id);
-    const now = new Date();
-    await closeExpiredSubmissions({ assessmentId: row.id }, now);
-    const [roster, submissions, exceptions] = await Promise.all([
-        rosterOf(auth, row.classSubject),
-        prisma.submission.findMany({
-            where: { assessmentId: row.id },
-            select: staffSubmissionSelect,
-            orderBy: { attempt: 'asc' },
-        }),
-        exceptionsOf({ assessmentId: row.id }),
-    ]);
-    const exceptionOfStudent = new Map(exceptions.map((exception) => [exception.studentProfileId, exception]));
-    const closed = submissions.filter(isClosed);
-    const [marks, scores] = await Promise.all([
-        marksOf(prisma, closed),
-        scoresOf(prisma, closed.map((submission) => submission.id)),
-    ]);
-
-    const nameOf = new Map(roster.nameOf);
-    for (const submission of submissions) nameOf.set(submission.studentProfileId, fullNameOf(submission));
-    const studentProfileIds = [
-        ...new Set([...roster.studentProfileIds, ...submissions.map((submission) => submission.studentProfileId)]),
-    ];
-    const students = studentProfileIds.map((studentProfileId) => {
-        const own = submissions.filter((submission) => submission.studentProfileId === studentProfileId);
-        const attempts = own.map((submission) =>
-            attemptView(submission, marks.get(submission.id), currentScoreOf(scores, submission.id))
-        );
-        const countedScore = countedScoreOf(own, scores);
-        const exception = exceptionOfStudent.get(studentProfileId) ?? null;
-        return {
-            studentProfileId,
-            fullName: nameOf.get(studentProfileId) ?? null,
-            placedNow: roster.placedNow(studentProfileId),
-            status: studentStatusOf(attempts, countedScore, ownTermsOf(row, exception).closesAt, now),
-            countedScore,
-            exception: exceptionView(exception),
-            attempts,
-        };
-    });
+    const roster = await rosterOf(auth, row.classSubject);
+    const students = (await standingsOf([row], roster, new Date())).get(row.id);
 
     const attempts = students.flatMap((student) => student.attempts);
     const count = (status) => attempts.filter((attempt) => attempt.status === status).length;
@@ -339,7 +366,64 @@ async function results(auth, id) {
             release: count('WAITING_FOR_RELEASE'),
             inProgress: count('IN_PROGRESS'),
         },
-        students: students.sort((a, b) => (a.fullName ?? '').localeCompare(b.fullName ?? '')),
+        students: students.sort(byName),
+    };
+}
+
+// A ClassSubject's recap for its staff (ticket 07, owner 2026-10-11): the slot's
+// roster against the slot's published Assessments - a predecessor's included, never a
+// draft - each cell the Student's status and the Score that counts, read by
+// standingsOf as that Assessment's results read them. A cancelled one keeps its
+// column, flagged with its reason; the grading slice will not count it. Recorded
+// Scores only: no draft mark, no sum, no weight - weights are the grading slice's
+// (handoff #9). A cell's status is null where its Student is not in that
+// Assessment's results. Never a Student's to read (spec invariant 8).
+async function recap(auth, classSubjectId) {
+    const classSubject = await loadClassSubject(classSubjectId);
+    const standing = await staffStandingOf(auth, classSubject);
+    if (!standing) throw notFound('Class subject not found');
+
+    const [rows, roster] = await Promise.all([
+        prisma.assessment.findMany({
+            where: { deletedAt: null, publishedAt: { not: null }, ...slotSessionWhere(classSubject) },
+            select: assessmentSelect,
+            orderBy: [{ opensAt: 'asc' }, { createdAt: 'asc' }],
+        }),
+        rosterOf(auth, classSubject),
+    ]);
+    const standings = rows.length ? await standingsOf(rows, roster, new Date()) : new Map();
+
+    const students = new Map(
+        roster.studentProfileIds.map((studentProfileId) => [
+            studentProfileId,
+            {
+                studentProfileId,
+                fullName: roster.nameOf.get(studentProfileId) ?? null,
+                placedNow: roster.placedNow(studentProfileId),
+            },
+        ])
+    );
+    const cellsOf = new Map();
+    for (const [assessmentId, ofRow] of standings) {
+        for (const { studentProfileId, fullName, placedNow, status, countedScore } of ofRow) {
+            if (!students.has(studentProfileId)) {
+                students.set(studentProfileId, { studentProfileId, fullName, placedNow });
+            }
+            cellsOf.set(pairOf(assessmentId, studentProfileId), { status, countedScore });
+        }
+    }
+    const cellView = (row, studentProfileId) => ({
+        assessmentId: row.id,
+        ...(cellsOf.get(pairOf(row.id, studentProfileId)) ?? { status: null, countedScore: null }),
+    });
+
+    return {
+        classSubject: classSubjectView(classSubject),
+        assessments: rows.map((row) => assessmentView(row, standing)),
+        students: [...students.values()].sort(byName).map((student) => ({
+            ...student,
+            cells: rows.map((row) => cellView(row, student.studentProfileId)),
+        })),
     };
 }
 
@@ -575,4 +659,14 @@ async function release(auth, id) {
     return { assessment: assessmentView(await loadAssessment(row.id), 'teacher'), ...outcome };
 }
 
-export { loadForStaff, results, submissionForMarking, readEssayFile, mark, enterOfflineMarks, release };
+export {
+    loadForStaff,
+    studentStatusOf,
+    results,
+    recap,
+    submissionForMarking,
+    readEssayFile,
+    mark,
+    enterOfflineMarks,
+    release,
+};

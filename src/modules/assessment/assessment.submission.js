@@ -56,6 +56,10 @@ const log = createLogger('Assessment');
 //   start() copies the flag to the Submission, so a later change to the exception
 //   leaves it as it was, and the grading slice knows which Scores the school's
 //   remedial rule applies to.
+// - A Class the Student left is read, never acted in (ticket 07, owner 2026-10-11):
+//   the outline of an Assessment their menu lists there opens, with canStart false.
+//   Starting and answering stay the current Class's - the split teaching-and-learning
+//   12 made for Sessions and Content.
 
 const SHAPE_VERSION = 1;
 const MINUTE_MS = 60 * 1000;
@@ -320,6 +324,25 @@ async function loadForStudent(auth, id) {
     return { row, studentProfileId: placement.studentProfileId };
 }
 
+// Every placement on the Student's live profile, each with when it began and ended -
+// or one Class's alone (ticket 07): what their menu groups by, and what decides which
+// Assessments of a Class they read. placementsOf (src/shared/guards.js) keeps only
+// when they last left; a window is weighed against when they were there.
+const placementSpansOf = (membershipId, classId = null) =>
+    prisma.classMembership.findMany({
+        where: { ...(classId ? { classId } : {}), studentProfile: { membershipId, endedAt: null } },
+        select: { classId: true, studentProfileId: true, startedAt: true, endedAt: true },
+    });
+
+// Whether a Student reads an Assessment of a Class through their placements in it
+// (ticket 07, owner 2026-10-11): its window on their own terms - opensAt to the hard
+// end that still takes a hand-in - overlaps one of them, so one who moved in sees
+// what was still open and one who moved out keeps what opened before they left; or
+// they have a Submission in it. One rule for the menu and a left Class's outline.
+const isListedThrough = (spans, opensAt, hardEnd, hasSubmission) =>
+    hasSubmission ||
+    spans.some((span) => span.startedAt < hardEnd && (span.endedAt === null || span.endedAt > opensAt));
+
 // The caller's own Submission, on their live profile, closed first if its deadline
 // has passed. Anyone else's is a 404. Read even after a class move: it is theirs.
 async function loadOwnSubmission(auth, id) {
@@ -380,10 +403,15 @@ async function claimOpen(tx, submissionId, now) {
 
 // The hard end no Submission passes: the Student's closesAt - a make-up's, if any
 // (ticket 05) - or with acceptLate the end of the Semester's last day in the school's
-// zone (answered question 3).
+// zone (answered question 3). The menu (ticket 07) gives the Semester's end, read
+// once for all its Assessments.
+const hardEndIn = (assessment, terms, semesterEnd) => (assessment.acceptLate ? semesterEnd : terms.closesAt);
+
 async function hardEndOf(auth, assessment, terms) {
-    if (!assessment.acceptLate) return terms.closesAt;
-    return (await semesterSpan(auth.schoolId, assessment.classSubject.semester)).end;
+    const semesterEnd = assessment.acceptLate
+        ? (await semesterSpan(auth.schoolId, assessment.classSubject.semester)).end
+        : null;
+    return hardEndIn(assessment, terms, semesterEnd);
 }
 
 // Why the Student may not start an attempt now, as the error start() throws, or null:
@@ -399,6 +427,21 @@ function startRefusalOf(row, terms, { used, inProgress, now, hardEnd }) {
     if (now >= hardEnd) return conflict(`${describe(row)} is closed`);
     if (used >= terms.maxAttempts) return conflict(`You have used every attempt at ${describe(row)}`);
     return null;
+}
+
+// What a Student has done on an Assessment and may still do, on their own terms: the
+// outline's numbers, and each entry of their menu (ticket 07) - one rule for both.
+// They start only in the Class they sit in now (current); a Class they left is read.
+function ownStandingOf(row, terms, exception, submissions, { now, hardEnd, current }) {
+    const used = usedAttemptsOf(exception, submissions);
+    const inProgress = submissions.find(isInProgress) ?? null;
+    return {
+        attemptsUsed: used,
+        // An OFFLINE one takes no attempt: the teacher enters its marks.
+        attemptsLeft: row.mode === 'ONLINE' ? Math.max(0, terms.maxAttempts - used) : 0,
+        inProgressId: inProgress?.id ?? null,
+        canStart: current && startRefusalOf(row, terms, { used, inProgress, now, hardEnd }) === null,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -541,9 +584,15 @@ function studentQuestionView(question, optionOrder, answer, { released = false, 
 // ---------------------------------------------------------------------------
 
 // Before starting: the outline on the Student's own terms, what they may still do,
-// and their own Submissions to it. No question (2026-10-08).
+// and their own Submissions to it. No question (2026-10-08). In a Class they left,
+// only an Assessment their menu lists there, read with canStart false (ticket 07,
+// owner 2026-10-11); any other is the 404 of one that does not exist.
 async function outlineForStudent(auth, id) {
-    const { row, studentProfileId } = await loadForStudent(auth, id);
+    const row = await loadPublished(id);
+    const spans = await placementSpansOf(auth.membershipId, row.classSubject.classId);
+    if (spans.length === 0) throw notFound('Assessment not found');
+    const { studentProfileId } = spans[0];
+    const current = spans.some((span) => span.endedAt === null);
     const now = new Date();
     await closeExpiredSubmissions({ assessmentId: row.id, studentProfileId }, now);
     const [submissions, exception] = await Promise.all([
@@ -556,20 +605,17 @@ async function outlineForStudent(auth, id) {
     ]);
     const terms = ownTermsOf(row, exception);
     const hardEnd = await hardEndOf(auth, row, terms);
+    if (!current && !isListedThrough(spans, terms.opensAt, hardEnd, submissions.length > 0)) {
+        throw notFound('Assessment not found');
+    }
 
-    const used = usedAttemptsOf(exception, submissions);
-    const inProgress = submissions.find(isInProgress) ?? null;
     const scores = await scoresOf(
         prisma,
         submissions.filter((submission) => submission.releasedAt).map((submission) => submission.id)
     );
     return {
         assessment: studentAssessmentView(row, exception),
-        attemptsUsed: used,
-        // An OFFLINE one takes no attempt: the teacher enters its marks.
-        attemptsLeft: row.mode === 'ONLINE' ? Math.max(0, terms.maxAttempts - used) : 0,
-        inProgressId: inProgress?.id ?? null,
-        canStart: startRefusalOf(row, terms, { used, inProgress, now, hardEnd }) === null,
+        ...ownStandingOf(row, terms, exception, submissions, { now, hardEnd, current }),
         // The Score that counts: the highest of the released ones (ticket 04), else null.
         score: countedScoreOf(submissions, scores),
         submissions: submissions.map((submission) =>
@@ -856,10 +902,17 @@ async function handIn(auth, submissionId) {
 }
 
 export {
+    studentAssessmentSelect,
+    submissionSelect,
     exceptionSelect,
     exceptionsOf,
     exceptionOf,
     ownTermsOf,
+    placementSpansOf,
+    isListedThrough,
+    hardEndIn,
+    ownStandingOf,
+    studentAssessmentView,
     exceptionView,
     answerView,
     essayFileOf,

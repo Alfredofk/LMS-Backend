@@ -3,11 +3,11 @@ import { z } from 'zod';
 import { date } from '../holidays/holidays.schema.js';
 
 // The question bank (assessment ticket 01), Assessments (ticket 02), answering them
-// (ticket 03), marking and releasing them (ticket 04), and a Student's make-up and
-// remedial (ticket 05). Only the shape is checked here, a question's rules per kind
-// included. Who may write for which Subject and Grade Level, whose images may be
-// named, sanitising the body, which answer a question takes, and how many points it
-// is worth are the services'.
+// (ticket 03), marking and releasing them (ticket 04), a Student's make-up and
+// remedial (ticket 05), and the reads (ticket 07). Only the shape is checked here, a
+// question's rules per kind included. Who may write for which Subject and Grade
+// Level, whose images may be named, sanitising the body, which answer a question
+// takes, and how many points it is worth are the services'.
 
 const id = z.string().min(1);
 
@@ -351,6 +351,12 @@ const exceptionBody = z
         message: 'A remedial gives its extra attempts alone: 1 to 20',
     });
 
+// ---- reads (ticket 07) ----
+
+// A Student's menu, for one Semester - it names its year - or, without one, the
+// default the service picks.
+const menuQuery = z.object({ semesterId: id.optional() });
+
 export {
     idParams,
     imageIdParams,
@@ -375,4 +381,5 @@ export {
     offlineMarksBody,
     exceptionParams,
     exceptionBody,
+    menuQuery,
 };

@@ -4,12 +4,14 @@ import * as service from './assessment.service.js';
 import * as answering from './assessment.submission.js';
 import * as marking from './assessment.marking.js';
 import * as exceptions from './assessment.exception.js';
+import * as menu from './assessment.menu.js';
 
 // Thin, like the other controllers. The question bank (ticket 01) lives in
 // assessment.bank.js; the Assessments (ticket 02) in assessment.service.js; a
 // Student's Submissions (ticket 03) in assessment.submission.js; marking, release and
 // Scores (ticket 04) in assessment.marking.js; make-up and remedial (ticket 05) in
-// assessment.exception.js.
+// assessment.exception.js; a Student's menu (ticket 07) in assessment.menu.js, and a
+// ClassSubject's recap beside the results.
 
 // ---- the question bank ----
 
@@ -229,6 +231,17 @@ async function removeException(req, res) {
     return ok(res, { message: 'Exception removed.' });
 }
 
+// ---- reads (ticket 07) ----
+
+// The menu and the recap each come back as the service shaped them.
+async function getMenu(req, res) {
+    return ok(res, await menu.menuOf(req.auth, req.validated.query));
+}
+
+async function getRecap(req, res) {
+    return ok(res, await marking.recap(req.auth, req.validated.params.id));
+}
+
 export {
     listQuestions,
     getQuestion,
@@ -269,4 +282,6 @@ export {
     listExceptions,
     setException,
     removeException,
+    getMenu,
+    getRecap,
 };

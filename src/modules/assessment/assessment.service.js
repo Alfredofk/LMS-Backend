@@ -935,11 +935,14 @@ async function remove(auth, id) {
 }
 
 export {
+    assessmentSelect,
+    loadClassSubject,
     loadAssessment,
     assertTeacherStanding,
     assertNotCancelled,
     assertWindow,
     describe,
+    classSubjectView,
     assessmentView,
     listForClassSubject,
     listCopySources,

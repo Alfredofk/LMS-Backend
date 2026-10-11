@@ -30,9 +30,10 @@ import {
     offlineMarksBody,
     exceptionParams,
     exceptionBody,
+    menuQuery,
 } from './assessment.schema.js';
 
-// Mounted at /api/assessments (assessment tickets 01 to 05).
+// Mounted at /api/assessments (assessment tickets 01 to 05, and 07).
 //
 // The question bank: teachers write questions per Subject x Grade Level, for what
 // they teach now, and read the ones of what they teach now along with their own.
@@ -70,6 +71,11 @@ import {
 // their own window, extra attempts, or both, on a published online Assessment, saying
 // whether it is a remedial, and changes or removes it; the same readers read them and
 // change nothing.
+//
+// Reads (ticket 07): a Student's menu of their Assessments for one Semester, under
+// the Classes they sat in during it - and the outline of one in a Class they left,
+// read, never started. A ClassSubject's recap, its roster against its published
+// Assessments, for the same staff as the results.
 //
 // staff is the coarse filter on the staff's routes, and student on the Student's;
 // each answers 404, not 403, to everyone else - a Guardian reaches none of these,
@@ -113,6 +119,11 @@ router.post(
 );
 router.post('/questions/:id/archive', staff, validate({ params: idParams }), controller.archiveQuestion);
 router.post('/questions/:id/restore', staff, validate({ params: idParams }), controller.restoreQuestion);
+
+// ---- a Student's menu (ticket 07) ----
+
+// Before the staff's /:id routes, so /mine is never read as an Assessment's id.
+router.get('/mine', student, validate({ query: menuQuery }), controller.getMenu);
 
 // ---- answering (ticket 03) ----
 
@@ -212,6 +223,7 @@ router.put(
     controller.enterOfflineMarks
 );
 router.post('/:id/release', staff, validate({ params: idParams }), controller.releaseAssessment);
+router.get('/class-subjects/:id/recap', staff, validate({ params: idParams }), controller.getRecap);
 
 // ---- make-up and remedial (ticket 05) ----
 
