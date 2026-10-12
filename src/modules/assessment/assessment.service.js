@@ -74,6 +74,8 @@ const log = createLogger('Assessment');
 // - The staff's view says of each question whether the bank's has changed, or been
 //   archived, since it was copied (2026-10-07): a copy of last year's quiz carries
 //   last year's wording and key, and its teacher swaps the bank's in through the list.
+// - The staff's view counts the Submissions not void (2026-10-12, frontend note #15),
+//   so the teacher is warned before an edit voids them; a copier gets no count.
 // - After its first release the questions are locked (ticket 04, answered question
 //   1): the list is refused whole, and a copy's own edit may fix only its key or its
 //   points, with a reason. Every released Submission whose mark that moves gets a
@@ -148,6 +150,9 @@ const assessmentSelect = {
         select: { id: true, points: true, sourceQuestionId: true },
         orderBy: { order: 'asc' },
     },
+    // What a change to what its Students are shown would void (frontend note #15, owner
+    // 2026-10-12), counted in the same read so a list costs no extra query per row.
+    _count: { select: { submissions: { where: { voidedAt: null } } } },
 };
 
 // A copy's content with its answer key, which the global omit in
@@ -318,6 +323,10 @@ const assessmentView = (row, standing) => ({
     copiedFromId: row.copiedFromId,
     questionCount: row.questions.length,
     totalPoints: row.questions.reduce((sum, question) => sum + question.points, 0),
+    // The Submissions not void, so the teacher is warned before an edit voids them
+    // (frontend note #15, owner 2026-10-12). A copier reads none of its Submissions
+    // (loadForStaff in assessment.marking.js), so not their number either.
+    liveSubmissions: standing === 'copier' ? null : row._count.submissions,
     canManage: standing === 'teacher',
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
