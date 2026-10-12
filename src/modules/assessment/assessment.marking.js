@@ -31,6 +31,7 @@ import {
     scoresOf,
     currentScoreOf,
     countedScoreOf,
+    isCountedFromRemedial,
     scoreView,
     recordScore,
     correctReleased,
@@ -74,7 +75,8 @@ const log = createLogger('Assessment');
 //   from ticket 07, owner 2026-10-11).
 // - A ClassSubject's recap (ticket 07, owner 2026-10-11) puts the slot's roster
 //   against its published Assessments, each cell what that Assessment's results say:
-//   one read (standingsOf) behind both.
+//   one read (standingsOf) behind both. Each says whether the Score that counts was
+//   reached only by a remedial (frontend's note #19, owner 2026-10-12).
 // - Nothing in a cancelled Assessment is marked, released or corrected; its Scores
 //   stay.
 
@@ -294,8 +296,9 @@ async function markingViewOf(row, standing, submission) {
 
 // Each Student's standing on each of these Assessments of one slot, for its staff, by
 // Assessment id: every Student of the slot's roster, with placedNow, and anyone else
-// with a Submission in it - their status, attempts, what waits, their exception and
-// the Score that counts. Past deadlines are closed first. One read behind an
+// with a Submission in it - their status, attempts, what waits, their exception, the
+// Score that counts and whether only a remedial reached it (frontend's note #19,
+// owner 2026-10-12). Past deadlines are closed first. One read behind an
 // Assessment's results and its ClassSubject's recap (ticket 07, owner 2026-10-11), so
 // the two never disagree.
 async function standingsOf(rows, roster, now) {
@@ -338,6 +341,7 @@ async function standingsOf(rows, roster, now) {
                 placedNow: roster.placedNow(studentProfileId),
                 status: studentStatusOf(attempts, countedScore, ownTermsOf(row, exception).closesAt, now),
                 countedScore,
+                countedFromRemedial: isCountedFromRemedial(own, scores),
                 exception: exceptionView(exception),
                 attempts,
             };
@@ -372,8 +376,9 @@ async function results(auth, id) {
 
 // A ClassSubject's recap for its staff (ticket 07, owner 2026-10-11): the slot's
 // roster against the slot's published Assessments - a predecessor's included, never a
-// draft - each cell the Student's status and the Score that counts, read by
-// standingsOf as that Assessment's results read them. A cancelled one keeps its
+// draft - each cell the Student's status, the Score that counts and whether only a
+// remedial reached it (2026-10-12), read by standingsOf as that Assessment's results
+// read them, so a grade book needs no read per Assessment. A cancelled one keeps its
 // column, flagged with its reason; the grading slice will not count it. Recorded
 // Scores only: no draft mark, no sum, no weight - weights are the grading slice's
 // (handoff #9). A cell's status is null where its Student is not in that
@@ -405,16 +410,20 @@ async function recap(auth, classSubjectId) {
     );
     const cellsOf = new Map();
     for (const [assessmentId, ofRow] of standings) {
-        for (const { studentProfileId, fullName, placedNow, status, countedScore } of ofRow) {
+        for (const { studentProfileId, fullName, placedNow, status, countedScore, countedFromRemedial } of ofRow) {
             if (!students.has(studentProfileId)) {
                 students.set(studentProfileId, { studentProfileId, fullName, placedNow });
             }
-            cellsOf.set(pairOf(assessmentId, studentProfileId), { status, countedScore });
+            cellsOf.set(pairOf(assessmentId, studentProfileId), { status, countedScore, countedFromRemedial });
         }
     }
     const cellView = (row, studentProfileId) => ({
         assessmentId: row.id,
-        ...(cellsOf.get(pairOf(row.id, studentProfileId)) ?? { status: null, countedScore: null }),
+        ...(cellsOf.get(pairOf(row.id, studentProfileId)) ?? {
+            status: null,
+            countedScore: null,
+            countedFromRemedial: false,
+        }),
     });
 
     return {

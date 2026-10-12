@@ -20,7 +20,8 @@
 //   points are the mark too (2026-10-10): 0 of 10 that became 0 of 15 is corrected,
 //   and so are answers whose points the teacher moved though the sum stayed.
 // - The Score that counts for a Student is the highest of the newest Scores of
-//   their released Submissions not void.
+//   their released Submissions not void. The staff's reads say beside it whether
+//   only a remedial reached it (2026-10-12).
 // - A question's points changed: the teacher's points on it keep their share of the
 //   question (2026-10-09). An ESSAY of 10 marked 8, lowered to 5, becomes 4.
 
@@ -143,15 +144,31 @@ async function scoresOf(client, submissionIds) {
 
 const currentScoreOf = (scores, submissionId) => scores.get(submissionId)?.at(-1) ?? null;
 
+// Each released Submission not void with its current Score: what the Score that counts
+// is chosen from.
+const countingScoresOf = (submissions, scores) =>
+    submissions
+        .filter((submission) => submission.releasedAt && !submission.voidedAt)
+        .map((submission) => ({ submission, score: currentScoreOf(scores, submission.id) }))
+        .filter(({ score }) => score);
+
 // The Score that counts for one Student: the highest current Score of their released
 // Submissions not void, or null - "did not submit", or nothing released yet, is not 0.
 function countedScoreOf(submissions, scores) {
-    const values = submissions
-        .filter((submission) => submission.releasedAt && !submission.voidedAt)
-        .map((submission) => currentScoreOf(scores, submission.id))
-        .filter(Boolean)
-        .map((score) => Number(score.value));
+    const values = countingScoresOf(submissions, scores).map(({ score }) => Number(score.value));
     return values.length ? Math.max(...values) : null;
+}
+
+// Whether the Score that counts was reached only by remedial attempts (frontend's note
+// #19, owner 2026-10-12), which a grade book tags "Remedial". An ordinary attempt at
+// the same value makes it false - the Student reached it without one - and so does no
+// Score counting. The submissions are read with remedial.
+function isCountedFromRemedial(submissions, scores) {
+    const counted = countedScoreOf(submissions, scores);
+    if (counted === null) return false;
+    return countingScoresOf(submissions, scores)
+        .filter(({ score }) => Number(score.value) === counted)
+        .every(({ submission }) => submission.remedial);
 }
 
 const scoreView = (row) =>
@@ -257,6 +274,7 @@ export {
     scoresOf,
     currentScoreOf,
     countedScoreOf,
+    isCountedFromRemedial,
     scoreView,
     recordScore,
     correctReleased,
