@@ -13,6 +13,12 @@ import { createLogger } from '../lib/helpers.js';
 
 const log = createLogger('Mail');
 
+// A relay that never answers is given up on in 10 s, not nodemailer's defaults of
+// 2 minutes to connect and 30 s to greet (frontend note #20, owner 2026-10-12).
+// Sends run in the background (deliver() in auth.service.js), so this bounds how
+// long a dead relay holds one there, and how soon its failure reaches the log.
+const SMTP_TIMEOUT_MS = 10_000;
+
 let cachedTransport = null;
 
 function isConfigured() {
@@ -42,6 +48,9 @@ function getTransport() {
         auth: process.env.SMTP_USER
             ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD }
             : undefined,
+        connectionTimeout: SMTP_TIMEOUT_MS,
+        greetingTimeout: SMTP_TIMEOUT_MS,
+        socketTimeout: SMTP_TIMEOUT_MS,
     });
     return cachedTransport;
 }

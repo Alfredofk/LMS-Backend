@@ -40,18 +40,21 @@ const publicUser = (user) => ({
     createdAt: user.createdAt,
 });
 
-// Mail failure never fails the request that triggered it.
+// Mail never fails, nor holds, the request that triggered it.
 //
 // The account, the token and the reset request are already committed; refusing
 // the whole call because an SMTP relay was briefly unreachable would strand the
 // user with an account they cannot reach and no way to ask again. Both paths that
 // send mail have a resend, which is the actual remedy.
-async function deliver(context, send) {
-    try {
-        await send();
-    } catch (error) {
-        log.error(`Email delivery failed (${context}):`, error);
-    }
+//
+// So the send runs in the background, and the caller does not wait for it
+// (frontend note #20, owner 2026-10-12). Awaited, a relay that never answered held
+// register for its whole timeout - and a user who refreshed meanwhile found their
+// email "already registered" - while resend-verification and forgot-password,
+// silent by design, told a registered address from an unknown one by how long
+// they took. A send lost to a restart in between has the same remedy, the resend.
+function deliver(context, send) {
+    send().catch((error) => log.error(`Email delivery failed (${context}):`, error));
 }
 
 // ---------------------------------------------------------------------------
@@ -210,7 +213,7 @@ async function issueVerificationToken(user) {
         }),
     ]);
 
-    await deliver(user.email, () =>
+    deliver(user.email, () =>
         sendVerificationEmail({ to: user.email, fullName: user.fullName, token })
     );
 }
@@ -478,7 +481,7 @@ async function forgotPassword(email) {
         }),
     ]);
 
-    await deliver(user.email, () =>
+    deliver(user.email, () =>
         sendPasswordResetEmail({ to: user.email, fullName: user.fullName, token })
     );
 }
