@@ -439,6 +439,11 @@ async function claimOpen(tx, submissionId, now) {
 // answered online. Any other id - another Student's, another school's, one handed in
 // or void, a TUGAS's - is absent, so the caller refuses each with the same "not
 // found". Recording the signal claims the attempt again (recordSignal).
+//
+// An attempt that takes no more answers takes no signal either (follow-up of ticket
+// 06, owner 2026-10-13): its Assessment cancelled, or its Student no longer placed in
+// the Assessment's Class - the two checks loadAnswerable makes. As in answering, they
+// are read once, before the write.
 async function signallableSubmissionsOf(auth, submissionIds) {
     if (submissionIds.length === 0) return new Map();
     const studentProfileId = await studentProfileOf(auth);
@@ -446,14 +451,21 @@ async function signallableSubmissionsOf(auth, submissionIds) {
     const where = { id: { in: submissionIds }, studentProfileId };
     await closeExpiredSubmissions(where);
 
-    const rows = await prisma.submission.findMany({
-        where: { ...where, ...IN_PROGRESS },
-        select: {
-            id: true,
-            assessment: { select: { id: true, type: true, mode: true, classSubject: { select: { id: true } } } },
-        },
-    });
-    return new Map(rows.filter((row) => isSignalled(row.assessment)).map((row) => [row.id, row]));
+    const [rows, placement] = await Promise.all([
+        prisma.submission.findMany({
+            where: { ...where, ...IN_PROGRESS, assessment: { cancelledAt: null } },
+            select: {
+                id: true,
+                assessment: {
+                    select: { id: true, type: true, mode: true, classSubject: { select: { id: true, classId: true } } },
+                },
+            },
+        }),
+        currentPlacement(auth.membershipId),
+    ]);
+    const canTakeSignal = (row) =>
+        isSignalled(row.assessment) && row.assessment.classSubject.classId === placement?.classId;
+    return new Map(rows.filter(canTakeSignal).map((row) => [row.id, row]));
 }
 
 // The hard end no Submission passes: the Student's closesAt - a make-up's, if any
