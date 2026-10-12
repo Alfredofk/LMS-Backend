@@ -7,7 +7,8 @@ import { readableByStudent, studentProfileOf } from '../content/content.service.
 import { CONTENT_ORDER } from '../content/content.moves.js';
 import { READABLE_BY_STUDENT } from '../content/content.summary.js';
 import { liveClassSubjectsOfStudent } from '../academics/academics.service.js';
-import { CONTENT_VERBS, recordContentEvent } from './tracking.record.js';
+import { signallableSubmissionsOf } from '../assessment/assessment.submission.js';
+import { CONTENT_VERBS, SIGNAL_VERBS, recordContentEvent, recordSignal } from './tracking.record.js';
 
 const log = createLogger('Tracking');
 
@@ -29,11 +30,17 @@ const log = createLogger('Tracking');
 // - An accepted event's answer says whether its Content is now complete for the
 //   student (`completed`), so the frontend ticks it at once (ticket 06 follow-up,
 //   owner 2026-10-04).
+// - An integrity signal (assessment ticket 06) names a Submission instead: the
+//   student's own, in progress, of a KUIS, a UTS or a UAS answered online
+//   (signallableSubmissionsOf). Every miss - another student's, another school's, one
+//   handed in or void, a TUGAS's, one closed while the batch was written - is the same
+//   "Submission not found". Its answer carries no `completed`.
 
 const MAX_AHEAD_MS = 5 * 60 * 1000;
 const MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 const CONTENT_NOT_FOUND = 'Content not found';
+const SUBMISSION_NOT_FOUND = 'Submission not found';
 
 const refused = (index, code, message) => ({ index, ok: false, error: { code, message } });
 
@@ -47,6 +54,9 @@ async function recordClientEvents(auth, { events }) {
         if (!reach.has(contentId)) reach.set(contentId, await readableByStudent(auth, contentId));
         return reach.get(contentId);
     };
+    // The Submissions the signals name, looked up together.
+    const signalIds = events.filter((event) => SIGNAL_VERBS[event.verb]).map((event) => event.submissionId);
+    const signallable = await signallableSubmissionsOf(auth, [...new Set(signalIds)]);
 
     const results = new Array(events.length);
     const accepted = [];
@@ -58,6 +68,16 @@ async function recordClientEvents(auth, { events }) {
         }
         if (occurredAt.getTime() < receivedAt.getTime() - MAX_AGE_MS) {
             results[index] = refused(index, 'BAD_REQUEST', 'occurredAt is more than a day old');
+            continue;
+        }
+
+        if (SIGNAL_VERBS[event.verb]) {
+            const submission = signallable.get(event.submissionId);
+            if (!submission) {
+                results[index] = refused(index, 'NOT_FOUND', SUBMISSION_NOT_FOUND);
+                continue;
+            }
+            accepted.push({ index, event, occurredAt, submission });
             continue;
         }
 
@@ -76,7 +96,19 @@ async function recordClientEvents(auth, { events }) {
 
     if (accepted.length > 0) {
         await prisma.$transaction(async (tx) => {
-            for (const { index, event, occurredAt, target } of accepted) {
+            for (const { index, event, occurredAt, target, submission } of accepted) {
+                if (submission) {
+                    const { recorded } = await recordSignal(tx, {
+                        actorMembershipId: auth.membershipId,
+                        submission,
+                        verb: event.verb,
+                        occurredAt,
+                    });
+                    results[index] = recorded
+                        ? { index, ok: true, recorded }
+                        : refused(index, 'NOT_FOUND', SUBMISSION_NOT_FOUND);
+                    continue;
+                }
                 const { recorded, completed } = await recordContentEvent(tx, {
                     actorMembershipId: auth.membershipId,
                     studentProfileId,

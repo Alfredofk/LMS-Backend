@@ -1,0 +1,5 @@
+-- AlterTable
+ALTER TABLE "Submission" ADD COLUMN     "copiedCount" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN     "focusLostCount" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN     "fullscreenExitedCount" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN     "pastedCount" INTEGER NOT NULL DEFAULT 0;

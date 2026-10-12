@@ -3,6 +3,7 @@ import { badRequest, conflict, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
 import { staffStandingOf } from '../sessions/sessions.service.js';
 import { rosterOf, slotSessionWhere } from '../tracking/tracking.service.js';
+import { recordEvent, assessmentContextOf } from '../tracking/tracking.record.js';
 import { questionContentView } from './assessment.bank.js';
 import {
     assessmentSelect,
@@ -17,6 +18,7 @@ import {
 import {
     exceptionsOf,
     ownTermsOf,
+    isSignalled,
     exceptionView,
     answerView,
     essayFileOf,
@@ -59,7 +61,9 @@ const log = createLogger('Assessment');
 //   in, marked or entered since waits for the next press, and nothing is recorded
 //   twice. An ONLINE one is released only once closesAt has passed (2026-10-09), so
 //   no marked answer reaches a classmate still answering; an OFFLINE one has no
-//   questions to give away, so its teacher releases when ready.
+//   questions to give away, so its teacher releases when ready. A press that records
+//   a Score writes assessment.released, naming how many (ticket 06); one that records
+//   none did nothing, and writes nothing.
 // - After release a mark changes only with a reason, and the Score it moves gets a
 //   new row carrying it; a comment changes freely (2026-10-09), being no Score. A
 //   released ESSAY keeps a mark: it is changed, never cleared. Points moved between
@@ -71,8 +75,9 @@ const log = createLogger('Assessment');
 //   status, attempts, what waits, and the Score that counts. One with no Submission
 //   once the window has closed "did not submit": no Score, which is not 0. The window
 //   is the Student's own - a make-up's, if any - and each Student carries their
-//   exception (ticket 05, 2026-10-10). Ticket 06 adds the integrity counts (moved
-//   from ticket 07, owner 2026-10-11).
+//   exception (ticket 05, 2026-10-10). Each attempt carries its integrity counts
+//   (ticket 06, moved from ticket 07, owner 2026-10-11), as one Submission for
+//   marking does; the recap and everything a Student reads never do.
 // - A ClassSubject's recap (ticket 07, owner 2026-10-11) puts the slot's roster
 //   against its published Assessments, each cell what that Assessment's results say:
 //   one read (standingsOf) behind both. Each says whether the Score that counts was
@@ -97,6 +102,10 @@ const staffSubmissionSelect = {
     voidReason: true,
     comment: true,
     releasedAt: true,
+    focusLostCount: true,
+    pastedCount: true,
+    copiedCount: true,
+    fullscreenExitedCount: true,
     studentProfile: { select: { membership: { select: { user: { select: { fullName: true } } } } } },
 };
 
@@ -202,9 +211,18 @@ function submissionStatusOf(row, mark) {
     return mark.unmarked ? 'WAITING_FOR_MARKING' : 'WAITING_FOR_RELEASE';
 }
 
+// An attempt's integrity counts (ticket 06).
+const signalsView = (row) => ({
+    focusLost: row.focusLostCount,
+    pasted: row.pastedCount,
+    copied: row.copiedCount,
+    fullscreenExited: row.fullscreenExitedCount,
+});
+
 // One attempt: its mark as it stands - a draft until release - and its newest Score.
-// One in progress, or void, has neither.
-const attemptView = (row, mark, score) => ({
+// One in progress, or void, has neither. `signalled` is whether its Assessment
+// records integrity signals (isSignalled).
+const attemptView = (row, mark, score, signalled) => ({
     id: row.id,
     attempt: row.attempt,
     status: submissionStatusOf(row, mark),
@@ -222,6 +240,10 @@ const attemptView = (row, mark, score) => ({
     waitingForMarking: mark?.unmarked ?? 0,
     mark: mark ? { value: mark.value, pointsEarned: mark.pointsEarned, pointsTotal: mark.pointsTotal } : null,
     score: scoreView(score),
+    // The integrity counts, for the staff alone (ticket 06, spec invariant 5): null
+    // where the Assessment records none - a TUGAS, an OFFLINE one - so a count never
+    // taken does not read as 0.
+    signals: signalled ? signalsView(row) : null,
 });
 
 // Where one Student stands: released when a Score counts, else the furthest their
@@ -275,7 +297,7 @@ async function markingViewOf(row, standing, submission) {
     return {
         assessment: assessmentView(row, standing),
         submission: {
-            ...attemptView(submission, marks.get(submission.id), history.at(-1) ?? null),
+            ...attemptView(submission, marks.get(submission.id), history.at(-1) ?? null, isSignalled(row)),
             student: { studentProfileId: submission.studentProfileId, fullName: fullNameOf(submission) },
             startedAt: submission.startedAt,
             deadlineAt: submission.deadlineAt,
@@ -331,7 +353,12 @@ async function standingsOf(rows, roster, now) {
         return studentProfileIds.map((studentProfileId) => {
             const own = ofRow.filter((submission) => submission.studentProfileId === studentProfileId);
             const attempts = own.map((submission) =>
-                attemptView(submission, marks.get(submission.id), currentScoreOf(scores, submission.id))
+                attemptView(
+                    submission,
+                    marks.get(submission.id),
+                    currentScoreOf(scores, submission.id),
+                    isSignalled(row)
+                )
             );
             const countedScore = countedScoreOf(own, scores);
             const exception = exceptionOfPair.get(pairOf(row.id, studentProfileId)) ?? null;
@@ -652,8 +679,15 @@ async function release(auth, id) {
         }
         if (released) {
             await tx.assessment.updateMany({ where: { id: row.id, releasedAt: null }, data: { releasedAt: now } });
+            await recordEvent(tx, {
+                actorMembershipId: auth.membershipId,
+                verb: 'assessment.released',
+                objectType: 'Assessment',
+                objectId: row.id,
+                context: { ...assessmentContextOf(row), scoresRecorded: released },
+                occurredAt: now,
+            });
         }
-        // Ticket 06 writes assessment.released here, naming how many Scores it recorded.
         return {
             released,
             waitingForMarking: closed.length - ready.length,

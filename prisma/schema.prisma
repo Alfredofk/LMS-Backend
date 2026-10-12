@@ -1333,6 +1333,16 @@ model Submission {
     /// When a release recorded its first Score (ticket 04). Claimed, so a release
     /// pressed twice at once records no Score twice.
     releasedAt       DateTime?
+    /// The integrity signals its frontend reported while it was in progress
+    /// (assessment ticket 06): focus lost, a paste, a copy, fullscreen left. Counted on
+    /// a KUIS, UTS or UAS answered ONLINE only, by tracking.record.js, in the same
+    /// transaction as each signal's Learning Event (handoff #24). Advisory, for the
+    /// staff alone (handoff #15): nothing is penalised on them, and no read of a
+    /// Student's carries them.
+    focusLostCount   Int              @default(0)
+    pastedCount      Int              @default(0)
+    copiedCount      Int              @default(0)
+    fullscreenExitedCount Int         @default(0)
     createdAt        DateTime         @default(now())
     updatedAt        DateTime         @updatedAt
 

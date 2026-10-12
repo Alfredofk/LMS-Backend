@@ -5,6 +5,7 @@ import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.j
 import { createLogger } from '../../lib/helpers.js';
 import { staffStandingOf, semesterSpan, todayOf } from '../sessions/sessions.service.js';
 import { slotSessionWhere } from '../tracking/tracking.service.js';
+import { recordEvent, assessmentContextOf } from '../tracking/tracking.record.js';
 import { cleanText } from '../content/content.service.js';
 import { toDate, toDay } from '../holidays/holidays.calendar.js';
 import {
@@ -49,7 +50,7 @@ const log = createLogger('Assessment');
 // - Points are whole, 1 to 100, default 1 (2026-10-07).
 // - A draft until published. A draft may be deleted, softly; a published one is
 //   never deleted - it is cancelled, with a reason its Students see, and nothing in
-//   it changes afterwards.
+//   it changes afterwards. Publishing writes assessment.published (ticket 06).
 // - After publishing a setting changes freely and never voids (answered question 6);
 //   closesAt moves either way but never to before now, opensAt only while no
 //   Submission exists (ticket 03), and the type is fixed.
@@ -800,12 +801,23 @@ async function publish(auth, id, { updatedAt }) {
         throw conflict(`Add at least one question to ${describe(row)} before publishing it`);
     }
 
-    // Ticket 06 writes assessment.published here, in one transaction with the claim.
-    const claimed = await prisma.assessment.updateMany({
-        where: { id: row.id, deletedAt: null, publishedAt: null, updatedAt: row.updatedAt },
-        data: { publishedAt: new Date() },
+    // Its Learning Event lands with the claim or not at all (ticket 06, handoff #24).
+    const now = new Date();
+    await prisma.$transaction(async (tx) => {
+        const claimed = await tx.assessment.updateMany({
+            where: { id: row.id, deletedAt: null, publishedAt: null, updatedAt: row.updatedAt },
+            data: { publishedAt: now },
+        });
+        if (claimed.count === 0) throw conflict(CHANGED_MEANWHILE);
+        await recordEvent(tx, {
+            actorMembershipId: auth.membershipId,
+            verb: 'assessment.published',
+            objectType: 'Assessment',
+            objectId: row.id,
+            context: assessmentContextOf(row),
+            occurredAt: now,
+        });
     });
-    if (claimed.count === 0) throw conflict(CHANGED_MEANWHILE);
     log.info(`${describe(row)} published`);
     return detailOf(row.id, 'teacher');
 }

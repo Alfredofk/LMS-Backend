@@ -1,7 +1,8 @@
 // The one writer of LearningEvent, and of the ContentProgress derived from it
-// (teaching-and-learning ticket 05, handoff #11, #24). Imports nothing but what
-// every caller passes in, so content, attendance and tracking all use it without
-// an import cycle.
+// (teaching-and-learning ticket 05, handoff #11, #24), and of a Submission's
+// integrity counts (assessment ticket 06). Imports nothing but what every caller
+// passes in, so content, attendance, assessment and tracking all use it without an
+// import cycle.
 //
 // Owner's decisions (2026-09-27 and 2026-10-04):
 // - A Learning Event is append-only. Nothing here updates or deletes one, and the
@@ -52,8 +53,29 @@ const CONTENT_VERBS = {
     },
 };
 
-// Server-written, with nothing to derive.
-const OTHER_VERBS = new Set(['content.published', 'attendance.checked_in', 'attendance.confirmed']);
+// Server-written, with nothing to derive. The assessment ones (ticket 06) are each
+// written in the transaction of the act they record: publishing, starting, handing
+// in - by the Student, or by time - and releasing.
+const OTHER_VERBS = new Set([
+    'content.published',
+    'attendance.checked_in',
+    'attendance.confirmed',
+    'assessment.published',
+    'assessment.submission_started',
+    'assessment.submitted',
+    'assessment.released',
+]);
+
+// The integrity signals a Student's frontend reports during an attempt at a KUIS, a
+// UTS or a UAS (assessment ticket 06, owner 2026-10-04), each with the Submission
+// column that counts it. Advisory (handoff #15): counted for the staff, never
+// penalised.
+const SIGNAL_VERBS = {
+    'assessment.focus_lost': 'focusLostCount',
+    'assessment.pasted': 'pastedCount',
+    'assessment.copied': 'copiedCount',
+    'assessment.fullscreen_exited': 'fullscreenExitedCount',
+};
 
 const CLIENT_VERBS = Object.keys(CONTENT_VERBS).filter((verb) => CONTENT_VERBS[verb].client);
 
@@ -86,7 +108,7 @@ async function recordEvent(
     client,
     { actorMembershipId, verb, objectType, objectId, context = {}, occurredAt = new Date() }
 ) {
-    if (!CONTENT_VERBS[verb] && !OTHER_VERBS.has(verb)) {
+    if (!CONTENT_VERBS[verb] && !OTHER_VERBS.has(verb) && !SIGNAL_VERBS[verb]) {
         throw new Error(`Unknown Learning Event verb: ${verb}`);
     }
     return client.learningEvent.create({
@@ -167,4 +189,45 @@ async function recordContentEvent(
     return { recorded: true, completed: Boolean(row.completedAt ?? data.completedAt) };
 }
 
-export { CONTENT_VERBS, CLIENT_VERBS, VIDEO_COMPLETE_AT, recordEvent, recordContentEvent };
+// What every assessment event names of its Assessment, as a Content's events name its
+// type and ClassSubject, so a later report needs no join (assessment ticket 06).
+const assessmentContextOf = (assessment) => ({
+    assessmentType: assessment.type,
+    mode: assessment.mode,
+    classSubjectId: assessment.classSubject.id,
+});
+
+// One integrity signal on a Submission still in progress (assessment ticket 06): its
+// count raised and its Learning Event written, in the caller's transaction. The
+// raise is the claim - its where holds the Submission open - so a signal landing as
+// the attempt is handed in, closed by time or voided records nothing and answers
+// { recorded: false }. The caller has checked that the Submission is the Student's
+// own and that its Assessment records signals.
+async function recordSignal(client, { actorMembershipId, submission, verb, occurredAt }) {
+    const raised = await client.submission.updateMany({
+        where: { id: submission.id, submittedAt: null, voidedAt: null, deadlineAt: { gt: new Date() } },
+        data: { [SIGNAL_VERBS[verb]]: { increment: 1 } },
+    });
+    if (raised.count === 0) return { recorded: false };
+
+    await recordEvent(client, {
+        actorMembershipId,
+        verb,
+        objectType: 'Submission',
+        objectId: submission.id,
+        context: { assessmentId: submission.assessment.id, ...assessmentContextOf(submission.assessment) },
+        occurredAt,
+    });
+    return { recorded: true };
+}
+
+export {
+    CONTENT_VERBS,
+    CLIENT_VERBS,
+    SIGNAL_VERBS,
+    VIDEO_COMPLETE_AT,
+    recordEvent,
+    recordContentEvent,
+    assessmentContextOf,
+    recordSignal,
+};

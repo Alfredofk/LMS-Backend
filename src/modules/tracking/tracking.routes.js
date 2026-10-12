@@ -5,11 +5,13 @@ import { validate } from '../../shared/validate.js';
 import * as controller from './tracking.controller.js';
 import { eventsBody, idParams } from './tracking.schema.js';
 
-// Mounted at /api/tracking (teaching-and-learning tickets 05 and 06).
+// Mounted at /api/tracking (teaching-and-learning tickets 05 and 06, assessment
+// ticket 06).
 //
-// A student's frontend reports what they did with a Content, in batches. Only a
-// student sends: staff reading Content is not tracked. Nothing here reads, changes
-// or removes a Learning Event - on purpose.
+// A student's frontend reports what they did with a Content, and the integrity
+// signals during an attempt at a KUIS, a UTS or a UAS, in batches. Only a student
+// sends: staff reading Content is not tracked. Nothing here reads, changes or
+// removes a Learning Event - on purpose.
 //
 // The progress views (ticket 06) read what the events derived instead, Content
 // Progress and Attendance (handoff #24):

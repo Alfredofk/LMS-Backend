@@ -8,6 +8,7 @@ import { MIME } from '../../shared/upload.js';
 import { createLogger } from '../../lib/helpers.js';
 import { semesterSpan } from '../sessions/sessions.service.js';
 import { INLINE_TYPES, fileNameOf, studentProfileOf } from '../content/content.service.js';
+import { recordEvent, assessmentContextOf } from '../tracking/tracking.record.js';
 import { imageIdsOf, imageFileOf } from './assessment.bank.js';
 import { autoPointsOf } from './assessment.grading.js';
 import { scoresOf, currentScoreOf, countedScoreOf, scoreView, pointsOf } from './assessment.score.js';
@@ -43,7 +44,13 @@ const log = createLogger('Assessment');
 //   Assessment for a Student is studentAssessmentSelect, and the copies are read
 //   without their key.
 // - Saving an answer writes no Learning Event (answered question 4). Starting and
-//   handing in will, from ticket 06.
+//   handing in do (ticket 06): assessment.submission_started, and
+//   assessment.submitted - by the Student, or by time as of the deadline, the
+//   Student's own act either way - each in the transaction of the act.
+// - On a KUIS, a UTS or a UAS answered online, the frontend reports integrity
+//   signals during an attempt in progress (ticket 06, through /api/tracking/events):
+//   counted on the Submission for the staff, never shown to a Student, never
+//   penalised (handoff #15). signallableSubmissionsOf says which attempts take them.
 // - Once its Submission is released (ticket 04) the Student reads its Score - the
 //   newest, with the newest correction's reason - the points each answer earned and
 //   the comments, and the key only if the teacher chose to show it. Before that,
@@ -64,7 +71,7 @@ const log = createLogger('Assessment');
 const SHAPE_VERSION = 1;
 const MINUTE_MS = 60 * 1000;
 const MAX_SHORT_LENGTH = 200;
-// The integrity signals are recorded on these only (spec; ticket 06 records them).
+// The integrity signals are recorded on these only (spec, ticket 06).
 const SIGNALLED_TYPES = new Set(['KUIS', 'UTS', 'UAS']);
 const TYPE_OF_MIME = Object.fromEntries(Object.entries(MIME).map(([type, mime]) => [mime, type]));
 
@@ -169,6 +176,19 @@ const describe = (row) =>
 
 const isInProgress = (row) => row.submittedAt === null && row.voidedAt === null;
 
+// Whether an Assessment's attempts record integrity signals (spec, ticket 06): a
+// KUIS, a UTS or a UAS, answered online. A TUGAS or an OFFLINE one never does.
+const isSignalled = (row) => row.mode === 'ONLINE' && SIGNALLED_TYPES.has(row.type);
+
+// What a Submission's own Learning Events name (ticket 06): its Assessment, as every
+// assessment event does, the attempt, and whether it is a remedial.
+const attemptContextOf = (assessment, { attempt, remedial }) => ({
+    assessmentId: assessment.id,
+    ...assessmentContextOf(assessment),
+    attempt,
+    remedial,
+});
+
 // ---------------------------------------------------------------------------
 // A Student's own terms (ticket 05)
 // ---------------------------------------------------------------------------
@@ -268,6 +288,8 @@ const submissionCountOf = (assessmentId) => prisma.submission.count({ where: { a
 // the staff's results or marking, a release (ticket 04) - closes it, and gets what a
 // clock would have written. Each is claimed, so two readers at once close it once.
 // Late is counted from the Student's own closesAt: a make-up's, if any (ticket 05).
+// Its assessment.submitted is the Student's, as of the deadline (ticket 06), whoever
+// touched it.
 async function closeExpiredSubmissions(where, now = new Date()) {
     const expired = await prisma.submission.findMany({
         where: { ...where, ...IN_PROGRESS, deadlineAt: { lte: now } },
@@ -276,7 +298,9 @@ async function closeExpiredSubmissions(where, now = new Date()) {
             assessmentId: true,
             studentProfileId: true,
             attempt: true,
+            remedial: true,
             deadlineAt: true,
+            studentProfile: { select: { membershipId: true } },
             assessment: { select: studentAssessmentSelect },
         },
     });
@@ -288,14 +312,22 @@ async function closeExpiredSubmissions(where, now = new Date()) {
 
     for (const row of expired) {
         const { closesAt } = ownTermsOf(row.assessment, exceptionByPair.get(pairKey(row)));
+        const late = row.deadlineAt > closesAt;
         const closed = await prisma.$transaction(async (tx) => {
             const claimed = await tx.submission.updateMany({
                 where: { id: row.id, ...IN_PROGRESS },
-                data: { submittedAt: row.deadlineAt, closedBy: 'TIME', late: row.deadlineAt > closesAt },
+                data: { submittedAt: row.deadlineAt, closedBy: 'TIME', late },
             });
             if (claimed.count === 0) return false;
             await markSubmission(tx, row.id);
-            // Ticket 06 writes assessment.submitted here, closed by time.
+            await recordEvent(tx, {
+                actorMembershipId: row.studentProfile.membershipId,
+                verb: 'assessment.submitted',
+                objectType: 'Submission',
+                objectId: row.id,
+                context: { ...attemptContextOf(row.assessment, row), closedBy: 'TIME', late },
+                occurredAt: row.deadlineAt,
+            });
             return true;
         });
         if (closed) log.info(`${describe(row.assessment)}: attempt ${row.attempt} closed at its deadline`);
@@ -401,6 +433,29 @@ async function claimOpen(tx, submissionId, now) {
     if (claimed.count === 0) throw conflict('This attempt was closed meanwhile');
 }
 
+// The Submissions among these ids that take an integrity signal now (ticket 06), by
+// id: the caller's own, on their live profile, still in progress - one past its
+// deadline is closed first, as anything touching it does - of a KUIS, a UTS or a UAS
+// answered online. Any other id - another Student's, another school's, one handed in
+// or void, a TUGAS's - is absent, so the caller refuses each with the same "not
+// found". Recording the signal claims the attempt again (recordSignal).
+async function signallableSubmissionsOf(auth, submissionIds) {
+    if (submissionIds.length === 0) return new Map();
+    const studentProfileId = await studentProfileOf(auth);
+    if (!studentProfileId) return new Map();
+    const where = { id: { in: submissionIds }, studentProfileId };
+    await closeExpiredSubmissions(where);
+
+    const rows = await prisma.submission.findMany({
+        where: { ...where, ...IN_PROGRESS },
+        select: {
+            id: true,
+            assessment: { select: { id: true, type: true, mode: true, classSubject: { select: { id: true } } } },
+        },
+    });
+    return new Map(rows.filter((row) => isSignalled(row.assessment)).map((row) => [row.id, row]));
+}
+
 // The hard end no Submission passes: the Student's closesAt - a make-up's, if any
 // (ticket 05) - or with acceptLate the end of the Semester's last day in the school's
 // zone (answered question 3). The menu (ticket 07) gives the Semester's end, read
@@ -499,7 +554,7 @@ const studentAssessmentView = (row, exception) => ({
     questionCount: row.questions.length,
     totalPoints: row.questions.reduce((sum, question) => sum + question.points, 0),
     // The Student is told before starting that these are recorded (spec).
-    integritySignals: row.mode === 'ONLINE' && SIGNALLED_TYPES.has(row.type),
+    integritySignals: isSignalled(row),
 });
 
 // What each kind's answer holds: the one field a body sends, its rule, the columns
@@ -736,7 +791,8 @@ function shownOrderOf(row, questions) {
 // A new attempt, on the Student's own terms (ticket 05), and a remedial when their
 // exception is one, as it stands now (2026-10-11). A second one in progress is
 // impossible, even racing: the partial unique index
-// Submission_one_in_progress_per_student, and the attempt number's.
+// Submission_one_in_progress_per_student, and the attempt number's. Its
+// assessment.submission_started is written with it (ticket 06).
 async function start(auth, id) {
     const { row, studentProfileId } = await loadForStudent(auth, id);
     const now = new Date();
@@ -778,7 +834,14 @@ async function start(auth, id) {
                 },
                 select: { id: true },
             });
-            // Ticket 06 writes assessment.submission_started here.
+            await recordEvent(tx, {
+                actorMembershipId: auth.membershipId,
+                verb: 'assessment.submission_started',
+                objectType: 'Submission',
+                objectId: submission.id,
+                context: attemptContextOf(row, { attempt, remedial }),
+                occurredAt: now,
+            });
             return submission;
         });
     } catch (error) {
@@ -881,7 +944,7 @@ async function saveEssayFile(auth, submissionId, questionId, file) {
 // The Student hands it in, before its deadline: marked in the same transaction, and
 // late after their own closesAt - a make-up's, if any (ticket 05) - which only
 // acceptLate allows. Past the deadline it was closed by time already, and this is
-// refused.
+// refused. Its assessment.submitted is written with it (ticket 06).
 async function handIn(auth, submissionId) {
     const { submission, assessment } = await loadAnswerable(auth, submissionId);
     const exception = await exceptionOf(assessment.id, submission.studentProfileId);
@@ -894,7 +957,14 @@ async function handIn(auth, submissionId) {
         });
         if (claimed.count === 0) throw conflict('This attempt was closed meanwhile');
         await markSubmission(tx, submission.id);
-        // Ticket 06 writes assessment.submitted here, with late.
+        await recordEvent(tx, {
+            actorMembershipId: auth.membershipId,
+            verb: 'assessment.submitted',
+            objectType: 'Submission',
+            objectId: submission.id,
+            context: { ...attemptContextOf(assessment, submission), closedBy: 'STUDENT', late },
+            occurredAt: now,
+        });
     });
 
     log.info(`${describe(assessment)}: attempt ${submission.attempt} handed in${late ? ', late' : ''}`);
@@ -908,6 +978,8 @@ export {
     exceptionsOf,
     exceptionOf,
     ownTermsOf,
+    isSignalled,
+    signallableSubmissionsOf,
     placementSpansOf,
     isListedThrough,
     hardEndIn,
