@@ -25,6 +25,7 @@ import attendanceRoutes from './modules/attendance/attendance.routes.js';
 import contentRoutes from './modules/content/content.routes.js';
 import trackingRoutes from './modules/tracking/tracking.routes.js';
 import assessmentRoutes from './modules/assessment/assessment.routes.js';
+import gradingRoutes from './modules/grading/grading.routes.js';
 import { generalLimiter } from './shared/rateLimit.js';
 import { verifyTransport } from './shared/mailer.js';
 import { createLogger } from './lib/helpers.js';
@@ -96,6 +97,7 @@ app.use('/api/attendance', attendanceRoutes);
 app.use('/api/content', contentRoutes);
 app.use('/api/tracking', trackingRoutes);
 app.use('/api/assessments', assessmentRoutes);
+app.use('/api/grading', gradingRoutes);
 
 // Catch 404
 app.use((_req, _res, next) => next(notFound('Route not found')));

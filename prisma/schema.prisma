@@ -140,6 +140,9 @@ enum ApprovalAction {
     /// The Principal or a Vice Principal selecting, or deselecting, a national Subject
     /// for the school (registration-and-membership 20).
     UPDATE_SUBJECTS
+    /// The Principal or a Vice Principal changing the school's default Grade Weights,
+    /// its default KKTP, or its Remedial Rule (grading-and-report-card 01).
+    UPDATE_GRADE_SETTINGS
 }
 
 // ---------------------------------------------------------------------------
@@ -451,6 +454,8 @@ model School {
     submissionAnswerOptions SubmissionAnswerOption[]
     scores            Score[]
     assessmentExceptions AssessmentException[]
+    gradeSetting      SchoolGradeSetting?
+    slotGradeSettings SlotGradeSetting[]
 
     @@index([deactivatedAt])
 }
@@ -684,6 +689,7 @@ model Semester {
     school        School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
     academicYear  AcademicYear   @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
     classSubjects ClassSubject[]
+    slotGradeSettings SlotGradeSetting[]
 
     @@unique([academicYearId, ordinal])
     @@index([schoolId, status])
@@ -704,6 +710,7 @@ model Subject {
     classSubjects ClassSubject[]
     schoolChoices SchoolSubjectChoice[]
     questions     Question[]
+    slotGradeSettings SlotGradeSetting[]
 
     @@unique([schoolId, code])
     @@index([schoolId])
@@ -751,6 +758,7 @@ model Class {
     classSubjects   ClassSubject[]
     movesOut        ClassMove[]       @relation("ClassMoveFrom")
     movesIn         ClassMove[]       @relation("ClassMoveTo")
+    slotGradeSettings SlotGradeSetting[]
 
     @@unique([schoolId, academicYearId, name])
     @@index([schoolId, gradeLevel])
@@ -1500,6 +1508,79 @@ model AssessmentException {
     @@index([schoolId])
     @@index([assessmentId])
     @@index([studentProfileId])
+}
+
+// ---------------------------------------------------------------------------
+// Grading - settings (grading-and-report-card ticket 01)
+// ---------------------------------------------------------------------------
+
+/// How a remedial attempt's Score enters the Final Grade, per Assessment, for a
+/// Student whose remedial attempts beat their ordinary ones (owner, 2026-10-13). The
+/// Score itself stays raw: the rule is applied where the grade is computed.
+enum RemedialRule {
+    /// max(original, min(remedial, KKTP)). The default for a school that never chose.
+    CAP_AT_KKTP
+    /// The higher of the two, the Score that counts as it is.
+    HIGHEST
+    /// (original + remedial) / 2, or the remedial alone when there is no original.
+    AVERAGE
+}
+
+/// The school's own grade settings (grading-and-report-card 01, owner 2026-10-13),
+/// set by the Principal or a Vice Principal. At most one row per school, written
+/// the first time one of them saves. A null value, and a school with no row, mean the
+/// built-in default: 25/25/25/25, KKTP 75, the cap - read as "not set by the school".
+/// A change is audited UPDATE_GRADE_SETTINGS, against the school.
+model SchoolGradeSetting {
+    id           String        @id @default(cuid())
+    schoolId     String        @unique
+    /// The Grade Weights of TUGAS, KUIS, UTS and UAS: whole numbers summing to 100,
+    /// all four set or all four null.
+    weightTugas  Int?
+    weightKuis   Int?
+    weightUts    Int?
+    weightUas    Int?
+    /// 0-100.
+    kktp         Int?
+    remedialRule RemedialRule?
+    /// Who saved it last.
+    setByUserId  String
+    createdAt    DateTime      @default(now())
+    updatedAt    DateTime      @updatedAt
+
+    school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+}
+
+/// A slot's own Grade Weights and KKTP (grading-and-report-card 01, owner
+/// 2026-10-13), set by its Answering Teacher. A slot is Class x Subject x Semester:
+/// an ended assignment and its successor share one row, as they share their
+/// Assessments. A null value follows the school's, so the weights and the KKTP may
+/// each be the slot's own or the school's. Clearing them nulls the columns, and the
+/// row stays. Not audited: the row says who saved it last.
+model SlotGradeSetting {
+    id          String   @id @default(cuid())
+    schoolId    String
+    classId     String
+    subjectId   String
+    semesterId  String
+    /// As on SchoolGradeSetting: all four set or all four null.
+    weightTugas Int?
+    weightKuis  Int?
+    weightUts   Int?
+    weightUas   Int?
+    kktp        Int?
+    /// Who saved it last.
+    setByUserId String
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+
+    school   School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    class    Class    @relation(fields: [classId], references: [id], onDelete: Cascade)
+    subject  Subject  @relation(fields: [subjectId], references: [id])
+    semester Semester @relation(fields: [semesterId], references: [id], onDelete: Cascade)
+
+    @@unique([classId, subjectId, semesterId])
+    @@index([schoolId])
 }
 
 /// A student moved from one class to another inside the school (ticket 16). The
