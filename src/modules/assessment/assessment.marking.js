@@ -705,6 +705,8 @@ async function release(auth, id) {
 export {
     loadForStaff,
     studentStatusOf,
+    standingsOf,
+    byName,
     results,
     recap,
     submissionForMarking,

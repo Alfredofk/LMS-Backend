@@ -1,5 +1,6 @@
 import { ok } from '../../shared/errors.js';
 import * as service from './grading.service.js';
+import * as grades from './grading.grades.js';
 
 // Thin, like the other controllers.
 
@@ -30,4 +31,10 @@ async function clearSlotSettings(req, res) {
     return ok(res, { settings, message: "The class subject follows the school's grade settings again." });
 }
 
-export { getSchoolSettings, setSchoolSettings, getSlotSettings, setSlotSettings, clearSlotSettings };
+// ---- a slot's grades ----
+
+async function getSlotGrades(req, res) {
+    return ok(res, await grades.slotGrades(req.auth, req.validated.params.id));
+}
+
+export { getSchoolSettings, setSchoolSettings, getSlotSettings, setSlotSettings, clearSlotSettings, getSlotGrades };

@@ -4,6 +4,7 @@ import { recordAudit } from '../../shared/approval.js';
 import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
 import { staffStandingOf } from '../sessions/sessions.service.js';
+import { TYPES } from './grading.compute.js';
 
 const log = createLogger('Grading');
 
@@ -27,8 +28,6 @@ const log = createLogger('Grading');
 // - A slot in a CLOSED Semester, or a closed year, takes no change.
 // - Every write sends back the updatedAt it read (the 2026-10-09 convention).
 
-// The four types in the order every message lists them.
-const TYPES = ['TUGAS', 'KUIS', 'UTS', 'UAS'];
 const WEIGHT_COLUMNS = { TUGAS: 'weightTugas', KUIS: 'weightKuis', UTS: 'weightUts', UAS: 'weightUas' };
 
 // What applies where the school has set nothing (owner, 2026-10-13).
@@ -64,8 +63,9 @@ const classSubjectSelect = {
     semesterId: true,
     teacherMembershipId: true,
     class: { select: { name: true, academicYear: { select: { label: true, status: true } } } },
-    subject: { select: { code: true } },
-    semester: { select: { ordinal: true, status: true } },
+    subject: { select: { code: true, name: true } },
+    // The dates for the slot's roster and span (ticket 02).
+    semester: { select: { ordinal: true, status: true, startDate: true, endDate: true } },
 };
 
 // 'MTK in 7A, Semester 1', for messages and log lines.
@@ -309,4 +309,12 @@ async function clearSlotSettings(auth, id, { updatedAt }) {
     return saveSlot(auth, classSubject, { ...weightColumnsOf(null), kktp: null }, updatedAt);
 }
 
-export { readSchoolSettings, setSchoolSettings, slotSettingsOf, readSlotSettings, setSlotSettings, clearSlotSettings };
+export {
+    loadForStaff,
+    readSchoolSettings,
+    setSchoolSettings,
+    slotSettingsOf,
+    readSlotSettings,
+    setSlotSettings,
+    clearSlotSettings,
+};

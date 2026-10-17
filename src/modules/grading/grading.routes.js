@@ -5,12 +5,13 @@ import { validate } from '../../shared/validate.js';
 import * as controller from './grading.controller.js';
 import { idParams, schoolSettingsBody, slotSettingsBody, slotClearBody } from './grading.schema.js';
 
-// Mounted at /api/grading (grading-and-report-card ticket 01).
+// Mounted at /api/grading (grading-and-report-card tickets 01 and 02).
 //
 // Grade settings: the school's default Grade Weights and KKTP, and its Remedial Rule,
 // read by its staff and set by the Principal or a Vice Principal; a slot's own
 // weights and KKTP, named by any ClassSubject of the slot, read by its staff and set
 // or cleared by its Answering Teacher. Every write sends back the updatedAt it read.
+// A slot's running grades (ticket 02) are read by its staff, never by a Student.
 // requireRole is the coarse filter; the service checks the role against the database
 // and decides whose slot it is, answering 404 to anyone it does not concern. A
 // Student reaches no slot route (404), as with the assessment staff's.
@@ -43,5 +44,9 @@ router.delete(
     validate({ params: idParams, body: slotClearBody }),
     controller.clearSlotSettings
 );
+
+// ---- a slot's grades ----
+
+router.get('/class-subjects/:id/grades', slotStaff, validate({ params: idParams }), controller.getSlotGrades);
 
 export default router;

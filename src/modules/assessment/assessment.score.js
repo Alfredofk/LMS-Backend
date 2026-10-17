@@ -171,6 +171,14 @@ function isCountedFromRemedial(submissions, scores) {
         .every(({ submission }) => submission.remedial);
 }
 
+// The same Scores as the grading slice's Remedial Rule reads them (grading-and-report-card
+// ticket 02): each value, and whether a remedial attempt reached it.
+const countingValuesOf = (submissions, scores) =>
+    countingScoresOf(submissions, scores).map(({ submission, score }) => ({
+        remedial: submission.remedial,
+        value: Number(score.value),
+    }));
+
 const scoreView = (row) =>
     row && {
         value: Number(row.value),
@@ -275,6 +283,7 @@ export {
     currentScoreOf,
     countedScoreOf,
     isCountedFromRemedial,
+    countingValuesOf,
     scoreView,
     recordScore,
     correctReleased,

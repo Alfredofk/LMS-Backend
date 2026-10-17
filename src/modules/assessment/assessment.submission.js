@@ -9,9 +9,11 @@ import { createLogger } from '../../lib/helpers.js';
 import { semesterSpan } from '../sessions/sessions.service.js';
 import { INLINE_TYPES, fileNameOf, studentProfileOf } from '../content/content.service.js';
 import { recordEvent, assessmentContextOf } from '../tracking/tracking.record.js';
+import { remedialTermsOf } from '../grading/grading.reporting.js';
+import { afterRuleOf } from '../grading/grading.compute.js';
 import { imageIdsOf, imageFileOf } from './assessment.bank.js';
 import { autoPointsOf } from './assessment.grading.js';
-import { scoresOf, currentScoreOf, countedScoreOf, scoreView, pointsOf } from './assessment.score.js';
+import { scoresOf, currentScoreOf, countedScoreOf, countingValuesOf, scoreView, pointsOf } from './assessment.score.js';
 
 const log = createLogger('Assessment');
 
@@ -55,6 +57,9 @@ const log = createLogger('Assessment');
 //   newest, with the newest correction's reason - the points each answer earned and
 //   the comments, and the key only if the teacher chose to show it. Before that,
 //   none of them; and nothing of anyone else's, ever (spec invariant 8).
+// - Where the school's Remedial Rule moves the Score that counts, the outline carries
+//   the result after it beside the raw Score (grading-and-report-card ticket 02, owner
+//   2026-10-14), with the KKTP of the slot that reports their grade.
 // - A Student's exception (ticket 05, set in assessment.exception.js) changes their
 //   terms alone (ownTermsOf): a make-up's window replaces the Class's, so starting,
 //   the hard end and late all follow it (2026-10-10); its extra attempts add to
@@ -680,11 +685,17 @@ async function outlineForStudent(auth, id) {
         prisma,
         submissions.filter((submission) => submission.releasedAt).map((submission) => submission.id)
     );
+    const counting = countingValuesOf(submissions, scores);
+    const { semester, subject } = row.classSubject;
+    const remedialTerms = counting.some((score) => score.remedial)
+        ? (await remedialTermsOf(auth, studentProfileId, semester, [subject.id])).get(subject.id)
+        : null;
     return {
         assessment: studentAssessmentView(row, exception),
         ...ownStandingOf(row, terms, exception, submissions, { now, hardEnd, current }),
         // The Score that counts: the highest of the released ones (ticket 04), else null.
         score: countedScoreOf(submissions, scores),
+        afterRule: remedialTerms ? afterRuleOf(counting, remedialTerms) : null,
         submissions: submissions.map((submission) =>
             ownSubmissionView(submission, currentScoreOf(scores, submission.id))
         ),

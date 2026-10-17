@@ -2,8 +2,10 @@ import { prisma } from '../../shared/prisma.js';
 import { notFound } from '../../shared/errors.js';
 import { semesterSpan, todayOf } from '../sessions/sessions.service.js';
 import { toDay } from '../holidays/holidays.calendar.js';
+import { remedialTermsOf } from '../grading/grading.reporting.js';
+import { afterRuleOf } from '../grading/grading.compute.js';
 import { studentStatusOf } from './assessment.marking.js';
-import { scoresOf, countedScoreOf } from './assessment.score.js';
+import { scoresOf, countedScoreOf, countingValuesOf } from './assessment.score.js';
 import {
     studentAssessmentSelect,
     submissionSelect,
@@ -45,6 +47,9 @@ import {
 // - Only in the Class they sit in now do they start; a Class they left is read.
 // - The Score is the counted one, and only once released. Nothing comparative, no
 //   key and no integrity count reaches them here (spec invariant 8).
+// - Beside it, where the school's Remedial Rule moves it, the result after the rule
+//   and the rule (grading-and-report-card ticket 02, owner 2026-10-14): the Score stays
+//   raw, and the Student is shown both. Never a grade, an average or a rank.
 
 const isOpen = (span) => span.endedAt === null;
 
@@ -204,8 +209,10 @@ async function menuOf(auth, { semesterId }) {
         submissions.filter((submission) => submission.releasedAt).map((submission) => submission.id)
     );
 
-    // Each Assessment it shows, in the Class it belongs to.
+    // Each Assessment it shows, in the Class it belongs to, and those a remedial Score
+    // counts on, for the Remedial Rule below.
     const entriesOf = new Map(classIds.map((classId) => [classId, []]));
+    const remedialEntries = [];
     for (const row of rows) {
         const { classId } = row.classSubject;
         const own = submissions.filter((submission) => submission.assessmentId === row.id);
@@ -216,12 +223,29 @@ async function menuOf(auth, { semesterId }) {
 
         const current = spansOf(classId).some(isOpen);
         const score = countedScoreOf(own, scores);
-        entriesOf.get(classId).push({
+        const entry = {
             assessment: studentAssessmentView(row, exception),
             status: standingStatusOf(row, own, score, terms.closesAt, now),
             score,
+            afterRule: null,
             ...ownStandingOf(row, terms, exception, own, { now, hardEnd, current }),
-        });
+        };
+        entriesOf.get(classId).push(entry);
+        const counting = countingValuesOf(own, scores);
+        if (counting.some((found) => found.remedial)) {
+            remedialEntries.push({ entry, counting, subjectId: row.classSubject.subject.id });
+        }
+    }
+
+    // The rule and the KKTP are the reporting slot's, read only where a remedial Score
+    // counts, so a menu without one costs nothing more.
+    if (remedialEntries.length) {
+        const subjectIds = [...new Set(remedialEntries.map(({ subjectId }) => subjectId))];
+        const termsOf = await remedialTermsOf(auth, studentProfileId, semester, subjectIds);
+        for (const { entry, counting, subjectId } of remedialEntries) {
+            const remedialTerms = termsOf.get(subjectId);
+            if (remedialTerms) entry.afterRule = afterRuleOf(counting, remedialTerms);
+        }
     }
 
     return {
