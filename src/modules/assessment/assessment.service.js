@@ -8,6 +8,7 @@ import { slotSessionWhere } from '../tracking/tracking.service.js';
 import { recordEvent, assessmentContextOf } from '../tracking/tracking.record.js';
 import { cleanText } from '../content/content.service.js';
 import { toDate, toDay } from '../holidays/holidays.calendar.js';
+import { assertNotFinalised } from '../grading/grading.lock.js';
 import {
     imageIdsOf,
     imageFileOf,
@@ -82,6 +83,10 @@ const log = createLogger('Assessment');
 //   points, with a reason. Every released Submission whose mark that moves gets a
 //   Score correction with it; the others are marked again as drafts (2026-10-09). A
 //   question's points changed keep each teacher's mark at its share of the question.
+// - Once its slot is finalised (grading-and-report-card 04, owner 2026-10-18) no staff
+//   write reaches an Assessment of it - settings, window, questions, publishing,
+//   cancelling, deleting a draft - 409, until its Teacher undoes the finalising: a
+//   closesAt moved later or a cancel would move a finalised grade (grading.lock.js).
 
 const DEFAULT_POINTS = 1;
 
@@ -226,10 +231,12 @@ async function loadReadable(auth, id) {
     return { row, standing };
 }
 
-// A reader or a copier, who may read it, is told no (403).
+// A reader or a copier, who may read it, is told no (403). Every write loads through
+// here, so a finalised slot refuses them all (409).
 async function loadManaged(auth, id) {
     const { row, standing } = await loadReadable(auth, id);
     assertTeacherStanding(standing, 'Assessment not found');
+    await assertNotFinalised(row.classSubject);
     return row;
 }
 

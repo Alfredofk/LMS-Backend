@@ -4,6 +4,7 @@ import { createLogger } from '../../lib/helpers.js';
 import { staffStandingOf } from '../sessions/sessions.service.js';
 import { rosterOf, slotSessionWhere } from '../tracking/tracking.service.js';
 import { recordEvent, assessmentContextOf } from '../tracking/tracking.record.js';
+import { assertNotFinalised } from '../grading/grading.lock.js';
 import { questionContentView } from './assessment.bank.js';
 import {
     assessmentSelect,
@@ -84,6 +85,8 @@ const log = createLogger('Assessment');
 //   reached only by a remedial (frontend's note #19, owner 2026-10-12).
 // - Nothing in a cancelled Assessment is marked, released or corrected; its Scores
 //   stay.
+// - Nor in one whose slot is finalised (grading-and-report-card 04): 409 until its
+//   Teacher undoes the finalising (grading.lock.js).
 
 // An OFFLINE mark's Submission shows no question.
 const NO_QUESTIONS = { v: 1, questions: [], options: {} };
@@ -157,12 +160,14 @@ async function loadForStaff(auth, id) {
     return { row, standing };
 }
 
-// Its Answering Teacher, on a published Assessment not cancelled.
+// Its Answering Teacher, on a published Assessment not cancelled, of a slot not
+// finalised.
 async function loadForMarking(auth, id) {
     const { row, standing } = await loadForStaff(auth, id);
     assertTeacherStanding(standing, 'Assessment not found');
     assertNotCancelled(row);
     if (!row.publishedAt) throw conflict(`${describe(row)} is a draft; it has nothing to mark`);
+    await assertNotFinalised(row.classSubject);
     return row;
 }
 

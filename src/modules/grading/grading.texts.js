@@ -11,27 +11,31 @@ const log = createLogger('Grading');
 
 // The words on the Report Card (grading-and-report-card ticket 03): the Answering
 // Teacher's Description of each Student a slot reports for, and the Homeroom Teacher's
-// Note on each Student for a Semester. Finalising (ticket 04) will refuse a slot with a
-// Student it describes and has no Description of; closing (ticket 05) freezes both into
-// the Report Card. A Student reads neither before then (the spec's "Who reads what").
+// Note on each Student for a Semester. Closing (ticket 05) freezes both into the Report
+// Card, and waits for every Note. A Student reads neither before then (the spec's "Who
+// reads what").
 //
-// Owner's decisions (2026-10-13, the spec; the build decisions of 2026-10-17):
+// Owner's decisions (2026-10-13, the spec; the build decisions of 2026-10-17; changed
+// 2026-10-18):
 // - A Description is free text per Student x slot, written by the slot's Answering
-//   Teacher - the successor too, who changes the predecessor's - and required, so it is
-//   never emptied. It is written for the Students the slot reports for
-//   (grading.reporting.js): a mover is described by their last Class's slot of the
-//   Subject, and by an earlier Class's only for a Subject their last Class has no slot
-//   of. One who has left the School needs none and takes none.
-// - A Note is free text per Student x Semester, optional, written by the Homeroom
-//   Teacher of the Class the Student is placed in now, so a mover's is their new
-//   Class's. Clearing one nulls its text, and the row stays.
+//   Teacher - the successor too, who changes the predecessor's. Optional (owner,
+//   2026-10-18: the Teacher writes one when they wish), so finalising never waits for
+//   one, and clearing one nulls its text while the row stays. It is written for the
+//   Students the slot reports for (grading.reporting.js): a mover is described by their
+//   last Class's slot of the Subject, and by an earlier Class's only for a Subject their
+//   last Class has no slot of. One who has left the School takes none.
+// - A Note is free text per Student x Semester, written by the Homeroom Teacher of the
+//   Class the Student is placed in now, so a mover's is their new Class's. Required
+//   since 2026-10-18 (owner: the Homeroom Teacher gives each Student advice): the
+//   readiness board (ticket 04) names the missing ones, and closing waits for them.
+//   Clearing one nulls its text, and the row stays, missing again.
 // - Both are plain text of at most 1,000 characters (the schema's), and neither is
 //   audited: the row says who wrote it last.
 // - Both are written in bulk, many Students in one request, all of them or none. Each
 //   row sends back the updatedAt it read, or null where it read none; one stale row
 //   refuses the whole request with 409, naming whose.
-// - A CLOSED Semester or a closed year takes neither (409). Finalising will lock a
-//   slot's Descriptions too (ticket 04).
+// - A CLOSED Semester or a closed year takes neither (409), nor does a finalised slot
+//   take a Description (ticket 04, through loadManaged).
 
 const textSelect = { id: true, studentProfileId: true, text: true, updatedAt: true };
 
@@ -108,7 +112,7 @@ async function storedRowsOf(model, where, rows) {
 
 // Whom a slot describes and what it holds: of the Students it reports for
 // (slotReportingOf over its roster), the ones still in the School, and the Descriptions
-// stored for the slot. Read by the grade view, and by finalising (ticket 04).
+// stored for the slot. Read by the grade view.
 async function descriptionsOf(classSubject, roster, reporting) {
     const reported = roster.studentProfileIds.filter(reporting.isReportedHere);
     const [live, stored] = await Promise.all([
@@ -135,12 +139,12 @@ function notDescribedText(classSubject, roster, reporting, studentProfileId) {
 }
 
 // The slot's Answering Teacher - the successor once it ended - writes the Descriptions
-// of Students it describes, many at once; a reader (the Homeroom Teacher, the
-// Principal, a Vice Principal) is told no (403), anyone else gets 404. A Student it
-// does not describe - reported by another Class's slot, gone from the School, or never
-// on its roster - refuses the whole request with 400, naming each. A CLOSED Semester or
-// a closed year refuses it with 409. Answers the named Students' Descriptions as they
-// now are.
+// of Students it describes, many at once; null or an empty text clears one. A reader
+// (the Homeroom Teacher, the Principal, a Vice Principal) is told no (403), anyone else
+// gets 404. A Student it does not describe - reported by another Class's slot, gone from
+// the School, or never on its roster - refuses the whole request with 400, naming each.
+// A CLOSED Semester, a closed year or a finalised slot refuses it with 409. Answers the
+// named Students' Descriptions as they now are.
 async function writeDescriptions(auth, id, { descriptions }) {
     const classSubject = await loadManaged(auth, id, {
         refusal: 'Only the teacher of this class subject writes its descriptions',
@@ -212,7 +216,8 @@ async function loadNotes(auth, classId, semesterId) {
 }
 
 // The Students placed in the Class now, still in the School, by name: those whose
-// Notes it writes (owner, 2026-10-17).
+// Notes it writes (owner, 2026-10-17), and whose missing Notes the readiness board
+// names (ticket 04).
 async function placedNowIn(classId) {
     const rows = await prisma.classMembership.findMany({
         where: { classId, endedAt: null, studentProfile: { endedAt: null } },
@@ -297,4 +302,4 @@ async function writeNotes(auth, classId, semesterId, { notes }) {
     return storedRowsOf('homeroomNote', { semesterId: semester.id }, notes);
 }
 
-export { descriptionsOf, writeDescriptions, readNotes, writeNotes };
+export { descriptionsOf, writeDescriptions, placedNowIn, readNotes, writeNotes };

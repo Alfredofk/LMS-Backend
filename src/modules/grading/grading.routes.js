@@ -13,7 +13,7 @@ import {
     notesBody,
 } from './grading.schema.js';
 
-// Mounted at /api/grading (grading-and-report-card tickets 01, 02 and 03).
+// Mounted at /api/grading (grading-and-report-card tickets 01 to 04).
 //
 // Grade settings: the school's default Grade Weights and KKTP, and its Remedial Rule,
 // read by its staff and set by the Principal or a Vice Principal; a slot's own
@@ -26,6 +26,11 @@ import {
 // the service checks the role against the database and decides whose slot or Class it
 // is, answering 404 to anyone it does not concern. A Student reaches none of the slot
 // or Class routes (404), as with the assessment staff's.
+//
+// Finalising (ticket 04): the Principal starts a Semester's finalising and stops it
+// while no slot is finalised - a Vice Principal is told no in the service; a slot's
+// Answering Teacher finalises it and undoes that; the Principal and the Vice
+// Principals read the readiness board, and a Teacher is told no (403).
 
 const router = Router();
 
@@ -80,5 +85,23 @@ router.put(
     validate({ params: noteParams, body: notesBody }),
     controller.writeNotes
 );
+
+// ---- finalising ----
+
+router.post(
+    '/semesters/:id/start-finalising',
+    principalOrVice,
+    validate({ params: idParams }),
+    controller.startFinalising
+);
+router.post(
+    '/semesters/:id/stop-finalising',
+    principalOrVice,
+    validate({ params: idParams }),
+    controller.stopFinalising
+);
+router.get('/semesters/:id/readiness', principalOrVice, validate({ params: idParams }), controller.getReadiness);
+router.post('/class-subjects/:id/finalise', slotStaff, validate({ params: idParams }), controller.finalise);
+router.post('/class-subjects/:id/unfinalise', slotStaff, validate({ params: idParams }), controller.unfinalise);
 
 export default router;

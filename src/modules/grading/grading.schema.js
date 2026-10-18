@@ -1,9 +1,10 @@
 import { z } from 'zod';
 
 // Grade settings (grading-and-report-card ticket 01), and the Descriptions and Notes
-// (ticket 03). Only the shape is checked here: whole numbers, the four weights adding
-// up to 100, the texts' length. Who may write, for which Students, and whether the
-// slot or Semester still takes a change, is the service's.
+// (ticket 03); finalising (ticket 04) takes an id alone. Only the shape is checked
+// here: whole numbers, the four weights adding up to 100, the texts' length. Who may
+// write, for which Students, and whether the slot or Semester still takes a change, is
+// the service's.
 
 const idParams = z.object({ id: z.string().min(1) });
 
@@ -88,14 +89,20 @@ const textRows = (text, label) =>
             'A student is named twice'
         );
 
-// A Description is required, so it is never emptied.
-const descriptionsBody = z.strictObject({
-    descriptions: textRows(words.min(1, 'Write the description; it cannot be empty'), 'description'),
-});
+// Null or an empty text clears one: a Description is optional (owner, 2026-10-18), and a
+// Note, required before closing, may still be cleared to be written again.
+const clearable = words.nullable().transform((value) => value || null);
 
-// A Note is optional: null or an empty text clears it.
-const notesBody = z.strictObject({
-    notes: textRows(words.nullable().transform((value) => value || null), 'note'),
-});
+const descriptionsBody = z.strictObject({ descriptions: textRows(clearable, 'description') });
 
-export { idParams, schoolSettingsBody, slotSettingsBody, slotClearBody, noteParams, descriptionsBody, notesBody };
+const notesBody = z.strictObject({ notes: textRows(clearable, 'note') });
+
+export {
+    idParams,
+    schoolSettingsBody,
+    slotSettingsBody,
+    slotClearBody,
+    noteParams,
+    descriptionsBody,
+    notesBody,
+};

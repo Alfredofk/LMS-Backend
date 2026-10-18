@@ -1052,7 +1052,9 @@ const classSubjectSelect = {
     endReason: true,
     class: { select: { id: true, name: true, gradeLevel: true } },
     subject: { select: { id: true, code: true, name: true } },
-    semester: { select: { id: true, ordinal: true, academicYear: { select: { label: true } } } },
+    semester: {
+        select: { id: true, ordinal: true, status: true, academicYear: { select: { label: true, status: true } } },
+    },
     teacher: { select: { id: true, user: { select: { fullName: true } } } },
 };
 
@@ -1092,8 +1094,10 @@ function translateSlotTaken(error) {
 // A slot: a class, a subject, a semester - all at this school, the class and the
 // semester in the same ACTIVE academic year, and the semester still OPEN. The
 // subject must be one the school uses (ticket 20): both a teacher's request and
-// the override come through here.
-async function resolveSlot({ classId, subjectId, semesterId }) {
+// the override come through here. The override also takes a FINALIZING semester
+// (allowFinalizing, grading-and-report-card 04, owner 2026-10-18): a slot whose
+// teacher left needs someone to finalise it.
+async function resolveSlot({ classId, subjectId, semesterId }, { allowFinalizing = false } = {}) {
     const target = await prisma.class.findFirst({
         where: { id: classId },
         select: {
@@ -1132,7 +1136,9 @@ async function resolveSlot({ classId, subjectId, semesterId }) {
     if (target.academicYear.status !== 'ACTIVE') {
         throw conflict(`Academic year ${target.academicYear.label} is closed`);
     }
-    if (semester.status !== 'OPEN') throw conflict(`Semester ${semester.ordinal} is not open`);
+    if (!(semester.status === 'OPEN' || (allowFinalizing && semester.status === 'FINALIZING'))) {
+        throw conflict(`Semester ${semester.ordinal} is ${allowFinalizing ? 'closed' : 'not open'}`);
+    }
 
     return { target, semester, subject };
 }
@@ -1377,7 +1383,10 @@ async function cancelClassSubject(auth, id) {
 // The Principal's decision, claimed with updateMany({ status: 'PENDING' }) so it
 // happens exactly once. A rejection carries its reason back to the teacher, who
 // may ask again: a REJECTED row leaves the slot index, and the next request is a
-// new row, capped by assertClassSubjectRetryAllowed.
+// new row, capped by assertClassSubjectRetryAllowed. An approval follows the
+// request's own rule - an OPEN semester of an ACTIVE year (grading-and-report-card
+// 04, owner 2026-10-18) - so no slot appears once finalising has begun; the
+// override names a successor then. Rejecting is always allowed.
 async function decideClassSubject(auth, id, { action, reason }) {
     await assertPrincipalOrVice(auth);
 
@@ -1391,7 +1400,13 @@ async function decideClassSubject(auth, id, { action, reason }) {
     await assertNotDecidingForSelf(auth, row.teacher.id);
     // A request filed before its subject was deselected does not get in through
     // the approval (ticket 20). Rejecting it is still allowed.
-    if (action === 'APPROVE' && row.status === 'PENDING') await assertSubjectSelected(row.subject);
+    if (action === 'APPROVE' && row.status === 'PENDING') {
+        await assertSubjectSelected(row.subject);
+        if (row.semester.academicYear.status !== 'ACTIVE') {
+            throw conflict(`Academic year ${row.semester.academicYear.label} is closed`);
+        }
+        if (row.semester.status !== 'OPEN') throw conflict(`Semester ${row.semester.ordinal} is not open`);
+    }
     const now = new Date();
 
     await prisma.$transaction(async (tx) => {
@@ -1470,11 +1485,11 @@ async function bulkApproveClassSubjects(auth, { ids }) {
 // The Principal's path for a teacher who joins mid-semester (handoff #56): a
 // ClassSubject ACTIVE at once, past the deadline, flagged createdViaOverride and
 // audited OVERRIDE. Principal-only, and not a general back door - the slot,
-// year and semester rules still hold.
+// year and semester rules still hold, a FINALIZING semester taken too (resolveSlot).
 async function overrideClassSubject(auth, body) {
     await assertPrincipalOrVice(auth);
 
-    const { target } = await resolveSlot(body);
+    const { target } = await resolveSlot(body, { allowFinalizing: true });
     const teacher = await resolveTeacher(body.teacherMembershipId, 'The teacher');
     await assertNotDecidingForSelf(auth, teacher.id);
     const now = new Date();
@@ -1528,8 +1543,11 @@ async function overrideClassSubject(auth, body) {
 // freed - and is audited END, not REMOVE, which is a member leaving the school.
 
 // An assignment that can still be ended: ACTIVE, not ended, in an OPEN Semester of
-// an ACTIVE year. PENDING, ended, or another school's is the same 404.
-async function loadLiveAssignment(id) {
+// an ACTIVE year. PENDING, ended, or another school's is the same 404. A replacement
+// also takes a FINALIZING Semester (allowFinalizing, grading-and-report-card 04, owner
+// 2026-10-18): the slot keeps a teacher to finalise it. Ending alone does not, as it
+// would leave the slot with nobody.
+async function loadLiveAssignment(id, { allowFinalizing = false } = {}) {
     const row = await prisma.classSubject.findFirst({
         where: { id, status: 'ACTIVE', endedAt: null },
         select: {
@@ -1548,7 +1566,9 @@ async function loadLiveAssignment(id) {
     if (row.semester.academicYear.status !== 'ACTIVE') {
         throw conflict(`Academic year ${row.semester.academicYear.label} is closed`);
     }
-    if (row.semester.status !== 'OPEN') throw conflict(`Semester ${row.semester.ordinal} is not open`);
+    if (!(row.semester.status === 'OPEN' || (allowFinalizing && row.semester.status === 'FINALIZING'))) {
+        throw conflict(`Semester ${row.semester.ordinal} is ${allowFinalizing ? 'closed' : 'not open'}`);
+    }
     return row;
 }
 
@@ -1582,7 +1602,7 @@ async function replaceClassSubject(auth, id, { teacherMembershipId, reason }) {
     assertRejectionReason('END', reason);
     const trimmed = reason.trim();
 
-    const row = await loadLiveAssignment(id);
+    const row = await loadLiveAssignment(id, { allowFinalizing: true });
     await assertNotDecidingForSelf(auth, row.teacher.id);
     const teacher = await resolveTeacher(teacherMembershipId, 'The new teacher');
     if (teacher.id === row.teacher.id) throw badRequest('That teacher already teaches it');

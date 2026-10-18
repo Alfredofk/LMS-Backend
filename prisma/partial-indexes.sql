@@ -83,3 +83,10 @@ CREATE UNIQUE INDEX "Submission_one_in_progress_per_student"
 CREATE UNIQUE INDEX "AssessmentException_one_live_per_student"
     ON "AssessmentException" ("assessmentId", "studentProfileId")
     WHERE "removedAt" IS NULL;
+
+-- One live finalisation per slot - Class x Subject x Semester - (grading-and-report-card
+-- 04). An undone one must repeat, so a slot unfinalised may be finalised again - added
+-- in 20261018052031_add_slot_finalisation.
+CREATE UNIQUE INDEX "SlotFinalisation_one_live_per_slot"
+    ON "SlotFinalisation" ("classId", "subjectId", "semesterId")
+    WHERE "undoneAt" IS NULL;

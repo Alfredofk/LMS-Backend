@@ -5,6 +5,7 @@ import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.j
 import { createLogger } from '../../lib/helpers.js';
 import { staffStandingOf } from '../sessions/sessions.service.js';
 import { TYPES } from './grading.compute.js';
+import { slotNameOf, liveFinalisationOf, assertNotFinalised } from './grading.lock.js';
 
 const log = createLogger('Grading');
 
@@ -21,9 +22,12 @@ const log = createLogger('Grading');
 //   cap up to the KKTP. A read says where each value comes from, BUILT_IN being "not
 //   set by the school".
 // - A slot (Class x Subject x Semester) may have its own weights and KKTP, each apart,
-//   set by its Answering Teacher until it is finalised (ticket 04 adds that lock). A
+//   set by its Answering Teacher until it is finalised (ticket 04, grading.lock.js). A
 //   value it has none of follows the school's. An ended assignment and its successor
 //   share the slot's row. Not audited: the row says who saved it last.
+// - A finalised slot reads the settings it was finalised with - the Remedial Rule too -
+//   so a later change to the school's defaults moves no finalised grade (owner,
+//   2026-10-18). Undone, it follows the live ones again.
 // - Clearing a slot's own values nulls them, and the row stays: nothing is deleted.
 // - A slot in a CLOSED Semester, or a closed year, takes no change.
 // - Every write sends back the updatedAt it read (the 2026-10-09 convention).
@@ -69,8 +73,7 @@ const classSubjectSelect = {
 };
 
 // 'MTK in 7A, Semester 1', for messages and log lines.
-const describe = (classSubject) =>
-    `${classSubject.subject.code} in ${classSubject.class.name}, Semester ${classSubject.semester.ordinal}`;
+const describe = slotNameOf;
 
 // ---------------------------------------------------------------------------
 // The values and where they come from
@@ -156,9 +159,9 @@ async function loadForStaff(auth, id) {
 }
 
 // Its Answering Teacher changes them - the successor once it ended; a reader, a Vice
-// Principal included, is told no (403). A CLOSED Semester or a closed year takes no
-// change (409). Finalising the slot will lock them too (ticket 04). The Descriptions
-// (ticket 03, grading.texts.js) are the slot's under the same rule, in their own words.
+// Principal included, is told no (403). A CLOSED Semester, a closed year, or the slot
+// finalised (ticket 04) takes no change (409). The Descriptions (ticket 03,
+// grading.texts.js) are the slot's under the same rule, in their own words.
 async function loadManaged(
     auth,
     id,
@@ -172,6 +175,7 @@ async function loadManaged(
         throw conflict(`Semester ${semester.ordinal} is closed; ${kept} stay as they are`);
     }
     if (academicYear.status !== 'ACTIVE') throw conflict(`Academic year ${academicYear.label} is closed`);
+    await assertNotFinalised(classSubject);
     return classSubject;
 }
 
@@ -263,11 +267,24 @@ async function setSchoolSettings(auth, { weights, kktp, remedialRule, updatedAt 
 // A slot's
 // ---------------------------------------------------------------------------
 
+// The settings a finalisation kept (ticket 04), read back from their JSON column with
+// the weights in the order every view lists the types: jsonb keeps keys its own way.
+const keptSettingsOf = (kept) => ({
+    ...kept,
+    weights: { ...kept.weights, value: Object.fromEntries(TYPES.map((type) => [type, kept.weights.value[type]])) },
+});
+
 // The settings a slot's grades are computed with, each with its source, and the
-// updatedAt of the slot's own row. Named by any ClassSubject of the slot.
+// updatedAt of the slot's own row. Named by any ClassSubject of the slot. Finalised
+// (ticket 04), the ones it was finalised with.
 async function slotSettingsOf(classSubject) {
-    const [slotRow, schoolRow] = await Promise.all([slotRowOf(classSubject), schoolRowOf()]);
-    return settingsView(settingsFrom(slotRow, schoolRow), slotRow);
+    const [slotRow, schoolRow, finalisation] = await Promise.all([
+        slotRowOf(classSubject),
+        schoolRowOf(),
+        liveFinalisationOf(classSubject),
+    ]);
+    const settings = finalisation ? keptSettingsOf(finalisation.settings) : settingsFrom(slotRow, schoolRow);
+    return settingsView(settings, slotRow);
 }
 
 async function readSlotSettings(auth, id) {
@@ -313,6 +330,7 @@ async function clearSlotSettings(auth, id, { updatedAt }) {
 }
 
 export {
+    classSubjectSelect,
     describe,
     loadForStaff,
     loadManaged,

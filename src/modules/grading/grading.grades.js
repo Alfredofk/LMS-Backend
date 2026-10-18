@@ -6,6 +6,7 @@ import { loadForStaff, slotSettingsOf } from './grading.service.js';
 import { slotReportingOf } from './grading.reporting.js';
 import { ruleResultOf, finalGradeOf } from './grading.compute.js';
 import { descriptionsOf } from './grading.texts.js';
+import { isCounted, blockersOf, finalisedView } from './grading.readiness.js';
 
 // A slot's running grades (grading-and-report-card ticket 02), for its staff: the
 // Answering Teacher, the Homeroom Teacher, the Principal and the Vice Principals
@@ -23,29 +24,30 @@ import { descriptionsOf } from './grading.texts.js';
 //   started yet, in progress, or waiting for marking or release counts nothing yet and
 //   is flagged waiting: finalising (ticket 04) refuses while one waits, so a Report Card
 //   never meets one.
-// - The weights and the KKTP are this slot's, for every Student it reports. One whose
-//   grade another Class's slot reports - they moved on - is listed with that Class and
-//   no grade.
+// - The weights and the KKTP are this slot's, for every Student it reports - the ones
+//   it was finalised with, once it is (ticket 04). One whose grade another Class's slot
+//   reports - they moved on - is listed with that Class and no grade.
 // - The standings are standingsOf's, the read behind the recap and the results, so a
 //   Student who did not submit here did not submit there.
 // - Never a Student's to read (spec invariant 6): the route hides it from them.
 // - Each Student carries describedHere - whether this slot writes their Description -
 //   and, where it reports them, the Description stored (ticket 03, grading.texts.js).
+// - The view says whether the slot is finalised, by whom and when, and what still
+//   blocks finalising it (ticket 04, grading.readiness.js), so its Teacher sees the list
+//   before pressing.
 
-// What the standings and a Student's own terms read of an Assessment.
+// What the standings, a Student's own terms and the blockers read of an Assessment.
 const gradedAssessmentSelect = {
     id: true,
     type: true,
     mode: true,
+    title: true,
     opensAt: true,
     closesAt: true,
     maxAttempts: true,
     acceptLate: true,
-    classSubject: { select: { classId: true } },
+    classSubject: { select: { classId: true, class: { select: { name: true } } } },
 };
-
-// The statuses that count: a Score, or 0 for "did not submit".
-const COUNTED = new Set(['RELEASED', 'DID_NOT_SUBMIT']);
 
 const pairOf = (assessmentId, studentProfileId) => `${assessmentId}:${studentProfileId}`;
 
@@ -64,22 +66,20 @@ const countingOf = (standing) =>
         .map((attempt) => ({ remedial: attempt.remedial, value: attempt.score.value }));
 
 // ---------------------------------------------------------------------------
-// Reading
+// The grade book
 // ---------------------------------------------------------------------------
 
-// The slot's roster - and anyone with a Submission in its Assessments, as the recap
-// lists them - each with the Class whose slot reports them and, where this one does,
-// their grade: each type's average and the weight it carries, the final grade, and
-// how many Assessments did not submit, wait, were moved by the Remedial Rule, or come
-// from an earlier Class.
-async function slotGrades(auth, id) {
-    const { classSubject } = await loadForStaff(auth, id);
+// What a slot's grades are computed from, read once: its roster and who it reports
+// (grading.reporting.js), its settings, the Assessments that may count - this Class's,
+// and those of every Class a Student it reports sat in - their standings and
+// exceptions, and the slot's Descriptions. The grade view reads it, and so do
+// finalising and the readiness board (ticket 04), so the three never disagree.
+async function gradeBookOf(auth, classSubject, now = new Date()) {
     const { classId, subjectId, semesterId } = classSubject;
     const [roster, settings] = await Promise.all([rosterOf(auth, classSubject), slotSettingsOf(classSubject)]);
     const reporting = await slotReportingOf(auth, classSubject, roster);
-    const { span, spans, spansOf, classOf, reportingOf, isReportedHere } = reporting;
+    const { span, spans, spansOf, isReportedHere } = reporting;
 
-    // This Class's Assessments, and those of every Class a Student it reports sat in.
     const classIds = [
         ...new Set([classId, ...spans.filter((row) => isReportedHere(row.studentProfileId)).map((row) => row.classId)]),
     ];
@@ -91,9 +91,10 @@ async function slotGrades(auth, id) {
             classSubject: { classId: { in: classIds }, subjectId, semesterId, status: 'ACTIVE' },
         },
         select: gradedAssessmentSelect,
+        orderBy: [{ opensAt: 'asc' }, { createdAt: 'asc' }],
     });
     const [standings, exceptions, descriptions] = await Promise.all([
-        rows.length ? standingsOf(rows, roster, new Date()) : new Map(),
+        rows.length ? standingsOf(rows, roster, now) : new Map(),
         exceptionsOf({ assessmentId: { in: rows.map((row) => row.id) } }),
         descriptionsOf(classSubject, roster, reporting),
     ]);
@@ -102,6 +103,71 @@ async function slotGrades(auth, id) {
     for (const [assessmentId, ofRow] of standings) {
         for (const standing of ofRow) standingOfPair.set(pairOf(assessmentId, standing.studentProfileId), standing);
     }
+    const exceptionOf = (row, studentProfileId) => exceptionOfPair.get(pairOf(row.id, studentProfileId)) ?? null;
+
+    // The Assessments one Student is answerable for, each with their standing on it: the
+    // ones that count for them, or wait.
+    const answerableOf = (studentProfileId) =>
+        rows.flatMap((row) => {
+            const standing = standingOfPair.get(pairOf(row.id, studentProfileId));
+            if (!standing) return [];
+            const terms = ownTermsOf(row, exceptionOf(row, studentProfileId));
+            const placed = spansOf(studentProfileId).filter((found) => found.classId === row.classSubject.classId);
+            const hardEnd = hardEndIn(row, terms, span.end);
+            const listed = isListedThrough(placed, terms.opensAt, hardEnd, standing.attempts.length > 0);
+            return listed ? [{ row, standing }] : [];
+        });
+
+    return {
+        classSubject,
+        now,
+        roster,
+        settings,
+        reporting,
+        rows,
+        standings,
+        descriptions,
+        exceptionOf,
+        answerableOf,
+    };
+}
+
+// One Student's grade, where this slot reports them: each type's average and the
+// weight it carries, the final grade, and how many Assessments did not submit, wait,
+// were moved by the Remedial Rule, or come from an earlier Class.
+function gradeOf(book, studentProfileId) {
+    const { classSubject, settings } = book;
+    const entries = [];
+    const counts = { didNotSubmit: 0, waiting: 0, remedialRuleMoved: 0, pooled: 0 };
+    for (const { row, standing } of book.answerableOf(studentProfileId)) {
+        if (!isCounted(standing)) {
+            counts.waiting += 1;
+            continue;
+        }
+        const result =
+            standing.status === 'RELEASED'
+                ? ruleResultOf(countingOf(standing), settings.remedialRule.value, settings.kktp.value)
+                : { value: 0, moved: false };
+        if (standing.status === 'DID_NOT_SUBMIT') counts.didNotSubmit += 1;
+        if (result.moved) counts.remedialRuleMoved += 1;
+        if (row.classSubject.classId !== classSubject.classId) counts.pooled += 1;
+        entries.push({ type: row.type, value: result.value });
+    }
+    return { ...finalGradeOf(entries, settings.weights.value), ...counts };
+}
+
+// ---------------------------------------------------------------------------
+// Reading
+// ---------------------------------------------------------------------------
+
+// The slot's roster - and anyone with a Submission in its Assessments, as the recap
+// lists them - each with the Class whose slot reports them and, where this one does,
+// their grade; whether the slot is finalised, and what blocks finalising it.
+async function slotGrades(auth, id) {
+    const { classSubject } = await loadForStaff(auth, id);
+    const book = await gradeBookOf(auth, classSubject);
+    const { roster, reporting, rows, standings, descriptions } = book;
+    const { classOf, reportingOf, isReportedHere } = reporting;
 
     const students = new Map(
         roster.studentProfileIds.map((studentProfileId) => [
@@ -113,48 +179,24 @@ async function slotGrades(auth, id) {
             },
         ])
     );
-    for (const row of rows.filter((found) => found.classSubject.classId === classId)) {
+    for (const row of rows.filter((found) => found.classSubject.classId === classSubject.classId)) {
         for (const { studentProfileId, fullName, placedNow } of standings.get(row.id)) {
             if (students.has(studentProfileId)) continue;
             students.set(studentProfileId, { studentProfileId, fullName, placedNow });
         }
     }
 
-    const gradeOf = (studentProfileId) => {
-        const entries = [];
-        const counts = { didNotSubmit: 0, waiting: 0, remedialRuleMoved: 0, pooled: 0 };
-        for (const row of rows) {
-            const standing = standingOfPair.get(pairOf(row.id, studentProfileId));
-            if (!standing) continue;
-            const terms = ownTermsOf(row, exceptionOfPair.get(pairOf(row.id, studentProfileId)) ?? null);
-            const placed = spansOf(studentProfileId).filter((found) => found.classId === row.classSubject.classId);
-            const hardEnd = hardEndIn(row, terms, span.end);
-            if (!isListedThrough(placed, terms.opensAt, hardEnd, standing.attempts.length > 0)) continue;
-            if (!COUNTED.has(standing.status)) {
-                counts.waiting += 1;
-                continue;
-            }
-
-            const result =
-                standing.status === 'RELEASED'
-                    ? ruleResultOf(countingOf(standing), settings.remedialRule.value, settings.kktp.value)
-                    : { value: 0, moved: false };
-            if (standing.status === 'DID_NOT_SUBMIT') counts.didNotSubmit += 1;
-            if (result.moved) counts.remedialRuleMoved += 1;
-            if (row.classSubject.classId !== classId) counts.pooled += 1;
-            entries.push({ type: row.type, value: result.value });
-        }
-        return { ...finalGradeOf(entries, settings.weights.value), ...counts };
-    };
-
+    const [finalised, blockers] = await Promise.all([finalisedView(classSubject), blockersOf(book)]);
     return {
         classSubject: classSubjectView(classSubject),
-        settings,
+        settings: book.settings,
+        finalised,
+        blockers,
         students: [...students.values()].sort(byName).map((student) => ({
             ...student,
             reportedHere: isReportedHere(student.studentProfileId),
             reportedBy: classOf.get(reportingOf.get(student.studentProfileId)) ?? null,
-            grade: isReportedHere(student.studentProfileId) ? gradeOf(student.studentProfileId) : null,
+            grade: isReportedHere(student.studentProfileId) ? gradeOf(book, student.studentProfileId) : null,
             describedHere: descriptions.isDescribedHere(student.studentProfileId),
             description: isReportedHere(student.studentProfileId)
                 ? descriptions.descriptionOf(student.studentProfileId)
@@ -163,4 +205,4 @@ async function slotGrades(auth, id) {
     };
 }
 
-export { slotGrades };
+export { gradeBookOf, slotGrades };

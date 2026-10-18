@@ -143,6 +143,10 @@ enum ApprovalAction {
     /// The Principal or a Vice Principal changing the school's default Grade Weights,
     /// its default KKTP, or its Remedial Rule (grading-and-report-card 01).
     UPDATE_GRADE_SETTINGS
+    /// The Principal moving a Semester from OPEN to FINALIZING, and back while no slot
+    /// of it is finalised (grading-and-report-card 04).
+    START_FINALIZING
+    STOP_FINALIZING
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +462,7 @@ model School {
     slotGradeSettings SlotGradeSetting[]
     slotDescriptions  SlotDescription[]
     homeroomNotes     HomeroomNote[]
+    slotFinalisations SlotFinalisation[]
 
     @@index([deactivatedAt])
 }
@@ -696,6 +701,7 @@ model Semester {
     slotGradeSettings SlotGradeSetting[]
     slotDescriptions SlotDescription[]
     homeroomNotes    HomeroomNote[]
+    slotFinalisations SlotFinalisation[]
 
     @@unique([academicYearId, ordinal])
     @@index([schoolId, status])
@@ -718,6 +724,7 @@ model Subject {
     questions     Question[]
     slotGradeSettings SlotGradeSetting[]
     slotDescriptions SlotDescription[]
+    slotFinalisations SlotFinalisation[]
 
     @@unique([schoolId, code])
     @@index([schoolId])
@@ -767,6 +774,7 @@ model Class {
     movesIn         ClassMove[]       @relation("ClassMoveTo")
     slotGradeSettings SlotGradeSetting[]
     slotDescriptions SlotDescription[]
+    slotFinalisations SlotFinalisation[]
 
     @@unique([schoolId, academicYearId, name])
     @@index([schoolId, gradeLevel])
@@ -1592,12 +1600,13 @@ model SlotGradeSetting {
 }
 
 /// The Answering Teacher's Description of one Student in one slot
-/// (grading-and-report-card 03, owner 2026-10-13), shown on the Report Card and
-/// required before the slot is finalised. Plain text, at most 1,000 characters (owner,
-/// 2026-10-17). A slot is Class x Subject x Semester, so an ended assignment's successor
-/// reads and changes its predecessor's. Written only for a Student the slot reports for
-/// and still in the School (grading.reporting.js). Changed in place and never emptied;
-/// not audited: the row says who wrote it last.
+/// (grading-and-report-card 03, owner 2026-10-13), shown on the Report Card. Optional
+/// (owner, 2026-10-18): written when the Teacher wishes, so finalising never waits for
+/// one. Plain text, at most 1,000 characters (owner, 2026-10-17). A slot is Class x
+/// Subject x Semester, so an ended assignment's successor reads and changes its
+/// predecessor's. Written only for a Student the slot reports for and still in the
+/// School (grading.reporting.js). Changed in place; clearing it nulls the text and the
+/// row stays. Not audited: the row says who wrote it last.
 model SlotDescription {
     id               String   @id @default(cuid())
     schoolId         String
@@ -1605,7 +1614,7 @@ model SlotDescription {
     subjectId        String
     semesterId       String
     studentProfileId String
-    text             String
+    text             String?
     /// Who wrote it last.
     writtenByUserId  String
     createdAt        DateTime @default(now())
@@ -1622,11 +1631,13 @@ model SlotDescription {
 }
 
 /// The Homeroom Teacher's Note on one Student for one Semester
-/// (grading-and-report-card 03, owner 2026-10-13): optional, shown on the Report Card.
-/// Plain text, at most 1,000 characters. Written by the Homeroom Teacher of the Class
-/// the Student is placed in now, so a mover's is their new Class's (owner, 2026-10-17);
-/// the row names no Class, and follows them. Clearing it nulls the text and the row
-/// stays. Not audited: the row says who wrote it last.
+/// (grading-and-report-card 03, owner 2026-10-13), shown on the Report Card. Required
+/// since 2026-10-18 (owner: the Homeroom Teacher gives each Student advice): closing the
+/// Semester (ticket 05) waits for every Student's, and the readiness board (ticket 04)
+/// names the ones missing. Plain text, at most 1,000 characters. Written by the Homeroom
+/// Teacher of the Class the Student is placed in now, so a mover's is their new Class's
+/// (owner, 2026-10-17); the row names no Class, and follows them. Clearing it nulls the
+/// text and the row stays, missing again. Not audited: the row says who wrote it last.
 model HomeroomNote {
     id               String   @id @default(cuid())
     schoolId         String
@@ -1644,6 +1655,40 @@ model HomeroomNote {
 
     @@unique([semesterId, studentProfileId])
     @@index([schoolId])
+}
+
+/// A slot finalised by its Answering Teacher (grading-and-report-card 04, owner
+/// 2026-10-13), while its Semester is FINALIZING. A slot is Class x Subject x Semester,
+/// so an ended assignment's successor finalises and undoes it too. While a row is live
+/// (undoneAt null) the slot is locked: its weights and KKTP, its Descriptions, and every
+/// staff write on its Assessments. Undoing it keeps the row, so the history of who
+/// finalised and undid stays; one live row per slot - a partial unique index in
+/// migration SQL.
+model SlotFinalisation {
+    id                String    @id @default(cuid())
+    schoolId          String
+    classId           String
+    subjectId         String
+    semesterId        String
+    /// The settings the slot's grades were computed with when it was finalised - the
+    /// weights, the KKTP and the school's Remedial Rule, each with its source - read in
+    /// place of the live ones while the row is live (owner, 2026-10-18), so a change to
+    /// the school's defaults no longer moves a finalised grade.
+    settings          Json
+    finalisedByUserId String
+    finalisedAt       DateTime  @default(now())
+    undoneByUserId    String?
+    undoneAt          DateTime?
+    createdAt         DateTime  @default(now())
+    updatedAt         DateTime  @updatedAt
+
+    school   School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    class    Class    @relation(fields: [classId], references: [id], onDelete: Cascade)
+    subject  Subject  @relation(fields: [subjectId], references: [id])
+    semester Semester @relation(fields: [semesterId], references: [id], onDelete: Cascade)
+
+    @@index([schoolId])
+    @@index([semesterId])
 }
 
 /// A student moved from one class to another inside the school (ticket 16). The

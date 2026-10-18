@@ -1001,6 +1001,7 @@ export {
     exceptionsOf,
     exceptionOf,
     ownTermsOf,
+    usedAttemptsOf,
     isSignalled,
     signallableSubmissionsOf,
     placementSpansOf,

@@ -2,6 +2,7 @@ import { prisma } from '../../shared/prisma.js';
 import { currentPlacement } from '../../shared/guards.js';
 import { badRequest, conflict, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
+import { assertNotFinalised } from '../grading/grading.lock.js';
 import { assertTeacherStanding, assertNotCancelled, assertWindow, describe } from './assessment.service.js';
 import { exceptionSelect, exceptionOf, exceptionView, closeExpiredSubmissions } from './assessment.submission.js';
 import { loadForStaff } from './assessment.marking.js';
@@ -40,6 +41,8 @@ const log = createLogger('Assessment');
 //   (start()), so a later change leaves the attempts made as they were.
 // - The school's remedial rule - a cap up to the KKTP, the highest, or an average - is
 //   the grading slice's, read from Submission.remedial.
+// - None is set, changed or removed once the slot is finalised (grading-and-report-card
+//   04): 409 until its Teacher undoes the finalising (grading.lock.js).
 
 const CHANGED_MEANWHILE = 'This exception was changed meanwhile. Reload it and try again';
 const IN_USE = 'The student has started an attempt under this exception; it stays, and may be changed instead';
@@ -53,7 +56,8 @@ const staffExceptionSelect = {
 // Access
 // ---------------------------------------------------------------------------
 
-// Its Answering Teacher, on a published ONLINE Assessment not cancelled.
+// Its Answering Teacher, on a published ONLINE Assessment not cancelled, of a slot not
+// finalised.
 async function loadForExceptions(auth, id) {
     const { row, standing } = await loadForStaff(auth, id);
     assertTeacherStanding(standing, 'Assessment not found');
@@ -62,6 +66,7 @@ async function loadForExceptions(auth, id) {
         throw badRequest(`${describe(row)} is offline: enter the make-up mark when there is one`);
     }
     if (!row.publishedAt) throw conflict(`${describe(row)} is a draft; set exceptions once it is published`);
+    await assertNotFinalised(row.classSubject);
     return row;
 }
 

@@ -2,6 +2,7 @@ import { ok } from '../../shared/errors.js';
 import * as service from './grading.service.js';
 import * as grades from './grading.grades.js';
 import * as texts from './grading.texts.js';
+import * as finalising from './grading.finalising.js';
 
 // Thin, like the other controllers.
 
@@ -56,6 +57,32 @@ async function writeNotes(req, res) {
     return ok(res, { notes, message: 'Notes saved.' });
 }
 
+// ---- finalising ----
+
+async function startFinalising(req, res) {
+    const semester = await finalising.startFinalising(req.auth, req.validated.params.id);
+    return ok(res, { semester, message: 'Finalising started.' });
+}
+
+async function stopFinalising(req, res) {
+    const semester = await finalising.stopFinalising(req.auth, req.validated.params.id);
+    return ok(res, { semester, message: 'The semester is open again.' });
+}
+
+async function getReadiness(req, res) {
+    return ok(res, await finalising.readinessBoard(req.auth, req.validated.params.id));
+}
+
+async function finalise(req, res) {
+    const grades = await finalising.finalise(req.auth, req.validated.params.id);
+    return ok(res, { grades, message: 'Class subject finalised.' });
+}
+
+async function unfinalise(req, res) {
+    const grades = await finalising.unfinalise(req.auth, req.validated.params.id);
+    return ok(res, { grades, message: 'Finalising undone.' });
+}
+
 export {
     getSchoolSettings,
     setSchoolSettings,
@@ -66,4 +93,9 @@ export {
     writeDescriptions,
     getNotes,
     writeNotes,
+    startFinalising,
+    stopFinalising,
+    getReadiness,
+    finalise,
+    unfinalise,
 };
