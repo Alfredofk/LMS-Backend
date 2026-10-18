@@ -338,7 +338,8 @@ const exceptionParams = z.object({ id, studentProfileId: id });
 // sends back the updatedAt it read; a first one sends none. Whether the window fits
 // the Semester, whether the Class's window has closed for a remedial, and whether a
 // change is stale, are the service's. A remedial is its extra attempts alone
-// (2026-10-11), so it gives at least one.
+// (2026-10-11), so it gives at least one, and comes only once the Class's window has
+// closed, so it brings its own (owner, 2026-10-19): without one, none could start.
 const exceptionBody = z
     .strictObject({
         makeUp: z
@@ -359,6 +360,10 @@ const exceptionBody = z
     .refine((value) => !value.remedial || value.extraAttempts > 0, {
         path: ['extraAttempts'],
         message: 'A remedial gives its extra attempts alone: 1 to 20',
+    })
+    .refine((value) => !value.remedial || value.makeUp !== null, {
+        path: ['makeUp'],
+        message: "A remedial needs its own window: the Class's has closed",
     });
 
 // ---- reads (ticket 07) ----

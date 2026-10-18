@@ -39,7 +39,8 @@ const log = createLogger('Assessment');
 //   the sick, or extra attempts after a lost connection, is not one. A remedial gives
 //   its extra attempts alone, at least one, whatever the Student left unused, and only
 //   once the Class's window has closed with nothing of theirs in progress; one who
-//   skipped may be given one too. Each attempt started under it copies the flag
+//   skipped may be given one too. So it always brings its own window (owner,
+//   2026-10-19; 400 in the schema). Each attempt started under it copies the flag
 //   (start()), so a later change leaves the attempts made as they were.
 // - The school's remedial rule - a cap up to the KKTP, the highest, or an average - is
 //   the grading slice's, read from Submission.remedial.
