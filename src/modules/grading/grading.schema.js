@@ -1,8 +1,9 @@
 import { z } from 'zod';
 
-// Grade settings (grading-and-report-card ticket 01). Only the shape is checked here:
-// whole numbers, the four weights adding up to 100. Who may set the school's or a
-// slot's, and whether the slot still takes a change, is the service's.
+// Grade settings (grading-and-report-card ticket 01), and the Descriptions and Notes
+// (ticket 03). Only the shape is checked here: whole numbers, the four weights adding
+// up to 100, the texts' length. Who may write, for which Students, and whether the
+// slot or Semester still takes a change, is the service's.
 
 const idParams = z.object({ id: z.string().min(1) });
 
@@ -62,4 +63,39 @@ const slotSettingsBody = z
 // Clearing a slot's own settings, all of them.
 const slotClearBody = z.strictObject(seen);
 
-export { idParams, schoolSettingsBody, slotSettingsBody, slotClearBody };
+// ---- descriptions and notes (ticket 03) ----
+
+const noteParams = z.object({ id: z.string().min(1), semesterId: z.string().min(1) });
+
+// Plain text, as an ESSAY's answer is (owner, 2026-10-17): no markup is read in it.
+const words = z.string().trim().max(1_000, 'At most 1,000 characters');
+
+// The updatedAt each row read, or null where it read none - named on every row, so a
+// form that forgets it is refused rather than taken for a first write.
+const readAt = z.iso
+    .datetime({ offset: true, error: 'Send back the updatedAt you last read, or null' })
+    .transform((value) => new Date(value))
+    .nullable();
+
+// Many Students in one request (owner, 2026-10-17), each named once.
+const textRows = (text, label) =>
+    z
+        .array(z.strictObject({ studentProfileId: z.string().min(1), text, updatedAt: readAt }))
+        .min(1, `Send at least one ${label}`)
+        .max(200, `At most 200 ${label}s at once`)
+        .refine(
+            (rows) => new Set(rows.map((row) => row.studentProfileId)).size === rows.length,
+            'A student is named twice'
+        );
+
+// A Description is required, so it is never emptied.
+const descriptionsBody = z.strictObject({
+    descriptions: textRows(words.min(1, 'Write the description; it cannot be empty'), 'description'),
+});
+
+// A Note is optional: null or an empty text clears it.
+const notesBody = z.strictObject({
+    notes: textRows(words.nullable().transform((value) => value || null), 'note'),
+});
+
+export { idParams, schoolSettingsBody, slotSettingsBody, slotClearBody, noteParams, descriptionsBody, notesBody };

@@ -1,11 +1,11 @@
 import { prisma } from '../../shared/prisma.js';
-import { semesterSpan } from '../sessions/sessions.service.js';
 import { rosterOf } from '../tracking/tracking.service.js';
 import { standingsOf, byName } from '../assessment/assessment.marking.js';
 import { exceptionsOf, ownTermsOf, hardEndIn, isListedThrough } from '../assessment/assessment.submission.js';
 import { loadForStaff, slotSettingsOf } from './grading.service.js';
-import { semesterPlacementsOf, reportingClassOf } from './grading.reporting.js';
+import { slotReportingOf } from './grading.reporting.js';
 import { ruleResultOf, finalGradeOf } from './grading.compute.js';
+import { descriptionsOf } from './grading.texts.js';
 
 // A slot's running grades (grading-and-report-card ticket 02), for its staff: the
 // Answering Teacher, the Homeroom Teacher, the Principal and the Vice Principals
@@ -29,6 +29,8 @@ import { ruleResultOf, finalGradeOf } from './grading.compute.js';
 // - The standings are standingsOf's, the read behind the recap and the results, so a
 //   Student who did not submit here did not submit there.
 // - Never a Student's to read (spec invariant 6): the route hides it from them.
+// - Each Student carries describedHere - whether this slot writes their Description -
+//   and, where it reports them, the Description stored (ticket 03, grading.texts.js).
 
 // What the standings and a Student's own terms read of an Assessment.
 const gradedAssessmentSelect = {
@@ -73,22 +75,9 @@ const countingOf = (standing) =>
 async function slotGrades(auth, id) {
     const { classSubject } = await loadForStaff(auth, id);
     const { classId, subjectId, semesterId } = classSubject;
-    const [roster, settings, span, slots] = await Promise.all([
-        rosterOf(auth, classSubject),
-        slotSettingsOf(classSubject),
-        semesterSpan(auth.schoolId, classSubject.semester),
-        prisma.classSubject.findMany({
-            where: { subjectId, semesterId, status: 'ACTIVE' },
-            select: { classId: true, class: { select: { id: true, name: true } } },
-        }),
-    ]);
-    const classOf = new Map(slots.map((slot) => [slot.classId, slot.class]));
-    const spans = await semesterPlacementsOf(roster.studentProfileIds, [...classOf.keys()], span);
-    const spansOf = (studentProfileId) => spans.filter((row) => row.studentProfileId === studentProfileId);
-    const reportingOf = new Map(
-        roster.studentProfileIds.map((profileId) => [profileId, reportingClassOf(spansOf(profileId))])
-    );
-    const isReportedHere = (studentProfileId) => reportingOf.get(studentProfileId) === classId;
+    const [roster, settings] = await Promise.all([rosterOf(auth, classSubject), slotSettingsOf(classSubject)]);
+    const reporting = await slotReportingOf(auth, classSubject, roster);
+    const { span, spans, spansOf, classOf, reportingOf, isReportedHere } = reporting;
 
     // This Class's Assessments, and those of every Class a Student it reports sat in.
     const classIds = [
@@ -103,9 +92,10 @@ async function slotGrades(auth, id) {
         },
         select: gradedAssessmentSelect,
     });
-    const [standings, exceptions] = await Promise.all([
+    const [standings, exceptions, descriptions] = await Promise.all([
         rows.length ? standingsOf(rows, roster, new Date()) : new Map(),
         exceptionsOf({ assessmentId: { in: rows.map((row) => row.id) } }),
+        descriptionsOf(classSubject, roster, reporting),
     ]);
     const exceptionOfPair = new Map(exceptions.map((row) => [pairOf(row.assessmentId, row.studentProfileId), row]));
     const standingOfPair = new Map();
@@ -165,6 +155,10 @@ async function slotGrades(auth, id) {
             reportedHere: isReportedHere(student.studentProfileId),
             reportedBy: classOf.get(reportingOf.get(student.studentProfileId)) ?? null,
             grade: isReportedHere(student.studentProfileId) ? gradeOf(student.studentProfileId) : null,
+            describedHere: descriptions.isDescribedHere(student.studentProfileId),
+            description: isReportedHere(student.studentProfileId)
+                ? descriptions.descriptionOf(student.studentProfileId)
+                : null,
         })),
     };
 }

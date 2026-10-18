@@ -37,6 +37,36 @@ function reportingClassOf(spans) {
     return last?.classId ?? null;
 }
 
+// Which Class's slot reports each Student of a slot's roster (rosterOf, passed in: this
+// file imports nothing of tracking, which reads assessment) for its Subject: the
+// Semester's span, the Classes with a slot of the Subject, and the placements in them
+// during it. The one read behind the grade view (ticket 02) and the Descriptions
+// (ticket 03), so the Students a slot grades are the ones it describes.
+async function slotReportingOf(auth, classSubject, roster) {
+    const { subjectId, semesterId } = classSubject;
+    const [span, slots] = await Promise.all([
+        semesterSpan(auth.schoolId, classSubject.semester),
+        prisma.classSubject.findMany({
+            where: { subjectId, semesterId, status: 'ACTIVE' },
+            select: { classId: true, class: { select: { id: true, name: true } } },
+        }),
+    ]);
+    const classOf = new Map(slots.map((slot) => [slot.classId, slot.class]));
+    const spans = await semesterPlacementsOf(roster.studentProfileIds, [...classOf.keys()], span);
+    const spansOf = (studentProfileId) => spans.filter((row) => row.studentProfileId === studentProfileId);
+    const reportingOf = new Map(
+        roster.studentProfileIds.map((profileId) => [profileId, reportingClassOf(spansOf(profileId))])
+    );
+    return {
+        span,
+        spans,
+        spansOf,
+        classOf,
+        reportingOf,
+        isReportedHere: (studentProfileId) => reportingOf.get(studentProfileId) === classSubject.classId,
+    };
+}
+
 // The Remedial Rule and the KKTP a Student's Scores of these Subjects are counted with,
 // by subjectId: their reporting slot's. A Subject with no reporting slot is left out.
 // The semester is read with its dates.
@@ -66,4 +96,4 @@ async function remedialTermsOf(auth, studentProfileId, semester, subjectIds) {
     return new Map(found.filter(Boolean));
 }
 
-export { semesterPlacementsOf, reportingClassOf, remedialTermsOf };
+export { semesterPlacementsOf, reportingClassOf, slotReportingOf, remedialTermsOf };

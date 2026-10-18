@@ -456,6 +456,8 @@ model School {
     assessmentExceptions AssessmentException[]
     gradeSetting      SchoolGradeSetting?
     slotGradeSettings SlotGradeSetting[]
+    slotDescriptions  SlotDescription[]
+    homeroomNotes     HomeroomNote[]
 
     @@index([deactivatedAt])
 }
@@ -563,6 +565,8 @@ model StudentProfile {
     contentProgress  ContentProgress[]
     submissions      Submission[]
     assessmentExceptions AssessmentException[]
+    slotDescriptions SlotDescription[]
+    homeroomNotes    HomeroomNote[]
 
     @@index([schoolId])
 }
@@ -690,6 +694,8 @@ model Semester {
     academicYear  AcademicYear   @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
     classSubjects ClassSubject[]
     slotGradeSettings SlotGradeSetting[]
+    slotDescriptions SlotDescription[]
+    homeroomNotes    HomeroomNote[]
 
     @@unique([academicYearId, ordinal])
     @@index([schoolId, status])
@@ -711,6 +717,7 @@ model Subject {
     schoolChoices SchoolSubjectChoice[]
     questions     Question[]
     slotGradeSettings SlotGradeSetting[]
+    slotDescriptions SlotDescription[]
 
     @@unique([schoolId, code])
     @@index([schoolId])
@@ -759,6 +766,7 @@ model Class {
     movesOut        ClassMove[]       @relation("ClassMoveFrom")
     movesIn         ClassMove[]       @relation("ClassMoveTo")
     slotGradeSettings SlotGradeSetting[]
+    slotDescriptions SlotDescription[]
 
     @@unique([schoolId, academicYearId, name])
     @@index([schoolId, gradeLevel])
@@ -1580,6 +1588,61 @@ model SlotGradeSetting {
     semester Semester @relation(fields: [semesterId], references: [id], onDelete: Cascade)
 
     @@unique([classId, subjectId, semesterId])
+    @@index([schoolId])
+}
+
+/// The Answering Teacher's Description of one Student in one slot
+/// (grading-and-report-card 03, owner 2026-10-13), shown on the Report Card and
+/// required before the slot is finalised. Plain text, at most 1,000 characters (owner,
+/// 2026-10-17). A slot is Class x Subject x Semester, so an ended assignment's successor
+/// reads and changes its predecessor's. Written only for a Student the slot reports for
+/// and still in the School (grading.reporting.js). Changed in place and never emptied;
+/// not audited: the row says who wrote it last.
+model SlotDescription {
+    id               String   @id @default(cuid())
+    schoolId         String
+    classId          String
+    subjectId        String
+    semesterId       String
+    studentProfileId String
+    text             String
+    /// Who wrote it last.
+    writtenByUserId  String
+    createdAt        DateTime @default(now())
+    updatedAt        DateTime @updatedAt
+
+    school         School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    class          Class          @relation(fields: [classId], references: [id], onDelete: Cascade)
+    subject        Subject        @relation(fields: [subjectId], references: [id])
+    semester       Semester       @relation(fields: [semesterId], references: [id], onDelete: Cascade)
+    studentProfile StudentProfile @relation(fields: [studentProfileId], references: [id], onDelete: Cascade)
+
+    @@unique([classId, subjectId, semesterId, studentProfileId])
+    @@index([schoolId])
+}
+
+/// The Homeroom Teacher's Note on one Student for one Semester
+/// (grading-and-report-card 03, owner 2026-10-13): optional, shown on the Report Card.
+/// Plain text, at most 1,000 characters. Written by the Homeroom Teacher of the Class
+/// the Student is placed in now, so a mover's is their new Class's (owner, 2026-10-17);
+/// the row names no Class, and follows them. Clearing it nulls the text and the row
+/// stays. Not audited: the row says who wrote it last.
+model HomeroomNote {
+    id               String   @id @default(cuid())
+    schoolId         String
+    semesterId       String
+    studentProfileId String
+    text             String?
+    /// Who wrote it last.
+    writtenByUserId  String
+    createdAt        DateTime @default(now())
+    updatedAt        DateTime @updatedAt
+
+    school         School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    semester       Semester       @relation(fields: [semesterId], references: [id], onDelete: Cascade)
+    studentProfile StudentProfile @relation(fields: [studentProfileId], references: [id], onDelete: Cascade)
+
+    @@unique([semesterId, studentProfileId])
     @@index([schoolId])
 }
 

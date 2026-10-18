@@ -157,16 +157,19 @@ async function loadForStaff(auth, id) {
 
 // Its Answering Teacher changes them - the successor once it ended; a reader, a Vice
 // Principal included, is told no (403). A CLOSED Semester or a closed year takes no
-// change (409). Finalising the slot will lock them too (ticket 04).
-async function loadManaged(auth, id) {
+// change (409). Finalising the slot will lock them too (ticket 04). The Descriptions
+// (ticket 03, grading.texts.js) are the slot's under the same rule, in their own words.
+async function loadManaged(
+    auth,
+    id,
+    { refusal = 'Only the teacher of this class subject sets its weights and KKTP', kept = 'its grade settings' } = {}
+) {
     const { classSubject, standing } = await loadForStaff(auth, id);
-    if (standing !== 'teacher') {
-        throw forbidden('Only the teacher of this class subject sets its weights and KKTP');
-    }
+    if (standing !== 'teacher') throw forbidden(refusal);
     const { semester } = classSubject;
     const { academicYear } = classSubject.class;
     if (semester.status === 'CLOSED') {
-        throw conflict(`Semester ${semester.ordinal} is closed; its grade settings stay as they are`);
+        throw conflict(`Semester ${semester.ordinal} is closed; ${kept} stay as they are`);
     }
     if (academicYear.status !== 'ACTIVE') throw conflict(`Academic year ${academicYear.label} is closed`);
     return classSubject;
@@ -310,7 +313,10 @@ async function clearSlotSettings(auth, id, { updatedAt }) {
 }
 
 export {
+    describe,
     loadForStaff,
+    loadManaged,
+    slotKeyOf,
     readSchoolSettings,
     setSchoolSettings,
     slotSettingsOf,
