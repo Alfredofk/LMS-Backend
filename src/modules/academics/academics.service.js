@@ -429,18 +429,19 @@ async function updateSemester(auth, id, body) {
 
 // Only a semester nobody has asked to teach in yet (owner, 2026-09-26). Any
 // ClassSubject counts, a rejected or cancelled one too: those rows are the
-// audit's subjects, and the cascade would take them.
+// audit's subjects, and the cascade would take them. So does an Exam Week, a
+// withdrawn one too, for the same reason (teaching-and-learning 13).
 async function deleteSemester(auth, id) {
     await assertPrincipalOrVice(auth);
     const { semester, year } = await loadSemester(id);
     assertYearOpen(year);
 
     const deleted = await prisma.semester.deleteMany({
-        where: { id, classSubjects: { none: {} } },
+        where: { id, classSubjects: { none: {} }, examWeeks: { none: {} } },
     });
     if (deleted.count === 0) {
         throw conflict(
-            `Semester ${semester.ordinal} already has teaching assignments or requests. ` +
+            `Semester ${semester.ordinal} already has teaching assignments, requests or Exam Weeks. ` +
                 'Only a semester without any can be deleted'
         );
     }

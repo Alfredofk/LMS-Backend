@@ -63,6 +63,36 @@ const jointLeaveBody = z.strictObject({ observesJointLeave: z.boolean() });
 // default again). Required, so an empty body is not read as "back to default".
 const jointLeaveDayBody = z.strictObject({ observed: z.boolean().nullable() });
 
+// ---- Exam Weeks (teaching-and-learning ticket 13) ---------------------------
+
+const MAX_EXAM_WEEK_DAYS = 31;
+
+const examWeeksQuery = z.object({ semesterId: z.string().min(1) });
+
+// Whether the days lie inside the Semester, and the grade levels exist at this
+// school's type, is the service's call.
+const examWeekBody = z
+    .strictObject({
+        semesterId: z.string().min(1),
+        type: z.enum(['UTS', 'UAS']),
+        name: z.string().trim().min(3, 'Name the exam week').max(150),
+        startDate: date,
+        endDate: date,
+        gradeLevels: z
+            .array(z.number().int().min(1).max(13))
+            .min(1, 'Name at least one grade level')
+            .max(13)
+            .refine((list) => new Set(list).size === list.length, 'A grade level is named twice'),
+    })
+    .refine((value) => value.endDate >= value.startDate, {
+        path: ['endDate'],
+        message: 'The exam week must end on or after it starts',
+    })
+    .refine(
+        (value) => (new Date(value.endDate) - new Date(value.startDate)) / DAY < MAX_EXAM_WEEK_DAYS,
+        { path: ['endDate'], message: `An exam week is at most ${MAX_EXAM_WEEK_DAYS} days` }
+    );
+
 export {
     date,
     idParams,
@@ -72,6 +102,8 @@ export {
     draftPatch,
     confirmBody,
     schoolHolidayBody,
+    examWeeksQuery,
+    examWeekBody,
     jointLeaveBody,
     jointLeaveDayBody,
 };

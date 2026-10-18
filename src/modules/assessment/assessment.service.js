@@ -3,11 +3,11 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../../shared/prisma.js';
 import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
-import { staffStandingOf, semesterSpan, todayOf } from '../sessions/sessions.service.js';
+import { staffStandingOf, semesterSpan, localDaysSpan, todayOf } from '../sessions/sessions.service.js';
 import { slotSessionWhere } from '../tracking/tracking.service.js';
 import { recordEvent, assessmentContextOf } from '../tracking/tracking.record.js';
 import { cleanText } from '../content/content.service.js';
-import { toDate, toDay } from '../holidays/holidays.calendar.js';
+import { toDate, toDay, examWeeksFor } from '../holidays/holidays.calendar.js';
 import { assertNotFinalised } from '../grading/grading.lock.js';
 import {
     imageIdsOf,
@@ -87,6 +87,11 @@ const log = createLogger('Assessment');
 //   write reaches an Assessment of it - settings, window, questions, publishing,
 //   cancelling, deleting a draft - 409, until its Teacher undoes the finalising: a
 //   closesAt moved later or a cancel would move a finalised grade (grading.lock.js).
+// - A UTS or a UAS is published only with its whole window inside one Exam Week of
+//   its type for its Class's grade level, and a published one's window moves only
+//   within one (teaching-and-learning 13, owner 2026-10-18). A draft is free, so its
+//   teacher prepares it before the week is set; a make-up's or a remedial's window is
+//   free, so the check is not assertWindow's, which the exceptions call too.
 
 const DEFAULT_POINTS = 1;
 
@@ -285,6 +290,36 @@ async function assertWindow(auth, classSubject, opensAt, closesAt) {
                 `${toDay(semester.startDate)} to ${toDay(semester.endDate)}`
         );
     }
+}
+
+// The types an Exam Week holds (teaching-and-learning 13).
+const EXAM_TYPES = new Set(['UTS', 'UAS']);
+
+// A UTS or a UAS lies whole inside one Exam Week of its type for its Class's grade
+// level, from 00:00 of the week's first day to the end of its last, in the school's
+// zone (teaching-and-learning 13, owner 2026-10-18). Called at publish and on a
+// published one's window change; a TUGAS or a KUIS passes. 409 names the weeks there
+// are, or says none is set.
+async function assertInExamWeek(auth, row, opensAt, closesAt) {
+    if (!EXAM_TYPES.has(row.type)) return;
+    const { semesterId, semester, class: { gradeLevel } } = row.classSubject;
+    const weeks = await examWeeksFor(semesterId, gradeLevel, { type: row.type });
+    const spans = await Promise.all(
+        weeks.map((week) => localDaysSpan(auth.schoolId, toDay(week.startDate), toDay(week.endDate)))
+    );
+    if (spans.some(({ start, end }) => opensAt >= start && closesAt <= end)) return;
+
+    if (weeks.length === 0) {
+        throw conflict(
+            `No ${row.type} Exam Week is set for grade ${gradeLevel} in Semester ${semester.ordinal}; ` +
+                `the Principal or a Vice Principal sets one before a ${row.type} is published`
+        );
+    }
+    const days = weeks.map((week) => `${toDay(week.startDate)} to ${toDay(week.endDate)}`).join(', ');
+    throw conflict(
+        `${describe(row)} must lie inside a ${row.type} Exam Week of grade ${gradeLevel}: ${days}`,
+        { examWeekIds: weeks.map((week) => week.id) }
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -535,7 +570,9 @@ async function update(auth, id, { updatedAt, ...patch }) {
         throw badRequest('An offline assessment has no settings');
     }
     if (patch.opensAt || patch.closesAt) {
-        await assertWindow(auth, row.classSubject, patch.opensAt ?? row.opensAt, patch.closesAt ?? row.closesAt);
+        const [opensAt, closesAt] = [patch.opensAt ?? row.opensAt, patch.closesAt ?? row.closesAt];
+        await assertWindow(auth, row.classSubject, opensAt, closesAt);
+        if (row.publishedAt) await assertInExamWeek(auth, row, opensAt, closesAt);
     }
     if (row.publishedAt && patch.closesAt && patch.closesAt < new Date()) {
         throw badRequest(`${describe(row)} is published; closesAt can be brought forward, but not to before now`);
@@ -569,6 +606,7 @@ async function assertClosesAt(auth, row, closesAt, now) {
     if (row.publishedAt && closesAt < now) {
         throw badRequest(`${describe(row)} is published; closesAt can be brought forward, but not to before now`);
     }
+    if (row.publishedAt) await assertInExamWeek(auth, row, row.opensAt, closesAt);
 }
 
 // After the first release (ticket 04): what is left to change is a key or points.
@@ -807,6 +845,7 @@ async function publish(auth, id, { updatedAt }) {
     if (row.mode === 'ONLINE' && row.questions.length === 0) {
         throw conflict(`Add at least one question to ${describe(row)} before publishing it`);
     }
+    await assertInExamWeek(auth, row, row.opensAt, row.closesAt);
 
     // Its Learning Event lands with the claim or not at all (ticket 06, handoff #24).
     const now = new Date();

@@ -318,6 +318,39 @@ model SchoolHoliday {
     @@index([schoolId, startDate])
 }
 
+enum ExamWeekType {
+    UTS
+    UAS
+}
+
+/// A run of a Semester's days with no teaching for the grade levels it names, kept for a
+/// UTS or a UAS (teaching-and-learning ticket 13, owner 2026-10-18). Its days keep those
+/// Classes' Sessions away as a holiday does, and a UTS or a UAS of theirs is published
+/// inside one of its type. Not a holiday: other grade levels are taught as usual. Set
+/// by the Principal or a Vice Principal; withdrawn rather than deleted, and never edited.
+model ExamWeek {
+    id                String       @id @default(cuid())
+    schoolId          String
+    semesterId        String
+    type              ExamWeekType
+    name              String
+    startDate         DateTime     @db.Date
+    endDate           DateTime     @db.Date
+    /// Every Class of these grade levels in the Semester's year, e.g. [7, 8, 9].
+    gradeLevels       Int[]
+    createdByUserId   String
+    withdrawnAt       DateTime?
+    withdrawnByUserId String?
+    createdAt         DateTime     @default(now())
+    updatedAt         DateTime     @updatedAt
+
+    school   School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    semester Semester @relation(fields: [semesterId], references: [id], onDelete: Cascade)
+
+    @@index([schoolId, startDate])
+    @@index([semesterId])
+}
+
 /// A school's choice for ONE joint-leave day, overriding its School.observesJointLeave
 /// default (owner, 2026-09-27): a Principal may take Idul Fitri's joint leave and not
 /// Christmas Eve's. `observed` null means "follow the school's default" - so going
@@ -440,6 +473,7 @@ model School {
     notifications  Notification[]
     approvalAudits ApprovalAudit[]
     schoolHolidays SchoolHoliday[]
+    examWeeks      ExamWeek[]
     jointLeaveChoices SchoolJointLeaveChoice[]
     subjectChoices    SchoolSubjectChoice[]
     scheduleSlots  ClassSubjectSchedule[]
@@ -702,6 +736,7 @@ model Semester {
     slotDescriptions SlotDescription[]
     homeroomNotes    HomeroomNote[]
     slotFinalisations SlotFinalisation[]
+    examWeeks        ExamWeek[]
 
     @@unique([academicYearId, ordinal])
     @@index([schoolId, status])
@@ -866,6 +901,10 @@ enum SessionCancelReason {
     /// Its teaching assignment was ended and the subject stops in that Class
     /// (teaching-and-learning ticket 10).
     ASSIGNMENT_ENDED
+    /// An Exam Week of its Class's grade level that started counting after the
+    /// Semester had started (teaching-and-learning ticket 13). A day both a holiday and
+    /// an Exam Week is a holiday (owner, 2026-10-18).
+    EXAM_WEEK
 }
 
 /// One weekly slot of a ClassSubject's timetable (teaching-and-learning ticket 02):

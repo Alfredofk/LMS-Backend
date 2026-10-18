@@ -1,9 +1,10 @@
 import { prisma } from '../../shared/prisma.js';
 
 // Reading the holiday calendar: which days a school is off (teaching-and-learning
-// tickets 08 and 02). Its own file so the sessions module can read it, and the
-// holidays service can tell the sessions module the calendar changed, without the
-// two services importing each other.
+// tickets 08 and 02), and which days an Exam Week keeps a grade level from teaching
+// (ticket 13). Its own file so the sessions and assessment modules can read it, and
+// the holidays service can tell the sessions module the calendar changed, without
+// the services importing each other.
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -53,13 +54,39 @@ async function holidayDatesBetween(schoolId, from, to) {
             .filter((row) => observedFor(row.kind, choices.get(row.id) ?? null, school.observesJointLeave))
             .map((row) => toDay(row.date))
     );
-    for (const { startDate, endDate } of own) {
-        for (let at = startDate.getTime(); at <= endDate.getTime(); at += DAY) {
-            const day = toDay(new Date(at));
-            if (day >= from && day <= to) days.add(day);
-        }
-    }
+    for (const run of own) addRun(days, run, from, to);
     return days;
+}
+
+// The Exam Weeks standing in a Semester for one grade level (ticket 13), oldest
+// first; `where` narrows them further, to a type or to some days. Runs inside the
+// school's scope.
+const examWeeksFor = (semesterId, gradeLevel, where = {}) =>
+    prisma.examWeek.findMany({
+        where: { ...where, semesterId, withdrawnAt: null, gradeLevels: { has: gradeLevel } },
+        orderBy: { startDate: 'asc' },
+    });
+
+// Every day from `from` to `to` ('YYYY-MM-DD', inclusive) an Exam Week keeps the
+// Classes of one grade level from teaching in a Semester, as a Set of 'YYYY-MM-DD'.
+// The other grade levels are taught on them (owner, 2026-10-18).
+async function examWeekDatesBetween(semesterId, gradeLevel, from, to) {
+    const weeks = await examWeeksFor(semesterId, gradeLevel, {
+        startDate: { lte: toDate(to) },
+        endDate: { gte: toDate(from) },
+    });
+    const days = new Set();
+    for (const week of weeks) addRun(days, week, from, to);
+    return days;
+}
+
+// Each day of a stored run of days (@db.Date) that falls from `from` to `to`, added
+// to `days`.
+function addRun(days, { startDate, endDate }, from, to) {
+    for (let at = startDate.getTime(); at <= endDate.getTime(); at += DAY) {
+        const day = toDay(new Date(at));
+        if (day >= from && day <= to) days.add(day);
+    }
 }
 
 // Every calendar day from `from` to `to`, inclusive, as 'YYYY-MM-DD'.
@@ -71,4 +98,13 @@ function daysBetween(from, to) {
     return days;
 }
 
-export { toDate, toDay, observedFor, choicesFor, holidayDatesBetween, daysBetween };
+export {
+    toDate,
+    toDay,
+    observedFor,
+    choicesFor,
+    holidayDatesBetween,
+    examWeeksFor,
+    examWeekDatesBetween,
+    daysBetween,
+};

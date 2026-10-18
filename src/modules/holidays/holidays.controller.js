@@ -1,5 +1,6 @@
 import { ok } from '../../shared/errors.js';
 import * as service from './holidays.service.js';
+import * as examWeeks from './holidays.examWeeks.js';
 
 // Thin, like the other controllers.
 
@@ -63,6 +64,22 @@ async function setJointLeaveDay(req, res) {
     return ok(res, { day });
 }
 
+// ---- Exam Weeks (teaching-and-learning ticket 13) --------------------------------
+
+async function listExamWeeks(req, res) {
+    return ok(res, { examWeeks: await examWeeks.listExamWeeks(req.auth, req.validated.query) });
+}
+
+async function addExamWeek(req, res) {
+    const examWeek = await examWeeks.addExamWeek(req.auth, req.validated.body);
+    return ok(res, { examWeek }, 201);
+}
+
+async function withdrawExamWeek(req, res) {
+    const examWeek = await examWeeks.withdrawExamWeek(req.auth, req.validated.params.id);
+    return ok(res, { examWeek, message: 'Withdrawn.' });
+}
+
 export {
     listNational,
     fetchDrafts,
@@ -75,4 +92,7 @@ export {
     withdrawSchoolHoliday,
     setJointLeave,
     setJointLeaveDay,
+    listExamWeeks,
+    addExamWeek,
+    withdrawExamWeek,
 };

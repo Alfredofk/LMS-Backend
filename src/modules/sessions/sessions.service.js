@@ -4,7 +4,13 @@ import { isPrincipalOrVice, isHomeroomOf, placementsOf } from '../../shared/guar
 import { conflict, forbidden, notFound } from '../../shared/errors.js';
 import { localToUtc, utcToLocal } from '../../shared/timeZone.js';
 import { createLogger } from '../../lib/helpers.js';
-import { toDate, toDay, holidayDatesBetween, daysBetween } from '../holidays/holidays.calendar.js';
+import {
+    toDate,
+    toDay,
+    holidayDatesBetween,
+    examWeekDatesBetween,
+    daysBetween,
+} from '../holidays/holidays.calendar.js';
 import { moveContentOffHoliday } from '../content/content.moves.js';
 import { summaryBySessionOf } from '../content/content.summary.js';
 
@@ -28,6 +34,9 @@ const log = createLogger('Sessions');
 //   no other number changes; their Content moves to the next SCHEDULED Session
 //   (content.moves.js, ticket 04). One taken back after the start re-plans from
 //   tomorrow, so its day has Sessions again, empty (owner, 2026-09-29).
+// - An Exam Week does the same as a holiday, for the Classes of the grade levels it
+//   names alone (ticket 13, owner 2026-10-18): cancelled, a Session reads EXAM_WEEK,
+//   and on a day both it reads HOLIDAY.
 // - A teacher who leaves mid-semester hands the rest to whoever takes the slot:
 //   the successor's ClassSubject inherits the schedule and the future Sessions. So
 //   does an assignment ended or replaced while its teacher stays (ticket 10),
@@ -42,6 +51,9 @@ const MINUTES_PER_HOUR = 60;
 const DAY_MS = 24 * 60 * 60 * 1000;
 // Check-in opens this long before a Session starts (owner, 2026-10-08).
 const CHECK_IN_EARLY_MS = 30 * 60 * 1000;
+// What the calendar cancels a Session for after the start: a holiday (ticket 08), or
+// an Exam Week of its Class's grade level (ticket 13).
+const CALENDAR_REASONS = ['HOLIDAY', 'EXAM_WEEK'];
 
 const toMinute = (hhmm) => {
     const [hours, minutes] = hhmm.split(':').map(Number);
@@ -69,7 +81,7 @@ const classSubjectSelect = {
     subjectId: true,
     semesterId: true,
     teacherMembershipId: true,
-    class: { select: { name: true, homeroomTeacherMembershipId: true } },
+    class: { select: { name: true, gradeLevel: true, homeroomTeacherMembershipId: true } },
     subject: { select: { code: true, name: true } },
     semester: {
         select: {
@@ -116,16 +128,21 @@ const tomorrowOf = (zone, now = new Date()) => nextDay(utcToLocal(now, zone).dat
 const replansFrom = (semester, zone, now = new Date()) =>
     hasStarted(semester, zone, now) ? tomorrowOf(zone, now) : toDay(semester.startDate);
 
-// The moments a Semester spans in the school's own zone: from 00:00 of its first
-// day to 00:00 after its last (2026-10-04, for the progress views' roster). A
-// school with no time zone has no Session either; UTC midnight stands in.
-async function semesterSpan(schoolId, semester) {
+// The moments a run of local days spans in the school's own zone: from 00:00 of
+// `firstDay` to 00:00 after `lastDay`. A school with no time zone has no Session
+// either; UTC midnight stands in. An Exam Week's span is read through it too
+// (teaching-and-learning 13).
+async function localDaysSpan(schoolId, firstDay, lastDay) {
     const zone = await zoneOf(schoolId);
-    const after = nextDay(toDay(semester.endDate));
+    const after = nextDay(lastDay);
     return zone
-        ? { start: startOf(semester, zone), end: midnightOf(after, zone) }
-        : { start: toDate(toDay(semester.startDate)), end: toDate(after) };
+        ? { start: midnightOf(firstDay, zone), end: midnightOf(after, zone) }
+        : { start: toDate(firstDay), end: toDate(after) };
 }
+
+// The moments a Semester spans (2026-10-04, for the progress views' roster).
+const semesterSpan = (schoolId, semester) =>
+    localDaysSpan(schoolId, toDay(semester.startDate), toDay(semester.endDate));
 
 // The school's local date today, as YYYY-MM-DD; for a school with no time zone, which
 // has no Session either, the UTC date, as semesterSpan does. Closing a year reads it
@@ -152,25 +169,30 @@ const plannedHere = (now) => ({
 });
 
 // What planning one ClassSubject needs: its school, the zone its slots are read in,
-// its Semester's dates, and the slots themselves.
+// its Semester's dates, its Class's grade level, and the slots themselves.
 const targetOf = (schoolId, zone, classSubject, slots = classSubject.scheduleSlots) => ({
     schoolId,
     zone,
     semester: classSubject.semester,
+    gradeLevel: classSubject.class.gradeLevel,
     classSubjectId: classSubject.id,
     slots,
 });
 
 // Every Session the slots make, from `fromDay` to the Semester's last day,
-// skipping the school's holidays, oldest first.
-async function plan({ schoolId, zone, semester, slots }, fromDay) {
+// skipping the school's holidays and its grade level's Exam Weeks (ticket 13),
+// oldest first.
+async function plan({ schoolId, zone, semester, gradeLevel, slots }, fromDay) {
     const lastDay = toDay(semester.endDate);
     if (slots.length === 0 || fromDay > lastDay) return [];
 
-    const holidays = await holidayDatesBetween(schoolId, fromDay, lastDay);
+    const [holidays, examDays] = await Promise.all([
+        holidayDatesBetween(schoolId, fromDay, lastDay),
+        examWeekDatesBetween(semester.id, gradeLevel, fromDay, lastDay),
+    ]);
     const planned = [];
     for (const day of daysBetween(fromDay, lastDay)) {
-        if (holidays.has(day)) continue;
+        if (holidays.has(day) || examDays.has(day)) continue;
         const dayOfWeek = isoDayOf(day);
         for (const slot of slots) {
             if (slot.dayOfWeek !== dayOfWeek) continue;
@@ -985,18 +1007,20 @@ async function stopSessionsAhead(tx, classSubjectId, now = new Date()) {
 }
 
 // The holiday calendar changed on these days (ticket 08), at these schools - or,
-// for a national holiday, at every school. Before a Semester starts its Sessions
-// are planned again, as if the calendar had always been so (owner, 2026-09-28).
-// After it starts:
-// - a day that now counts as a holiday cancels the Sessions still ahead on it, and
-//   no other number changes (ticket 08);
+// for a national holiday, at every school. An Exam Week (ticket 13) changes them
+// too, for one Semester's grade levels alone: `scope` names them, and only their
+// Classes follow. Before a Semester starts its Sessions are planned again, as if
+// the calendar had always been so (owner, 2026-09-28). After it starts:
+// - a day that now keeps a ClassSubject's Sessions away - a holiday, or an Exam
+//   Week of its grade level - cancels the Sessions still ahead on it, and no other
+//   number changes (ticket 08);
 // - a day from tomorrow on that stopped being one, and has a slot but no Session,
 //   re-plans from tomorrow, so it is taught again (owner, 2026-09-29). A cancelled
 //   number gets its date back empty: its Content already moved on. Past days and
 //   today are never touched.
 // A change only ever goes one way - days added, or days taken back - so the two
-// never meet in one call.
-async function onCalendarChanged(schoolIds, days) {
+// never meet in one call. A day still kept away by the other cause stays away.
+async function onCalendarChanged(schoolIds, days, scope = null) {
     if (days.length === 0) return;
     const schools = await prisma.school.findMany({
         where: {
@@ -1008,27 +1032,41 @@ async function onCalendarChanged(schoolIds, days) {
     });
 
     for (const school of schools) {
-        await runInSchool(school.id, school.name, () => resyncSchool(school, days));
+        await runInSchool(school.id, school.name, () => resyncSchool(school, days, scope));
     }
 }
 
-async function resyncSchool(school, days) {
+// Why a day keeps a ClassSubject's Sessions away, or null when it does not. A day
+// both a holiday and an Exam Week is a holiday (owner, 2026-10-18).
+const offReasonOf = (holidays, examDays) => (day) =>
+    holidays.has(day) ? 'HOLIDAY' : examDays.has(day) ? 'EXAM_WEEK' : null;
+
+async function resyncSchool(school, days, scope) {
     const sorted = [...new Set(days)].sort();
     const [firstDay, lastDay] = [sorted[0], sorted[sorted.length - 1]];
     const now = new Date();
+    const tomorrow = tomorrowOf(school.timeZone, now);
 
     const affected = await prisma.classSubject.findMany({
         where: {
             ...plannedHere(now),
             semester: { startDate: { lte: toDate(lastDay) }, endDate: { gte: toDate(firstDay) } },
+            ...(scope ? { semesterId: scope.semesterId, class: { gradeLevel: { in: scope.gradeLevels } } } : {}),
         },
         select: classSubjectSelect,
     });
     if (affected.length === 0) return;
 
     const holidays = await holidayDatesBetween(school.id, firstDay, lastDay);
-    const nowHolidays = new Set(sorted.filter((day) => holidays.has(day)));
-    const freed = sorted.filter((day) => !holidays.has(day) && day >= tomorrowOf(school.timeZone, now));
+    // Read once per Semester and grade level: every subject of 9A and 9B shares them.
+    const examDaysByLevel = new Map();
+    const examDaysOf = async ({ semester, class: { gradeLevel } }) => {
+        const key = `${semester.id}:${gradeLevel}`;
+        if (!examDaysByLevel.has(key)) {
+            examDaysByLevel.set(key, await examWeekDatesBetween(semester.id, gradeLevel, firstDay, lastDay));
+        }
+        return examDaysByLevel.get(key);
+    };
 
     for (const classSubject of affected) {
         const target = targetOf(school.id, school.timeZone, classSubject);
@@ -1036,38 +1074,58 @@ async function resyncSchool(school, days) {
             await prisma.$transaction((tx) => replanWhole(tx, target, now));
             continue;
         }
+        const reasonOn = offReasonOf(holidays, await examDaysOf(classSubject));
+        const freed = sorted.filter((day) => !reasonOn(day) && day >= tomorrow);
         if (freed.length > 0 && (await lacksSessionOn(classSubject, freed, school.timeZone))) {
             await prisma.$transaction((tx) => replanAhead(tx, target, now));
             continue;
         }
-        if (nowHolidays.size === 0) continue;
-
-        const ahead = await prisma.session.findMany({
-            where: {
-                classSubjectId: classSubject.id,
-                status: 'SCHEDULED',
-                startsAt: { gt: now },
-            },
-            select: { id: true, startsAt: true },
-        });
-        const cancel = ahead.filter((row) => nowHolidays.has(utcToLocal(row.startsAt, school.timeZone).date));
-        if (cancel.length > 0) {
-            // Their Content moves on in the same step (teaching-and-learning 04).
-            await prisma.$transaction(async (tx) => {
-                await tx.session.updateMany({
-                    where: { id: { in: cancel.map((row) => row.id) } },
-                    data: {
-                        status: 'CANCELLED',
-                        cancelReason: 'HOLIDAY',
-                        cancelledAt: now,
-                        needsCompletion: false,
-                    },
-                });
-                await moveContentOffHoliday(tx, classSubject.id, cancel);
-            });
-        }
+        const off = new Set(sorted.filter(reasonOn));
+        if (off.size > 0) await keepOff(classSubject.id, off, reasonOn, school.timeZone, now);
     }
     log.info(`Sessions re-synced at ${school.name} for ${sorted.length} changed day(s)`);
+}
+
+// The Sessions still ahead on days now kept away, after the start. A SCHEDULED one
+// is cancelled with its day's reason, and its Content moves on in the same step
+// (teaching-and-learning 04). One cancelled already for the other cause takes the
+// day's reason now: a holiday withdrawn from a day an Exam Week still holds reads
+// EXAM_WEEK, and a holiday set on an Exam Week's day reads HOLIDAY (ticket 13).
+async function keepOff(classSubjectId, off, reasonOn, zone, now) {
+    const ahead = await prisma.session.findMany({
+        where: {
+            classSubjectId,
+            startsAt: { gt: now },
+            OR: [{ status: 'SCHEDULED' }, { cancelReason: { in: CALENDAR_REASONS } }],
+        },
+        select: { id: true, startsAt: true, status: true, cancelReason: true },
+    });
+    const dayOf = (row) => utcToLocal(row.startsAt, zone).date;
+    const onOff = ahead.filter((row) => off.has(dayOf(row)));
+    const cancel = onOff.filter((row) => row.status === 'SCHEDULED');
+    const retag = onOff.filter((row) => row.status === 'CANCELLED' && row.cancelReason !== reasonOn(dayOf(row)));
+    if (cancel.length === 0 && retag.length === 0) return;
+
+    await prisma.$transaction(async (tx) => {
+        for (const reason of CALENDAR_REASONS) {
+            const idsOf = (rows) => rows.filter((row) => reasonOn(dayOf(row)) === reason).map((row) => row.id);
+            const toCancel = idsOf(cancel);
+            if (toCancel.length > 0) {
+                await tx.session.updateMany({
+                    where: { id: { in: toCancel }, status: 'SCHEDULED' },
+                    data: { status: 'CANCELLED', cancelReason: reason, cancelledAt: now, needsCompletion: false },
+                });
+            }
+            const toRetag = idsOf(retag);
+            if (toRetag.length > 0) {
+                await tx.session.updateMany({
+                    where: { id: { in: toRetag }, status: 'CANCELLED' },
+                    data: { cancelReason: reason },
+                });
+            }
+        }
+        if (cancel.length > 0) await moveContentOffHoliday(tx, classSubjectId, cancel);
+    });
 }
 
 // Whether a day that stopped being a holiday was one that kept this ClassSubject's
@@ -1192,6 +1250,7 @@ export {
     readerStandingOf,
     isStudentStanding,
     todayOf,
+    localDaysSpan,
     semesterSpan,
     sessionSelect,
     loadSession,

@@ -14,6 +14,7 @@ import {
     daysBetween,
 } from './holidays.calendar.js';
 import { onCalendarChanged } from '../sessions/sessions.service.js';
+import { examWeeksOfYear } from './holidays.examWeeks.js';
 
 const log = createLogger('Holidays');
 
@@ -232,8 +233,9 @@ async function assertPrincipalOrVice(auth) {
 
 // What every member of the school reads for a year: the confirmed national days,
 // each joint-leave day marked with whether this school observes it - and whether
-// that is a choice for the day or the school's default - and the school's own
-// holidays still standing.
+// that is a choice for the day or the school's default - the school's own
+// holidays still standing, and its Exam Weeks still standing (ticket 13), each
+// naming its grade levels: an Exam Week is no holiday for the others.
 async function calendar(auth, year) {
     const school = await prisma.school.findUnique({
         where: { id: auth.schoolId },
@@ -252,6 +254,7 @@ async function calendar(auth, year) {
         },
         orderBy: { startDate: 'asc' },
     });
+    const examWeeks = await examWeeksOfYear(year);
 
     return {
         observesJointLeave: school.observesJointLeave,
@@ -268,6 +271,7 @@ async function calendar(auth, year) {
             };
         }),
         school: own.map(schoolHolidayView),
+        examWeeks,
     };
 }
 

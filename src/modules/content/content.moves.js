@@ -1,5 +1,6 @@
 // Content leaving a Session cancelled for a holiday (teaching-and-learning 04, owner
-// 2026-09-28; corrected 2026-09-29, ticket 09 E). Read by sessions.service.js, which
+// 2026-09-28; corrected 2026-09-29, ticket 09 E), or for an Exam Week of its Class's
+// grade level, which moves it alike (ticket 13). Read by sessions.service.js, which
 // cancels the Session and calls this in the same transaction. It imports nothing of
 // sessions, so the two modules do not import each other.
 //
@@ -8,8 +9,8 @@
 //   cancelled too is passed over.
 // - With none after it, the previous SCHEDULED one takes it, even one already past.
 // - Drafts move with it. What was deleted stays where it is.
-// - Only a HOLIDAY cancellation moves Content. A number brought back later returns
-//   empty: what moved on does not move back.
+// - Only a HOLIDAY or an EXAM_WEEK cancellation moves Content. A number brought back
+//   later returns empty: what moved on does not move back.
 
 // A Session's live Content in the order it is shown. content.service.js reads both
 // helpers too; they live here because sessions.service.js imports this file, and

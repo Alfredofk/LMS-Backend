@@ -14,6 +14,8 @@ import {
     schoolHolidayBody,
     jointLeaveBody,
     jointLeaveDayBody,
+    examWeeksQuery,
+    examWeekBody,
 } from './holidays.schema.js';
 
 // Two routers (teaching-and-learning ticket 08), because two different people
@@ -26,6 +28,11 @@ import {
 // the Principal or a Vice Principal adds or withdraws the school's own holidays
 // and chooses whether joint leave is observed. requireRole is the coarse filter;
 // the service re-reads the role from the database.
+//
+// Its Exam Weeks (teaching-and-learning ticket 13) are kept there too: every ACTIVE
+// member reads a Semester's, and the Principal or a Vice Principal sets or withdraws
+// one. Each stops the Sessions of the grade levels it names, and a UTS or a UAS is
+// published inside one of its type.
 
 const adminRouter = Router();
 
@@ -62,6 +69,14 @@ router.put(
     principalOrVice,
     validate({ params: idParams, body: jointLeaveDayBody }),
     controller.setJointLeaveDay
+);
+router.get('/exam-weeks', validate({ query: examWeeksQuery }), controller.listExamWeeks);
+router.post('/exam-weeks', principalOrVice, validate({ body: examWeekBody }), controller.addExamWeek);
+router.post(
+    '/exam-weeks/:id/withdraw',
+    principalOrVice,
+    validate({ params: idParams }),
+    controller.withdrawExamWeek
 );
 
 export default router;
