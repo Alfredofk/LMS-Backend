@@ -712,7 +712,8 @@ function studentQuestionView(question, optionOrder, answer, { assessment, shown 
 // and their own Submissions to it. No question (2026-10-08). In a Class they left,
 // only an Assessment their menu lists there, read with canStart false (ticket 07,
 // owner 2026-10-11); any other is the 404 of one that does not exist. A LATIHAN's
-// carries its best attempt and its latest (ticket 08).
+// carries its best attempt and its latest (ticket 08). A graded one carries the KKTP
+// its Scores are counted with, the reporting slot's (owner, 2026-10-19).
 async function outlineForStudent(auth, id) {
     const row = await loadPublished(id);
     const spans = await placementSpansOf(auth.membershipId, row.classSubject.classId);
@@ -744,15 +745,17 @@ async function outlineForStudent(auth, id) {
     ]);
     const counting = countingValuesOf(submissions, scores);
     const { semester, subject } = row.classSubject;
-    const remedialTerms = counting.some((score) => score.remedial)
-        ? (await remedialTermsOf(auth, studentProfileId, semester, [subject.id])).get(subject.id)
-        : null;
+    const remedialTerms = isPractice(row)
+        ? null
+        : ((await remedialTermsOf(auth, studentProfileId, semester, [subject.id])).get(subject.id) ?? null);
+    const remedialCounts = counting.some((score) => score.remedial);
     return {
         assessment: studentAssessmentView(row, exception),
         ...ownStandingOf(row, terms, exception, submissions, { now, hardEnd, current }),
         // The Score that counts: the highest of the released ones (ticket 04), else null.
         score: countedScoreOf(submissions, scores),
-        afterRule: remedialTerms ? afterRuleOf(counting, remedialTerms) : null,
+        afterRule: remedialTerms && remedialCounts ? afterRuleOf(counting, remedialTerms) : null,
+        kktp: remedialTerms?.kktp ?? null,
         practice: isPractice(row) ? practiceSummaryOf(submissions, marks) : null,
         submissions: submissions.map((submission) =>
             ownSubmissionView(submission, shownMarkOf(row, submission, scores, marks))

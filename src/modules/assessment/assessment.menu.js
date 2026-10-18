@@ -51,6 +51,11 @@ import {
 // - Beside it, where the school's Remedial Rule moves it, the result after the rule
 //   and the rule (grading-and-report-card ticket 02, owner 2026-10-14): the Score stays
 //   raw, and the Student is shown both. Never a grade, an average or a rank.
+// - Each entry says whether it was handed in late, and the KKTP its Scores are counted
+//   with (frontend's notes, owner 2026-10-19), so a dashboard reads the menu alone.
+//   `late` is the first attempt handed in's, void and remedial ones left out - a
+//   remedial has its own window - and null with none, or on an OFFLINE one. `kktp` is
+//   the reporting slot's, the Remedial Rule's, and null on a LATIHAN; no weight.
 // - A LATIHAN (ticket 08, owner 2026-10-18) reads NOT_STARTED, IN_PROGRESS or DONE -
 //   CANCELLED and VOIDED as above - never DID_NOT_SUBMIT or waiting for release. Its
 //   entry has no Score; `practice` holds its best attempt and its latest, and is null
@@ -152,6 +157,16 @@ function standingStatusOf(row, submissions, countedScore, closesAt, now) {
     return unanswered && submissions.at(-1)?.voidedAt ? 'VOIDED' : status;
 }
 
+// Whether the Student handed it in late (owner, 2026-10-19): their first attempt
+// handed in, its late counted from their own closesAt, a make-up's if any. A void one
+// is left out, and so is a remedial, which has its own window. Null with none handed
+// in, and on an OFFLINE one, which takes no hand-in.
+function lateOf(row, submissions) {
+    if (row.mode === 'OFFLINE') return null;
+    const first = submissions.find((submission) => isHandedIn(submission) && !submission.remedial);
+    return first ? first.late : null;
+}
+
 const classView = (row, current) => ({
     id: row.id,
     name: row.name,
@@ -224,10 +239,10 @@ async function menuOf(auth, { semesterId }) {
         handedInPractice.length ? marksOf(prisma, handedInPractice) : new Map(),
     ]);
 
-    // Each Assessment it shows, in the Class it belongs to, and those a remedial Score
-    // counts on, for the Remedial Rule below.
+    // Each Assessment it shows, in the Class it belongs to, and the graded ones, for the
+    // KKTP and the Remedial Rule below.
     const entriesOf = new Map(classIds.map((classId) => [classId, []]));
-    const remedialEntries = [];
+    const gradedEntries = [];
     for (const row of rows) {
         const { classId } = row.classSubject;
         const own = submissions.filter((submission) => submission.assessmentId === row.id);
@@ -241,26 +256,31 @@ async function menuOf(auth, { semesterId }) {
         const entry = {
             assessment: studentAssessmentView(row, exception),
             status: standingStatusOf(row, own, score, terms.closesAt, now),
+            late: lateOf(row, own),
             score,
             afterRule: null,
+            kktp: null,
             practice: isPractice(row) ? practiceSummaryOf(own, marks) : null,
             ...ownStandingOf(row, terms, exception, own, { now, hardEnd, current }),
         };
         entriesOf.get(classId).push(entry);
-        const counting = countingValuesOf(own, scores);
-        if (counting.some((found) => found.remedial)) {
-            remedialEntries.push({ entry, counting, subjectId: row.classSubject.subject.id });
+        if (!isPractice(row)) {
+            const counting = countingValuesOf(own, scores);
+            gradedEntries.push({ entry, counting, subjectId: row.classSubject.subject.id });
         }
     }
 
-    // The rule and the KKTP are the reporting slot's, read only where a remedial Score
-    // counts, so a menu without one costs nothing more.
-    if (remedialEntries.length) {
-        const subjectIds = [...new Set(remedialEntries.map(({ subjectId }) => subjectId))];
+    // The KKTP and the rule are the reporting slot's, read once per Subject: every
+    // graded entry carries the KKTP, and the result after the rule where a remedial
+    // Score counts.
+    if (gradedEntries.length) {
+        const subjectIds = [...new Set(gradedEntries.map(({ subjectId }) => subjectId))];
         const termsOf = await remedialTermsOf(auth, studentProfileId, semester, subjectIds);
-        for (const { entry, counting, subjectId } of remedialEntries) {
+        for (const { entry, counting, subjectId } of gradedEntries) {
             const remedialTerms = termsOf.get(subjectId);
-            if (remedialTerms) entry.afterRule = afterRuleOf(counting, remedialTerms);
+            if (!remedialTerms) continue;
+            entry.kktp = remedialTerms.kktp;
+            if (counting.some((found) => found.remedial)) entry.afterRule = afterRuleOf(counting, remedialTerms);
         }
     }
 
