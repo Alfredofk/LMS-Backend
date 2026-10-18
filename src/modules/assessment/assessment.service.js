@@ -25,6 +25,7 @@ import {
     submissionCountOf,
 } from './assessment.submission.js';
 import { claimClosedSubmissions, scaleTeacherPoints, correctReleased } from './assessment.score.js';
+import { PRACTICE, isPractice, totalPointsOf } from './assessment.practice.js';
 
 const log = createLogger('Assessment');
 
@@ -92,6 +93,11 @@ const log = createLogger('Assessment');
 //   within one (teaching-and-learning 13, owner 2026-10-18). A draft is free, so its
 //   teacher prepares it before the week is set; a make-up's or a remedial's window is
 //   free, so the check is not assertWindow's, which the exceptions call too.
+// - A LATIHAN (ticket 08, owner 2026-10-18) is answered online, and it alone takes
+//   unlimited attempts (maxAttempts null): checked on what the Assessment would be
+//   after the write, since a draft's type may change. Its total counts its
+//   automatically marked questions alone (assessment.practice.js). The finalising lock
+//   does not hold on it, since it moves no grade (owner, 2026-10-18, option A).
 
 const DEFAULT_POINTS = 1;
 
@@ -158,7 +164,7 @@ const assessmentSelect = {
     classSubject: { select: classSubjectSelect },
     questions: {
         where: LIVE,
-        select: { id: true, points: true, sourceQuestionId: true },
+        select: { id: true, kind: true, points: true, sourceQuestionId: true },
         orderBy: { order: 'asc' },
     },
     // What a change to what its Students are shown would void (frontend note #15, owner
@@ -237,11 +243,12 @@ async function loadReadable(auth, id) {
 }
 
 // A reader or a copier, who may read it, is told no (403). Every write loads through
-// here, so a finalised slot refuses them all (409).
+// here, so a finalised slot refuses them all (409) - but on a LATIHAN, which moves no
+// grade (ticket 08, owner 2026-10-18).
 async function loadManaged(auth, id) {
     const { row, standing } = await loadReadable(auth, id);
     assertTeacherStanding(standing, 'Assessment not found');
-    await assertNotFinalised(row.classSubject);
+    if (!isPractice(row)) await assertNotFinalised(row.classSubject);
     return row;
 }
 
@@ -289,6 +296,18 @@ async function assertWindow(auth, classSubject, opensAt, closesAt) {
             `The window must lie inside Semester ${semester.ordinal}: ` +
                 `${toDay(semester.startDate)} to ${toDay(semester.endDate)}`
         );
+    }
+}
+
+// A LATIHAN is answered online - an offline practice has nothing to record in the app -
+// and only it takes unlimited attempts, maxAttempts null (ticket 08, owner 2026-10-18).
+// Given what the Assessment would be after the write.
+function assertFitsType({ type, mode, maxAttempts }) {
+    if (type === PRACTICE && mode === 'OFFLINE') {
+        throw badRequest('A LATIHAN is answered online: an offline practice has nothing to record in the app');
+    }
+    if (maxAttempts === null && type !== PRACTICE) {
+        throw badRequest(`Unlimited attempts are for a LATIHAN only: give a ${type} 1 to 20`);
     }
 }
 
@@ -365,7 +384,7 @@ const assessmentView = (row, standing) => ({
     cancelReason: row.cancelReason,
     copiedFromId: row.copiedFromId,
     questionCount: row.questions.length,
-    totalPoints: row.questions.reduce((sum, question) => sum + question.points, 0),
+    totalPoints: totalPointsOf(row),
     // The Submissions not void, so the teacher is warned before an edit voids them
     // (frontend note #15, owner 2026-10-12). A copier reads none of its Submissions
     // (loadForStaff in assessment.marking.js), so not their number either.
@@ -539,6 +558,7 @@ async function create(auth, classSubjectId, body) {
     const classSubject = await loadClassSubject(classSubjectId);
     assertTeacherStanding(await staffStandingOf(auth, classSubject), 'Class subject not found');
     assertTakesNew(classSubject);
+    assertFitsType(body);
     await assertWindow(auth, classSubject, body.opensAt, body.closesAt);
 
     const row = await prisma.assessment.create({
@@ -569,6 +589,11 @@ async function update(auth, id, { updatedAt, ...patch }) {
     if (row.mode === 'OFFLINE' && SETTINGS.some((key) => key in patch)) {
         throw badRequest('An offline assessment has no settings');
     }
+    assertFitsType({
+        type: patch.type ?? row.type,
+        mode: row.mode,
+        maxAttempts: 'maxAttempts' in patch ? patch.maxAttempts : row.maxAttempts,
+    });
     if (patch.opensAt || patch.closesAt) {
         const [opensAt, closesAt] = [patch.opensAt ?? row.opensAt, patch.closesAt ?? row.closesAt];
         await assertWindow(auth, row.classSubject, opensAt, closesAt);

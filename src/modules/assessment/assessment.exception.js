@@ -6,6 +6,7 @@ import { assertNotFinalised } from '../grading/grading.lock.js';
 import { assertTeacherStanding, assertNotCancelled, assertWindow, describe } from './assessment.service.js';
 import { exceptionSelect, exceptionOf, exceptionView, closeExpiredSubmissions } from './assessment.submission.js';
 import { loadForStaff } from './assessment.marking.js';
+import { isPractice } from './assessment.practice.js';
 
 const log = createLogger('Assessment');
 
@@ -43,6 +44,9 @@ const log = createLogger('Assessment');
 //   the grading slice's, read from Submission.remedial.
 // - None is set, changed or removed once the slot is finalised (grading-and-report-card
 //   04): 409 until its Teacher undoes the finalising (grading.lock.js).
+// - None on a LATIHAN (ticket 08, owner 2026-10-18): 409. Practice is never graded,
+//   so it needs no make-up or remedial; its teacher gives it more attempts instead,
+//   unlimited if need be.
 
 const CHANGED_MEANWHILE = 'This exception was changed meanwhile. Reload it and try again';
 const IN_USE = 'The student has started an attempt under this exception; it stays, and may be changed instead';
@@ -57,11 +61,14 @@ const staffExceptionSelect = {
 // ---------------------------------------------------------------------------
 
 // Its Answering Teacher, on a published ONLINE Assessment not cancelled, of a slot not
-// finalised.
+// finalised, and not a LATIHAN.
 async function loadForExceptions(auth, id) {
     const { row, standing } = await loadForStaff(auth, id);
     assertTeacherStanding(standing, 'Assessment not found');
     assertNotCancelled(row);
+    if (isPractice(row)) {
+        throw conflict(`${describe(row)} is a LATIHAN: it takes no make-up or remedial; give it more attempts instead`);
+    }
     if (row.mode === 'OFFLINE') {
         throw badRequest(`${describe(row)} is offline: enter the make-up mark when there is one`);
     }

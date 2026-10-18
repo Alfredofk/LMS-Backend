@@ -4,10 +4,10 @@ import { date } from '../holidays/holidays.schema.js';
 
 // The question bank (assessment ticket 01), Assessments (ticket 02), answering them
 // (ticket 03), marking and releasing them (ticket 04), a Student's make-up and
-// remedial (ticket 05), and the reads (ticket 07). Only the shape is checked here, a
-// question's rules per kind included. Who may write for which Subject and Grade
-// Level, whose images may be named, sanitising the body, which answer a question
-// takes, and how many points it is worth are the services'.
+// remedial (ticket 05), the reads (ticket 07), and LATIHAN (ticket 08). Only the
+// shape is checked here, a question's rules per kind included. Who may write for
+// which Subject and Grade Level, whose images may be named, sanitising the body,
+// which answer a question takes, and how many points it is worth are the services'.
 
 const id = z.string().min(1);
 
@@ -130,16 +130,19 @@ const duplicateBody = z.strictObject({ gradeLevel: gradeLevel.optional() }).defa
 // Whether the window fits the Semester, and opensAt comes first, is the service's:
 // an edit may move one end only.
 
-const TYPES = ['TUGAS', 'KUIS', 'UTS', 'UAS'];
+// LATIHAN is practice, never graded (ticket 08). Whether a type fits the mode and the
+// attempts is the service's: a draft's type may change.
+const TYPES = ['TUGAS', 'KUIS', 'UTS', 'UAS', 'LATIHAN'];
 
 const title = z.string().trim().min(1, 'Give the assessment a title').max(200, 'The title is too long');
 
 // HTML, sanitised by the service as a question's body is. Empty or null is none.
 const instructions = z.string().max(20_000, 'The instructions are too long').nullable();
 
-// An ONLINE Assessment's settings (owner, 2026-10-04; ranges 2026-10-07).
+// An ONLINE Assessment's settings (owner, 2026-10-04; ranges 2026-10-07). Null
+// attempts are unlimited, for a LATIHAN only (ticket 08, owner 2026-10-18).
 const settings = {
-    maxAttempts: z.number().int().min(1).max(20),
+    maxAttempts: z.number().int().min(1).max(20).nullable(),
     acceptLate: z.boolean(),
     timeLimitMinutes: z.number().int().min(1).max(600).nullable(),
     shuffleQuestions: z.boolean(),

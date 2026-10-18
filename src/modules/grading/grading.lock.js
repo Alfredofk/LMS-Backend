@@ -12,6 +12,8 @@ import { conflict } from '../../shared/errors.js';
 //   write on its Assessments - their settings and window, their questions, publishing,
 //   cancelling, deleting a draft, marking, release, Score corrections and exceptions:
 //   409. Its Answering Teacher undoes the finalising to change any of them.
+// - The lock does not hold on a LATIHAN (assessment ticket 08, owner 2026-10-18, option
+//   A): it moves no grade, so assessment's loaders do not call it there.
 // - While finalised, the slot's grades are computed with the settings it was finalised
 //   with (SlotFinalisation.settings), not the live ones.
 

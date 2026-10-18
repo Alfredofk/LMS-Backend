@@ -5,7 +5,8 @@ import { toDay } from '../holidays/holidays.calendar.js';
 import { remedialTermsOf } from '../grading/grading.reporting.js';
 import { afterRuleOf } from '../grading/grading.compute.js';
 import { studentStatusOf } from './assessment.marking.js';
-import { scoresOf, countedScoreOf, countingValuesOf } from './assessment.score.js';
+import { marksOf, scoresOf, countedScoreOf, countingValuesOf } from './assessment.score.js';
+import { isPractice, isHandedIn, practiceStatusOf, practiceSummaryOf } from './assessment.practice.js';
 import {
     studentAssessmentSelect,
     submissionSelect,
@@ -50,6 +51,10 @@ import {
 // - Beside it, where the school's Remedial Rule moves it, the result after the rule
 //   and the rule (grading-and-report-card ticket 02, owner 2026-10-14): the Score stays
 //   raw, and the Student is shown both. Never a grade, an average or a rank.
+// - A LATIHAN (ticket 08, owner 2026-10-18) reads NOT_STARTED, IN_PROGRESS or DONE -
+//   CANCELLED and VOIDED as above - never DID_NOT_SUBMIT or waiting for release. Its
+//   entry has no Score; `practice` holds its best attempt and its latest, and is null
+//   on every other type.
 
 const isOpen = (span) => span.endedAt === null;
 
@@ -134,13 +139,15 @@ const attemptStatusOf = (submission) => {
     return submission.releasedAt ? 'RELEASED' : 'WAITING_FOR_RELEASE';
 };
 
-// Where the Student stands on one Assessment: the staff's rule, with the menu's
-// differences (owner, 2026-10-11) - CANCELLED first, and VOIDED where their last
-// attempt was voided and nothing else stands.
+// Where the Student stands on one Assessment: the staff's rule - a LATIHAN's own
+// (ticket 08) - with the menu's differences (owner, 2026-10-11): CANCELLED first, and
+// VOIDED where their last attempt was voided and nothing else stands.
 function standingStatusOf(row, submissions, countedScore, closesAt, now) {
     if (row.cancelledAt) return 'CANCELLED';
     const attempts = submissions.map((submission) => ({ status: attemptStatusOf(submission) }));
-    const status = studentStatusOf(attempts, countedScore, closesAt, now);
+    const status = isPractice(row)
+        ? practiceStatusOf(submissions)
+        : studentStatusOf(attempts, countedScore, closesAt, now);
     const unanswered = status === 'NOT_STARTED' || status === 'DID_NOT_SUBMIT';
     return unanswered && submissions.at(-1)?.voidedAt ? 'VOIDED' : status;
 }
@@ -204,10 +211,18 @@ async function menuOf(auth, { semesterId }) {
         prisma.submission.findMany({ where: ofRows, select: submissionSelect, orderBy: { attempt: 'asc' } }),
         exceptionsOf(ofRows),
     ]);
-    const scores = await scoresOf(
-        prisma,
-        submissions.filter((submission) => submission.releasedAt).map((submission) => submission.id)
+    // A LATIHAN's attempts handed in, whose marks give its best and latest (ticket 08).
+    const practiceIds = new Set(rows.filter(isPractice).map((row) => row.id));
+    const handedInPractice = submissions.filter(
+        (submission) => practiceIds.has(submission.assessmentId) && isHandedIn(submission)
     );
+    const [scores, marks] = await Promise.all([
+        scoresOf(
+            prisma,
+            submissions.filter((submission) => submission.releasedAt).map((submission) => submission.id)
+        ),
+        handedInPractice.length ? marksOf(prisma, handedInPractice) : new Map(),
+    ]);
 
     // Each Assessment it shows, in the Class it belongs to, and those a remedial Score
     // counts on, for the Remedial Rule below.
@@ -228,6 +243,7 @@ async function menuOf(auth, { semesterId }) {
             status: standingStatusOf(row, own, score, terms.closesAt, now),
             score,
             afterRule: null,
+            practice: isPractice(row) ? practiceSummaryOf(own, marks) : null,
             ...ownStandingOf(row, terms, exception, own, { now, hardEnd, current }),
         };
         entriesOf.get(classId).push(entry);

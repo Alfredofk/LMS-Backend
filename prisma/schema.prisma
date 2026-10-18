@@ -1235,6 +1235,9 @@ enum AssessmentType {
     KUIS
     UTS
     UAS
+    /// Practice, never graded (assessment ticket 08, owner 2026-10-18): ONLINE only, no
+    /// Score, its result shown at hand-in, left out of the grades and the Report Card.
+    LATIHAN
 }
 
 enum AssessmentMode {
@@ -1265,7 +1268,8 @@ model Assessment {
     instructions      String?
     opensAt           DateTime
     closesAt          DateTime
-    maxAttempts       Int            @default(1)
+    /// Null is unlimited, on a LATIHAN only (assessment ticket 08, owner 2026-10-18).
+    maxAttempts       Int?           @default(1)
     acceptLate        Boolean        @default(false)
     timeLimitMinutes  Int?
     shuffleQuestions  Boolean        @default(false)

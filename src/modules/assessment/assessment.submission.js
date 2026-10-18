@@ -13,7 +13,24 @@ import { remedialTermsOf } from '../grading/grading.reporting.js';
 import { afterRuleOf } from '../grading/grading.compute.js';
 import { imageIdsOf, imageFileOf } from './assessment.bank.js';
 import { autoPointsOf } from './assessment.grading.js';
-import { scoresOf, currentScoreOf, countedScoreOf, countingValuesOf, scoreView, pointsOf } from './assessment.score.js';
+import {
+    markedSubmissionSelect,
+    marksOf,
+    scoresOf,
+    currentScoreOf,
+    countedScoreOf,
+    countingValuesOf,
+    scoreView,
+    pointsOf,
+} from './assessment.score.js';
+import {
+    isPractice,
+    isInTotal,
+    totalPointsOf,
+    isHandedIn,
+    practiceResultView,
+    practiceSummaryOf,
+} from './assessment.practice.js';
 
 const log = createLogger('Assessment');
 
@@ -41,10 +58,10 @@ const log = createLogger('Assessment');
 //   when the Assessment says so - is drawn once at the start and kept (2026-10-08).
 // - An ESSAY's answer is plain text, at most 20,000 characters, a file, or both
 //   (2026-10-08); the file follows Content's rules, macros refused.
-// - A correct answer never reaches a Student before release (spec invariant 3): no
-//   key, no accepted answer and no points earned leave here. Every read of an
-//   Assessment for a Student is studentAssessmentSelect, and the copies are read
-//   without their key.
+// - A correct answer never reaches a Student before release (spec invariant 3) - or,
+//   on a LATIHAN, before they hand in (ticket 08): no key, no accepted answer and no
+//   points earned leave here. Every read of an Assessment for a Student is
+//   studentAssessmentSelect, and the copies are read without their key.
 // - Saving an answer writes no Learning Event (answered question 4). Starting and
 //   handing in do (ticket 06): assessment.submission_started, and
 //   assessment.submitted - by the Student, or by time as of the deadline, the
@@ -72,6 +89,11 @@ const log = createLogger('Assessment');
 //   the outline of an Assessment their menu lists there opens, with canStart false.
 //   Starting and answering stay the current Class's - the split teaching-and-learning
 //   12 made for Sessions and Content.
+// - A LATIHAN (ticket 08, owner 2026-10-18) shows an attempt's marks, its comments and
+//   with showKeyOnRelease its key as soon as it is handed in, with no release: its
+//   result is the mark as it stands, never a Score, and its ESSAY shows a comment and
+//   no points. Its attempts may be unlimited (maxAttempts null), and it takes no
+//   exception. The outline shows its best attempt and its latest.
 
 const SHAPE_VERSION = 1;
 const MINUTE_MS = 60 * 1000;
@@ -111,15 +133,16 @@ const studentAssessmentSelect = {
             semester: { select: { id: true, ordinal: true, startDate: true, endDate: true } },
         },
     },
-    questions: { where: LIVE, select: { id: true, points: true }, orderBy: { order: 'asc' } },
+    questions: { where: LIVE, select: { id: true, kind: true, points: true }, orderBy: { order: 'asc' } },
 };
 
 // A copy as a Student sees it. payload holds the body, the image and the options,
 // none of them marked correct: the key is a column of its own.
 const studentQuestionSelect = { id: true, kind: true, mcqScoring: true, points: true, payload: true };
 
+// With what a mark is computed from: a LATIHAN's own attempt shows it (ticket 08).
 const submissionSelect = {
-    id: true,
+    ...markedSubmissionSelect,
     assessmentId: true,
     studentProfileId: true,
     attempt: true,
@@ -209,15 +232,22 @@ const exceptionOf = (assessmentId, studentProfileId) =>
         select: exceptionSelect,
     });
 
+// A Student's attempts: an exception's extra attempts on top of maxAttempts - or,
+// under a remedial, its extra attempts alone (owner, 2026-10-11): a remedial comes
+// after the Class's window, so the Assessment's own attempts are spent or closed.
+// Null is unlimited: a LATIHAN's, which takes no exception (ticket 08).
+function maxAttemptsOf(row, exception) {
+    if (row.maxAttempts === null) return null;
+    return exception?.remedial ? exception.extraAttempts : row.maxAttempts + (exception?.extraAttempts ?? 0);
+}
+
 // The window and attempts that hold for one Student: a make-up's window in place of
-// the Class's (2026-10-10), and its extra attempts on top of maxAttempts - or, under
-// a remedial, its extra attempts alone (owner, 2026-10-11): a remedial comes after the
-// Class's window, so the Assessment's own attempts are spent or closed. With no
-// exception, the Assessment's own.
+// the Class's (2026-10-10), and their attempts as above. With no exception, the
+// Assessment's own.
 const ownTermsOf = (row, exception) => ({
     opensAt: exception?.opensAt ?? row.opensAt,
     closesAt: exception?.closesAt ?? row.closesAt,
-    maxAttempts: exception?.remedial ? exception.extraAttempts : row.maxAttempts + (exception?.extraAttempts ?? 0),
+    maxAttempts: maxAttemptsOf(row, exception),
 });
 
 // The attempts counted against those terms: every one not void, or under a remedial
@@ -497,8 +527,18 @@ function startRefusalOf(row, terms, { used, inProgress, now, hardEnd }) {
     if (inProgress) return conflict('You have an attempt in progress; continue it');
     if (now < terms.opensAt) return conflict(`${describe(row)} is not open yet`);
     if (now >= hardEnd) return conflict(`${describe(row)} is closed`);
-    if (used >= terms.maxAttempts) return conflict(`You have used every attempt at ${describe(row)}`);
+    if (terms.maxAttempts !== null && used >= terms.maxAttempts) {
+        return conflict(`You have used every attempt at ${describe(row)}`);
+    }
     return null;
+}
+
+// The attempts a Student has left: none on an OFFLINE one, which takes no attempt -
+// the teacher enters its marks - and null, unlimited, on a LATIHAN that says so
+// (ticket 08).
+function attemptsLeftOf(row, terms, used) {
+    if (row.mode === 'OFFLINE') return 0;
+    return terms.maxAttempts === null ? null : Math.max(0, terms.maxAttempts - used);
 }
 
 // What a Student has done on an Assessment and may still do, on their own terms: the
@@ -509,8 +549,7 @@ function ownStandingOf(row, terms, exception, submissions, { now, hardEnd, curre
     const inProgress = submissions.find(isInProgress) ?? null;
     return {
         attemptsUsed: used,
-        // An OFFLINE one takes no attempt: the teacher enters its marks.
-        attemptsLeft: row.mode === 'ONLINE' ? Math.max(0, terms.maxAttempts - used) : 0,
+        attemptsLeft: attemptsLeftOf(row, terms, used),
         inProgressId: inProgress?.id ?? null,
         canStart: current && startRefusalOf(row, terms, { used, inProgress, now, hardEnd }) === null,
     };
@@ -525,9 +564,20 @@ const statusOf = (row) => {
     return row.submittedAt ? 'SUBMITTED' : 'IN_PROGRESS';
 };
 
-// A Student's own Submission. Its Score and the teacher's comment only once it is
-// released (ticket 04): `score` is the newest Score row.
-const ownSubmissionView = (row, score = null) => ({
+// What one of the Student's own attempts shows of its marks: once released, its
+// newest Score (ticket 04); a LATIHAN's once handed in, its result as its mark stands
+// (ticket 08), from `marks`, which holds it. Else nothing.
+function shownMarkOf(assessment, submission, scores, marks) {
+    if (submission.releasedAt) return { shown: true, score: scoreView(currentScoreOf(scores, submission.id)) };
+    if (isPractice(assessment) && isHandedIn(submission)) {
+        return { shown: true, score: practiceResultView(marks.get(submission.id)) };
+    }
+    return { shown: false, score: null };
+}
+
+// A Student's own Submission. Its Score and the teacher's comment only once they are
+// shown (shownMarkOf).
+const ownSubmissionView = (row, { shown = false, score = null } = {}) => ({
     id: row.id,
     attempt: row.attempt,
     status: statusOf(row),
@@ -540,8 +590,8 @@ const ownSubmissionView = (row, score = null) => ({
     voidedAt: row.voidedAt,
     voidReason: row.voidReason,
     released: row.releasedAt !== null,
-    score: row.releasedAt ? scoreView(score) : null,
-    comment: row.releasedAt ? row.comment : null,
+    score: shown ? score : null,
+    comment: shown ? row.comment : null,
 });
 
 // The outline a Student reads: never a question. The window and maxAttempts are the
@@ -569,7 +619,7 @@ const studentAssessmentView = (row, exception) => ({
     status: row.cancelledAt ? 'CANCELLED' : 'PUBLISHED',
     cancelReason: row.cancelReason,
     questionCount: row.questions.length,
-    totalPoints: row.questions.reduce((sum, question) => sum + question.points, 0),
+    totalPoints: totalPointsOf(row),
     // The Student is told before starting that these are recorded (spec).
     integritySignals: isSignalled(row),
 });
@@ -630,24 +680,27 @@ const keyView = (question) => {
 };
 
 // A question as this Submission shows it: its options in the order drawn, none
-// marked, and the Student's own saved answer. Released (ticket 04): the points it
-// earned and the teacher's comment, and with showKeyOnRelease its key.
-function studentQuestionView(question, optionOrder, answer, { released = false, showKey = false } = {}) {
+// marked, and the Student's own saved answer. Once its marks are shown - released
+// (ticket 04), or a LATIHAN's handed in (ticket 08) - the points it earned and the
+// teacher's comment, and with showKeyOnRelease its key. A LATIHAN's ESSAY shows no
+// points, worth or earned: its comment is its mark.
+function studentQuestionView(question, optionOrder, answer, { assessment, shown = false, showKey = false }) {
     const { body, imageId, options } = question.payload;
     const byId = new Map((options ?? []).map((option) => [option.id, option]));
+    const counted = isInTotal(assessment, question);
     return {
         id: question.id,
         kind: question.kind,
         mcqScoring: question.mcqScoring,
-        points: question.points,
+        points: counted ? question.points : null,
         body,
         imageId,
         ...(question.kind === 'MCQ'
             ? { options: (optionOrder ?? []).map((optionId) => byId.get(optionId)).filter(Boolean) }
             : {}),
         answer: answerView(question.kind, answer),
-        marks: released ? { points: pointsOf(answer), comment: answer?.comment ?? null } : null,
-        key: released && showKey ? keyView(question) : null,
+        marks: shown ? { points: counted ? pointsOf(answer) : null, comment: answer?.comment ?? null } : null,
+        key: shown && showKey ? keyView(question) : null,
     };
 }
 
@@ -658,7 +711,8 @@ function studentQuestionView(question, optionOrder, answer, { released = false, 
 // Before starting: the outline on the Student's own terms, what they may still do,
 // and their own Submissions to it. No question (2026-10-08). In a Class they left,
 // only an Assessment their menu lists there, read with canStart false (ticket 07,
-// owner 2026-10-11); any other is the 404 of one that does not exist.
+// owner 2026-10-11); any other is the 404 of one that does not exist. A LATIHAN's
+// carries its best attempt and its latest (ticket 08).
 async function outlineForStudent(auth, id) {
     const row = await loadPublished(id);
     const spans = await placementSpansOf(auth.membershipId, row.classSubject.classId);
@@ -681,10 +735,13 @@ async function outlineForStudent(auth, id) {
         throw notFound('Assessment not found');
     }
 
-    const scores = await scoresOf(
-        prisma,
-        submissions.filter((submission) => submission.releasedAt).map((submission) => submission.id)
-    );
+    const [scores, marks] = await Promise.all([
+        scoresOf(
+            prisma,
+            submissions.filter((submission) => submission.releasedAt).map((submission) => submission.id)
+        ),
+        isPractice(row) ? marksOf(prisma, submissions.filter(isHandedIn)) : new Map(),
+    ]);
     const counting = countingValuesOf(submissions, scores);
     const { semester, subject } = row.classSubject;
     const remedialTerms = counting.some((score) => score.remedial)
@@ -696,8 +753,9 @@ async function outlineForStudent(auth, id) {
         // The Score that counts: the highest of the released ones (ticket 04), else null.
         score: countedScoreOf(submissions, scores),
         afterRule: remedialTerms ? afterRuleOf(counting, remedialTerms) : null,
+        practice: isPractice(row) ? practiceSummaryOf(submissions, marks) : null,
         submissions: submissions.map((submission) =>
-            ownSubmissionView(submission, currentScoreOf(scores, submission.id))
+            ownSubmissionView(submission, shownMarkOf(row, submission, scores, marks))
         ),
     };
 }
@@ -705,7 +763,8 @@ async function outlineForStudent(auth, id) {
 // One of the Student's own Submissions with its questions as shown, and what they
 // saved. Before release never a key and never points earned; a closed or void one
 // reads the same. Released (ticket 04): its Score, each answer's points and comment,
-// and the key when the teacher shows it - read with it only then.
+// and the key when the teacher shows it - read with it only then. A LATIHAN's shows
+// them once handed in, its result read from its mark (ticket 08).
 async function submissionForStudent(auth, id) {
     const submission = await loadOwnSubmission(auth, id);
     const released = submission.releasedAt !== null;
@@ -713,31 +772,34 @@ async function submissionForStudent(auth, id) {
         loadPublished(submission.assessmentId),
         exceptionOf(submission.assessmentId, submission.studentProfileId),
     ]);
-    const showKey = released && assessment.showKeyOnRelease;
+    const handedInPractice = isPractice(assessment) && isHandedIn(submission);
+    const shown = released || handedInPractice;
+    const showKey = shown && assessment.showKeyOnRelease;
     const questionIds = submission.shownOrder.questions;
-    const [questions, answers, scores] = await Promise.all([
+    const [questions, answers, scores, marks] = await Promise.all([
         prisma.assessmentQuestion.findMany({
             where: { id: { in: questionIds } },
             select: showKey ? { ...studentQuestionSelect, answerKey: true } : studentQuestionSelect,
         }),
         prisma.submissionAnswer.findMany({
             where: { submissionId: submission.id },
-            select: released ? releasedAnswerSelect : answerSelect,
+            select: shown ? releasedAnswerSelect : answerSelect,
         }),
         scoresOf(prisma, released ? [submission.id] : []),
+        handedInPractice ? marksOf(prisma, [submission]) : new Map(),
     ]);
 
     const questionById = new Map(questions.map((question) => [question.id, question]));
     const answerById = new Map(answers.map((answer) => [answer.assessmentQuestionId, answer]));
     return {
-        submission: ownSubmissionView(submission, currentScoreOf(scores, submission.id)),
+        submission: ownSubmissionView(submission, shownMarkOf(assessment, submission, scores, marks)),
         assessment: studentAssessmentView(assessment, exception),
         questions: questionIds.map((questionId) =>
             studentQuestionView(
                 questionById.get(questionId),
                 submission.shownOrder.options[questionId],
                 answerById.get(questionId),
-                { released, showKey }
+                { assessment, shown, showKey }
             )
         ),
     };

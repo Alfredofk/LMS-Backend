@@ -1,3 +1,5 @@
+import { isInTotal } from './assessment.practice.js';
+
 // Scores (assessment ticket 04): the marks a Score is made from, and the one writer
 // of Score - as tracking.record.js is of LearningEvent. Every function takes the
 // client, so it joins its caller's transaction.
@@ -24,6 +26,9 @@
 //   only a remedial reached it (2026-10-12).
 // - A question's points changed: the teacher's points on it keep their share of the
 //   question (2026-10-09). An ESSAY of 10 marked 8, lowered to 5, becomes 4.
+// - A LATIHAN's mark counts its automatically marked questions alone, and an ESSAY in
+//   it waits for a comment, not points (ticket 08, owner 2026-10-18). It is never
+//   released, so no Score is made from it: its Student reads the mark as it stands.
 
 // Four decimal places for points, as SubmissionAnswer holds them; two for a Score.
 const POINT_PLACES = 10_000;
@@ -35,8 +40,15 @@ const roundScore = (value) => Math.round(value * SCORE_PLACES) / SCORE_PLACES;
 // A Decimal column read back, as a number, or null.
 const numberOf = (decimal) => (decimal === null || decimal === undefined ? null : Number(decimal));
 
-// What a mark is computed from, of a Submission.
-const markedSubmissionSelect = { id: true, closedBy: true, shownOrder: true, offlineMark: true };
+// What a mark is computed from, of a Submission: its Assessment's type too, since a
+// LATIHAN's is computed its own way (ticket 08).
+const markedSubmissionSelect = {
+    id: true,
+    closedBy: true,
+    shownOrder: true,
+    offlineMark: true,
+    assessment: { select: { type: true } },
+};
 
 const answerMarkSelect = {
     submissionId: true,
@@ -45,6 +57,7 @@ const answerMarkSelect = {
     fileStorageKey: true,
     autoPoints: true,
     teacherPoints: true,
+    comment: true,
 };
 
 const scoreSelect = {
@@ -67,10 +80,16 @@ const pointsOf = (answer) => numberOf(answer?.teacherPoints) ?? numberOf(answer?
 // Whether an ESSAY answer still waits for the teacher's points.
 const needsMarking = (kind, answer) => kind === 'ESSAY' && !isEmptyEssay(answer) && answer.teacherPoints === null;
 
+// Whether an ESSAY answer in a LATIHAN still waits for the teacher's comment, its one
+// mark (ticket 08). It blocks nothing: a LATIHAN is never released.
+const needsComment = (kind, answer) => kind === 'ESSAY' && !isEmptyEssay(answer) && !answer.comment;
+
 // ---------------------------------------------------------------------------
 // Marks
 // ---------------------------------------------------------------------------
 
+// A LATIHAN's ESSAY counts in neither the points nor the total, and waits for a
+// comment (ticket 08); a LATIHAN of ESSAYs alone has no value.
 function onlineMarkOf(submission, copyById, answerOf) {
     let earned = 0;
     let total = 0;
@@ -78,12 +97,16 @@ function onlineMarkOf(submission, copyById, answerOf) {
     for (const questionId of submission.shownOrder.questions) {
         const copy = copyById.get(questionId);
         const answer = answerOf(submission.id, questionId);
+        if (!isInTotal(submission.assessment, copy)) {
+            if (needsComment(copy.kind, answer)) unmarked += 1;
+            continue;
+        }
         total += copy.points;
         earned += pointsOf(answer);
         if (needsMarking(copy.kind, answer)) unmarked += 1;
     }
     return {
-        value: total ? roundScore((earned / total) * 100) : 0,
+        value: total ? roundScore((earned / total) * 100) : null,
         pointsEarned: roundPoints(earned),
         pointsTotal: total,
         unmarked,
@@ -99,7 +122,8 @@ const offlineMarkOf = (submission) => ({
 
 // Each closed Submission's mark as it stands, by id: { value, pointsEarned,
 // pointsTotal, unmarked } - unmarked counting the ESSAY answers that wait for the
-// teacher. The submissions are read with markedSubmissionSelect.
+// teacher: for their points, or in a LATIHAN for a comment. The submissions are read
+// with markedSubmissionSelect.
 async function marksOf(client, submissions) {
     const online = submissions.filter((submission) => submission.closedBy !== 'TEACHER');
     const questionIds = [...new Set(online.flatMap((submission) => submission.shownOrder.questions))];
@@ -278,6 +302,7 @@ export {
     isEmptyEssay,
     pointsOf,
     needsMarking,
+    needsComment,
     marksOf,
     scoresOf,
     currentScoreOf,

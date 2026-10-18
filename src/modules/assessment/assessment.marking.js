@@ -29,6 +29,7 @@ import {
     markedSubmissionSelect,
     numberOf,
     needsMarking,
+    needsComment,
     pointsOf,
     marksOf,
     scoresOf,
@@ -39,6 +40,7 @@ import {
     recordScore,
     correctReleased,
 } from './assessment.score.js';
+import { GRADED, isPractice, practiceStatusOf, practiceSummaryOf } from './assessment.practice.js';
 
 const log = createLogger('Assessment');
 
@@ -86,7 +88,13 @@ const log = createLogger('Assessment');
 // - Nothing in a cancelled Assessment is marked, released or corrected; its Scores
 //   stay.
 // - Nor in one whose slot is finalised (grading-and-report-card 04): 409 until its
-//   Teacher undoes the finalising (grading.lock.js).
+//   Teacher undoes the finalising (grading.lock.js) - but a LATIHAN, which moves no
+//   grade (ticket 08, owner 2026-10-18).
+// - A LATIHAN (ticket 08, owner 2026-10-18) is never released and records no Score.
+//   Its answers take comments and no points. A handed-in attempt reads SUBMITTED, or
+//   WAITING_FOR_MARKING while an ESSAY waits for its comment, which blocks nothing. A
+//   Student's status on it is NOT_STARTED, IN_PROGRESS or DONE, with their best
+//   attempt and their latest. The recap leaves it out.
 
 // An OFFLINE mark's Submission shows no question.
 const NO_QUESTIONS = { v: 1, questions: [], options: {} };
@@ -161,13 +169,13 @@ async function loadForStaff(auth, id) {
 }
 
 // Its Answering Teacher, on a published Assessment not cancelled, of a slot not
-// finalised.
+// finalised - or a LATIHAN's, finalised or not (ticket 08).
 async function loadForMarking(auth, id) {
     const { row, standing } = await loadForStaff(auth, id);
     assertTeacherStanding(standing, 'Assessment not found');
     assertNotCancelled(row);
     if (!row.publishedAt) throw conflict(`${describe(row)} is a draft; it has nothing to mark`);
-    await assertNotFinalised(row.classSubject);
+    if (!isPractice(row)) await assertNotFinalised(row.classSubject);
     return row;
 }
 
@@ -208,10 +216,12 @@ function assertMarkable(items, copyById, answerByQuestion, released) {
 // Views
 // ---------------------------------------------------------------------------
 
-// Where one Submission stands, for its staff.
+// Where one Submission stands, for its staff. A LATIHAN's is never released (ticket
+// 08): handed in, it waits only for the comment an ESSAY takes.
 function submissionStatusOf(row, mark) {
     if (row.voidedAt) return 'VOID';
     if (!row.submittedAt) return 'IN_PROGRESS';
+    if (isPractice(row.assessment)) return mark.unmarked ? 'WAITING_FOR_MARKING' : 'SUBMITTED';
     if (row.releasedAt) return 'RELEASED';
     return mark.unmarked ? 'WAITING_FOR_MARKING' : 'WAITING_FOR_RELEASE';
 }
@@ -263,7 +273,8 @@ function studentStatusOf(attempts, countedScore, closesAt, now) {
     return now < closesAt ? 'NOT_STARTED' : 'DID_NOT_SUBMIT';
 }
 
-const markingQuestionView = (copy, answer) => ({
+// A LATIHAN's ESSAY waits for a comment, not points (ticket 08).
+const markingQuestionView = (row, copy, answer) => ({
     id: copy.id,
     order: copy.order,
     points: copy.points,
@@ -273,7 +284,7 @@ const markingQuestionView = (copy, answer) => ({
     teacherPoints: numberOf(answer?.teacherPoints),
     earned: pointsOf(answer),
     comment: answer?.comment ?? null,
-    needsMarking: needsMarking(copy.kind, answer),
+    needsMarking: isPractice(row) ? needsComment(copy.kind, answer) : needsMarking(copy.kind, answer),
 });
 
 // One Submission as its staff mark it: each question it showed, with its key, the
@@ -313,7 +324,7 @@ async function markingViewOf(row, standing, submission) {
             ...scoreView(score),
             recordedBy: { userId: score.recordedByUserId, fullName: nameOf.get(score.recordedByUserId) ?? null },
         })),
-        questions: copies.map((copy) => markingQuestionView(copy, answerById.get(copy.id))),
+        questions: copies.map((copy) => markingQuestionView(row, copy, answerById.get(copy.id))),
     };
 }
 
@@ -327,7 +338,8 @@ async function markingViewOf(row, standing, submission) {
 // Score that counts and whether only a remedial reached it (frontend's note #19,
 // owner 2026-10-12). Past deadlines are closed first. One read behind an
 // Assessment's results and its ClassSubject's recap (ticket 07, owner 2026-10-11), so
-// the two never disagree.
+// the two never disagree. On a LATIHAN, the status is its own, and `practice` holds
+// the best attempt and the latest (ticket 08); elsewhere `practice` is null.
 async function standingsOf(rows, roster, now) {
     const assessmentIds = rows.map((row) => row.id);
     await closeExpiredSubmissions({ assessmentId: { in: assessmentIds } }, now);
@@ -351,6 +363,7 @@ async function standingsOf(rows, roster, now) {
     for (const submission of submissions) nameOf.set(submission.studentProfileId, fullNameOf(submission));
 
     const standingsOfRow = (row) => {
+        const practice = isPractice(row);
         const ofRow = submissions.filter((submission) => submission.assessmentId === row.id);
         const studentProfileIds = [
             ...new Set([...roster.studentProfileIds, ...ofRow.map((submission) => submission.studentProfileId)]),
@@ -371,10 +384,13 @@ async function standingsOf(rows, roster, now) {
                 studentProfileId,
                 fullName: nameOf.get(studentProfileId) ?? null,
                 placedNow: roster.placedNow(studentProfileId),
-                status: studentStatusOf(attempts, countedScore, ownTermsOf(row, exception).closesAt, now),
+                status: practice
+                    ? practiceStatusOf(own)
+                    : studentStatusOf(attempts, countedScore, ownTermsOf(row, exception).closesAt, now),
                 countedScore,
                 countedFromRemedial: isCountedFromRemedial(own, scores),
                 exception: exceptionView(exception),
+                practice: practice ? practiceSummaryOf(own, marks) : null,
                 attempts,
             };
         });
@@ -408,13 +424,13 @@ async function results(auth, id) {
 
 // A ClassSubject's recap for its staff (ticket 07, owner 2026-10-11): the slot's
 // roster against the slot's published Assessments - a predecessor's included, never a
-// draft - each cell the Student's status, the Score that counts and whether only a
-// remedial reached it (2026-10-12), read by standingsOf as that Assessment's results
-// read them, so a grade book needs no read per Assessment. A cancelled one keeps its
-// column, flagged with its reason; the grading slice will not count it. Recorded
-// Scores only: no draft mark, no sum, no weight - weights are the grading slice's
-// (handoff #9). A cell's status is null where its Student is not in that
-// Assessment's results. Never a Student's to read (spec invariant 8).
+// draft, never a LATIHAN (ticket 08) - each cell the Student's status, the Score that
+// counts and whether only a remedial reached it (2026-10-12), read by standingsOf as
+// that Assessment's results read them, so a grade book needs no read per Assessment.
+// A cancelled one keeps its column, flagged with its reason; the grading slice will
+// not count it. Recorded Scores only: no draft mark, no sum, no weight - weights are
+// the grading slice's (handoff #9). A cell's status is null where its Student is not
+// in that Assessment's results. Never a Student's to read (spec invariant 8).
 async function recap(auth, classSubjectId) {
     const classSubject = await loadClassSubject(classSubjectId);
     const standing = await staffStandingOf(auth, classSubject);
@@ -422,7 +438,7 @@ async function recap(auth, classSubjectId) {
 
     const [rows, roster] = await Promise.all([
         prisma.assessment.findMany({
-            where: { deletedAt: null, publishedAt: { not: null }, ...slotSessionWhere(classSubject) },
+            where: { deletedAt: null, publishedAt: { not: null }, ...GRADED, ...slotSessionWhere(classSubject) },
             select: assessmentSelect,
             orderBy: [{ opensAt: 'asc' }, { createdAt: 'asc' }],
         }),
@@ -496,9 +512,13 @@ async function readEssayFile(auth, id, submissionId, questionId) {
 // points needs a reason, and a correction carries it whenever an answer's points
 // moved, even if the sum did not (2026-10-10) - a comment alone needs none. The
 // Submission is claimed first, so a release or a key fix landing at the same moment
-// waits for this, or this for it, and is then seen.
+// waits for this, or this for it, and is then seen. A LATIHAN's takes comments only,
+// shown to its Student as soon as they are saved (ticket 08).
 async function mark(auth, id, submissionId, { answers = [], comment, reason }) {
     const row = await loadForMarking(auth, id);
+    if (isPractice(row) && answers.some((item) => item.points !== undefined)) {
+        throw badRequest(`${describe(row)} is a LATIHAN: its answers take comments, and no points`);
+    }
     const submission = await loadSubmissionOf(row, submissionId);
     if (submission.closedBy === 'TEACHER') throw conflict('An offline mark is changed with the offline marks');
     if (submission.voidedAt) {
@@ -644,9 +664,13 @@ async function enterOfflineMarks(auth, id, { marks, reason }) {
 // Records a Score for every closed Submission not void, fully marked and not yet
 // released, and says what still waits. The Assessment is claimed first, so a second
 // press, or a key fix, at the same moment waits for this one; then the Submissions
-// it may release, so marking at the same moment lands before or after, never half.
+// it may release, so marking at the same moment lands before or after, never half. A
+// LATIHAN is never released: its results show at hand-in (ticket 08).
 async function release(auth, id) {
     const row = await loadForMarking(auth, id);
+    if (isPractice(row)) {
+        throw conflict(`${describe(row)} is a LATIHAN: it is never released; each result shows at hand-in`);
+    }
     const now = new Date();
     if (row.mode === 'ONLINE' && now < row.closesAt) {
         throw conflict(`${describe(row)} is open until ${row.closesAt.toISOString()}; release it once it has closed`);

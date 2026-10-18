@@ -21,6 +21,8 @@ import { liveFinalisationOf } from './grading.lock.js';
 // - An Assessment of an earlier Class that a Student this slot reports still waits on
 //   blocks too, so no grade moves after its slot is finalised.
 // - A Description is optional (owner, 2026-10-18) and blocks nothing.
+// - A LATIHAN blocks nothing (assessment ticket 08, owner 2026-10-18): the grade book
+//   leaves it out, so an attempt at one may still be in progress at finalising.
 
 // The statuses that count as they are: a Score, or 0 for "did not submit".
 const COUNTED = new Set(['RELEASED', 'DID_NOT_SUBMIT']);

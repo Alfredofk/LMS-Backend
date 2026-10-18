@@ -1,6 +1,7 @@
 import { prisma } from '../../shared/prisma.js';
 import { rosterOf } from '../tracking/tracking.service.js';
 import { standingsOf, byName } from '../assessment/assessment.marking.js';
+import { GRADED } from '../assessment/assessment.practice.js';
 import { exceptionsOf, ownTermsOf, hardEndIn, isListedThrough } from '../assessment/assessment.submission.js';
 import { loadForStaff, slotSettingsOf } from './grading.service.js';
 import { slotReportingOf } from './grading.reporting.js';
@@ -35,6 +36,8 @@ import { isCounted, blockersOf, finalisedView } from './grading.readiness.js';
 // - The view says whether the slot is finalised, by whom and when, and what still
 //   blocks finalising it (ticket 04, grading.readiness.js), so its Teacher sees the list
 //   before pressing.
+// - A LATIHAN never counts (assessment ticket 08, owner 2026-10-18): the grade book
+//   leaves it out, so the grades, the readiness blockers and finalising never meet it.
 
 // What the standings, a Student's own terms and the blockers read of an Assessment.
 const gradedAssessmentSelect = {
@@ -88,6 +91,7 @@ async function gradeBookOf(auth, classSubject, now = new Date()) {
             deletedAt: null,
             publishedAt: { not: null },
             cancelledAt: null,
+            ...GRADED,
             classSubject: { classId: { in: classIds }, subjectId, semesterId, status: 'ACTIVE' },
         },
         select: gradedAssessmentSelect,
