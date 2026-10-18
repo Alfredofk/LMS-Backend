@@ -28,12 +28,13 @@ import {
     submissionAnswerParams,
     markBody,
     offlineMarksBody,
+    offlineMarkParams,
     exceptionParams,
     exceptionBody,
     menuQuery,
 } from './assessment.schema.js';
 
-// Mounted at /api/assessments (assessment tickets 01 to 05, and 07).
+// Mounted at /api/assessments (assessment tickets 01 to 09).
 //
 // The question bank: teachers write questions per Subject x Grade Level, for what
 // they teach now, and read the ones of what they teach now along with their own.
@@ -66,6 +67,10 @@ import {
 // records the Scores; after that a mark changes only with a reason, as a correction.
 // The homeroom teacher, the Principal and the Vice Principals read the results and
 // each Submission, and change nothing.
+//
+// A remedial on an offline Assessment (ticket 09): the same teacher enters remedial
+// marks beside the originals, once its window has closed, for Students placed in the
+// Class now, and takes one back before its release.
 //
 // Make-up and remedial (ticket 05): the same teacher gives one Student of the Class
 // their own window, extra attempts, or both, on a published online Assessment, saying
@@ -221,6 +226,12 @@ router.put(
     staff,
     validate({ params: idParams, body: offlineMarksBody }),
     controller.enterOfflineMarks
+);
+router.delete(
+    '/:id/offline-marks/:studentProfileId/remedial',
+    staff,
+    validate({ params: offlineMarkParams }),
+    controller.removeRemedialMark
 );
 router.post('/:id/release', staff, validate({ params: idParams }), controller.releaseAssessment);
 router.get('/class-subjects/:id/recap', staff, validate({ params: idParams }), controller.getRecap);

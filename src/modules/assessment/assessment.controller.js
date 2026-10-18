@@ -208,6 +208,12 @@ async function enterOfflineMarks(req, res) {
     return ok(res, { ...results, message: 'Marks saved.' });
 }
 
+async function removeRemedialMark(req, res) {
+    const { id, studentProfileId } = req.validated.params;
+    const results = await marking.removeRemedialMark(req.auth, id, studentProfileId);
+    return ok(res, { ...results, message: 'Remedial mark removed.' });
+}
+
 async function releaseAssessment(req, res) {
     const outcome = await marking.release(req.auth, req.validated.params.id);
     return ok(res, { ...outcome, message: 'Released.' });
@@ -278,6 +284,7 @@ export {
     readMarkingFile,
     markSubmission,
     enterOfflineMarks,
+    removeRemedialMark,
     releaseAssessment,
     listExceptions,
     setException,

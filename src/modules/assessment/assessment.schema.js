@@ -306,7 +306,11 @@ const markBody = z
     })
     .refine((value) => value.answers?.length || value.comment !== undefined, 'Send a mark or a comment');
 
+// An OFFLINE Assessment's marks, all originals or, with remedial, all remedial marks
+// (assessment ticket 09, owner 2026-10-18): the two take different Students, so one
+// refused remedial never holds back a Class's originals. Left out, the originals.
 const offlineMarksBody = z.strictObject({
+    remedial: z.boolean().optional(),
     marks: z
         .array(
             z.strictObject({
@@ -320,6 +324,9 @@ const offlineMarksBody = z.strictObject({
         .refine((list) => distinct(named(list, 'studentProfileId')), 'A student is named twice'),
     reason: reason.optional(),
 });
+
+// One Student's remedial mark on an OFFLINE Assessment (ticket 09).
+const offlineMarkParams = z.object({ id, studentProfileId: id });
 
 // ---- make-up and remedial (ticket 05) ----
 
@@ -382,6 +389,7 @@ export {
     submissionAnswerParams,
     markBody,
     offlineMarksBody,
+    offlineMarkParams,
     exceptionParams,
     exceptionBody,
     menuQuery,

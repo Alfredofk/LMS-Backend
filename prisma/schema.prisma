@@ -1374,7 +1374,8 @@ model Submission {
     schoolId         String
     assessmentId     String
     studentProfileId String
-    /// 1, 2, ... per Student and Assessment, void ones included.
+    /// 1, 2, ... per Student and Assessment, void ones included. An OFFLINE
+    /// original is 1; its remedial mark the next after the highest, at least 2.
     attempt          Int
     startedAt        DateTime
     /// The time limit after startedAt, capped by the hard end - closesAt, or the
@@ -1386,8 +1387,10 @@ model Submission {
     late             Boolean          @default(false)
     /// Started under a remedial Assessment Exception (ticket 05's follow-up, owner
     /// 2026-10-11), copied from it at the start: a later change to the exception
-    /// leaves this attempt as it was. The grading slice applies the school's
-    /// remedial rule (a KKTP cap, the highest, or an average) to these.
+    /// leaves this attempt as it was. Or an OFFLINE remedial mark, entered beside
+    /// the original (assessment ticket 09, owner 2026-10-18). The grading slice
+    /// applies the school's remedial rule (a KKTP cap, the highest, or an average)
+    /// to these.
     remedial         Boolean          @default(false)
     voidedAt         DateTime?
     voidReason       String?

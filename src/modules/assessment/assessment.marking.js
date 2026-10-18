@@ -74,6 +74,13 @@ const log = createLogger('Assessment');
 // - An OFFLINE mark is a Submission without answers (closedBy TEACHER, 2026-10-09),
 //   0-100, for a Student of the Class's roster over the Semester (rosterOf), so one
 //   who sat the paper and moved since still gets theirs. One per Student.
+// - Beside it a remedial mark (ticket 09, owner 2026-10-18: "setuju"), so the
+//   Remedial Rule reaches a paper exam too: a second Submission without answers,
+//   flagged remedial, which a release gives its own Score while the original's
+//   stays. One per Student, changed in place as the original is. Entered once the
+//   window has closed, for a Student placed in the Class now - as an online remedial
+//   is given (assessment.exception.js) - one who did not submit included, on any
+//   OFFLINE type. Taken back softly before its release only.
 // - The results list every Student of that roster, and anyone with a Submission:
 //   status, attempts, what waits, and the Score that counts. One with no Submission
 //   once the window has closed "did not submit": no Score, which is not 0. The window
@@ -98,6 +105,9 @@ const log = createLogger('Assessment');
 
 // An OFFLINE mark's Submission shows no question.
 const NO_QUESTIONS = { v: 1, questions: [], options: {} };
+
+const REMEDIAL_RELEASED = 'This remedial mark is released; it stays, and is corrected with a reason instead';
+const REMEDIAL_TAKEN_BACK = 'A remedial mark taken back by its teacher before release';
 
 const staffSubmissionSelect = {
     ...markedSubmissionSelect,
@@ -583,12 +593,25 @@ async function mark(auth, id, submissionId, { answers = [], comment, reason }) {
     return markingViewOf(row, 'teacher', await loadSubmissionOf(row, submission.id));
 }
 
+// The number a new remedial mark takes (ticket 09): after every Submission of the
+// Student's, void ones included, since the unique attempt counts them, and never 1,
+// which the original keeps - so an original entered after a remedial still finds it.
+async function remedialAttemptOf(tx, row, studentProfileId) {
+    const last = await tx.submission.findFirst({
+        where: { assessmentId: row.id, studentProfileId },
+        select: { attempt: true },
+        orderBy: { attempt: 'desc' },
+    });
+    return Math.max(2, (last?.attempt ?? 0) + 1);
+}
+
 // One Student's offline mark, in the caller's transaction: their Submission made
-// with it, or its draft changed, or once released a correction with the reason.
-// Claimed first, so two entries for one Student meet in turn; two creating at once
-// meet the unique attempt and one is refused.
-async function enterOfflineMark(tx, row, item, { reason, userId }) {
-    const where = { assessmentId: row.id, studentProfileId: item.studentProfileId, voidedAt: null };
+// with it, or its draft changed, or once released a correction with the reason. The
+// original and a remedial mark (ticket 09) are two Submissions, told apart by their
+// remedial flag, never by number. Claimed first, so two entries for one Student meet
+// in turn; two creating at once meet the unique attempt and one is refused.
+async function enterOfflineMark(tx, row, item, { remedial, reason, userId }) {
+    const where = { assessmentId: row.id, studentProfileId: item.studentProfileId, remedial, voidedAt: null };
     const now = new Date();
     const claimed = await tx.submission.updateMany({ where, data: { updatedAt: now } });
     if (claimed.count === 0) {
@@ -596,11 +619,12 @@ async function enterOfflineMark(tx, row, item, { reason, userId }) {
             data: {
                 assessmentId: row.id,
                 studentProfileId: item.studentProfileId,
-                attempt: 1,
+                attempt: remedial ? await remedialAttemptOf(tx, row, item.studentProfileId) : 1,
                 startedAt: now,
                 deadlineAt: now,
                 submittedAt: now,
                 closedBy: 'TEACHER',
+                remedial,
                 shownOrder: NO_QUESTIONS,
                 offlineMark: item.value,
                 comment: item.comment ?? null,
@@ -627,25 +651,38 @@ async function enterOfflineMark(tx, row, item, { reason, userId }) {
     return existing.releasedAt && changed ? correctReleased(tx, { id: existing.id }, { reason, userId }) : 0;
 }
 
-// An OFFLINE Assessment's marks, 0-100, for Students of the Class's roster over the
-// Semester. All of them, or none. Answers with the results.
-async function enterOfflineMarks(auth, id, { marks, reason }) {
+// An OFFLINE Assessment's marks, 0-100, all of them or none: the originals, for
+// Students of the Class's roster over the Semester, or with remedial the remedial
+// marks (ticket 09) - refused (409) while the window is open, and only for Students
+// placed in the Class now (roster.placedNow, the open placement on a live profile
+// that an online remedial's exception asks for). Answers with the results.
+async function enterOfflineMarks(auth, id, { marks, reason, remedial = false }) {
     const row = await loadForMarking(auth, id);
     if (row.mode !== 'OFFLINE') throw conflict(`${describe(row)} is online; its attempts are marked answer by answer`);
+    if (remedial && row.closesAt > new Date()) {
+        throw conflict(`${describe(row)} is still open; enter remedial marks once it has closed`);
+    }
     const roster = await rosterOf(auth, row.classSubject);
     const onRoster = new Set(roster.studentProfileIds);
-    const stray = marks.filter((item) => !onRoster.has(item.studentProfileId)).map((item) => item.studentProfileId);
+    const fits = (studentProfileId) => (remedial ? roster.placedNow(studentProfileId) : onRoster.has(studentProfileId));
+    const stray = marks.filter((item) => !fits(item.studentProfileId)).map((item) => item.studentProfileId);
     if (stray.length) {
-        throw badRequest(`Enter marks only for students of ${row.classSubject.class.name} in this Semester`, {
-            studentProfileIds: stray,
-        });
+        const className = row.classSubject.class.name;
+        throw badRequest(
+            remedial
+                ? `Enter remedial marks only for students placed in ${className} now`
+                : `Enter marks only for students of ${className} in this Semester`,
+            { studentProfileIds: stray }
+        );
     }
 
     let corrected;
     try {
         corrected = await prisma.$transaction(async (tx) => {
             let count = 0;
-            for (const item of marks) count += await enterOfflineMark(tx, row, item, { reason, userId: auth.userId });
+            for (const item of marks) {
+                count += await enterOfflineMark(tx, row, item, { remedial, reason, userId: auth.userId });
+            }
             return count;
         });
     } catch (error) {
@@ -653,7 +690,35 @@ async function enterOfflineMarks(auth, id, { marks, reason }) {
         throw conflict('Marks were entered meanwhile; reload them and try again');
     }
 
-    log.info(`${describe(row)}: ${marks.length} offline mark(s) saved${correctionNote(corrected)}`);
+    const kind = remedial ? 'remedial' : 'offline';
+    log.info(`${describe(row)}: ${marks.length} ${kind} mark(s) saved${correctionNote(corrected)}`);
+    return results(auth, row.id);
+}
+
+// One Student's remedial mark entered by mistake, taken back (ticket 09, owner
+// 2026-10-18): before its release only, and softly - its Submission is voided and
+// kept, so a new one takes the next number. Once released it has a Score, which is
+// append-only, so it stays and is corrected with a reason instead (409). The claim
+// repeats the check, so a release at the same moment lands first and wins. Answers
+// with the results.
+async function removeRemedialMark(auth, id, studentProfileId) {
+    const row = await loadForMarking(auth, id);
+    if (row.mode !== 'OFFLINE') throw conflict(`${describe(row)} is online; its remedial is an exception`);
+    const where = { assessmentId: row.id, studentProfileId, closedBy: 'TEACHER', remedial: true, voidedAt: null };
+    const found = await prisma.submission.findFirst({ where, select: { id: true, attempt: true, releasedAt: true } });
+    if (!found) throw notFound('Remedial mark not found');
+    if (found.releasedAt) throw conflict(REMEDIAL_RELEASED);
+
+    const claimed = await prisma.submission.updateMany({
+        where: { id: found.id, voidedAt: null, releasedAt: null },
+        data: { voidedAt: new Date(), voidReason: REMEDIAL_TAKEN_BACK },
+    });
+    if (claimed.count === 0) {
+        const released = await prisma.submission.count({ where });
+        throw released ? conflict(REMEDIAL_RELEASED) : notFound('Remedial mark not found');
+    }
+
+    log.info(`${describe(row)}: a remedial mark taken back (attempt ${found.attempt})`);
     return results(auth, row.id);
 }
 
@@ -742,5 +807,6 @@ export {
     readEssayFile,
     mark,
     enterOfflineMarks,
+    removeRemedialMark,
     release,
 };

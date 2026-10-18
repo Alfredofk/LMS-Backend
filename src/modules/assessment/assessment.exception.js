@@ -21,7 +21,8 @@ const log = createLogger('Assessment');
 //   (currentPlacement). The Homeroom Teacher, the Principal and the Vice Principals
 //   read them and change nothing (403); anyone else, another school included, 404.
 // - Only on a published ONLINE Assessment not cancelled. An OFFLINE one needs none:
-//   its teacher enters the make-up mark when there is one. A copy takes none along.
+//   its teacher enters the make-up mark when there is one, and a remedial mark beside
+//   the original (ticket 09, assessment.marking.js). A copy takes none along.
 // - One live row per Student and Assessment, changed in place (2026-10-10); a change
 //   sends back the updatedAt it read, as every write of an Assessment does.
 // - A make-up's window replaces the Class's for that Student (2026-10-10), inside the
@@ -70,7 +71,9 @@ async function loadForExceptions(auth, id) {
         throw conflict(`${describe(row)} is a LATIHAN: it takes no make-up or remedial; give it more attempts instead`);
     }
     if (row.mode === 'OFFLINE') {
-        throw badRequest(`${describe(row)} is offline: enter the make-up mark when there is one`);
+        throw badRequest(
+            `${describe(row)} is offline: enter the make-up mark when there is one, and a remedial as a remedial mark`
+        );
     }
     if (!row.publishedAt) throw conflict(`${describe(row)} is a draft; set exceptions once it is published`);
     await assertNotFinalised(row.classSubject);
