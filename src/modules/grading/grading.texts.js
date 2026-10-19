@@ -242,6 +242,37 @@ async function notedIn(auth, homeroom, semester) {
     return new Map([...placed].filter(([studentProfileId]) => holders.has(studentProfileId)));
 }
 
+// Refuses (400) Notes for Students outside the Class's own (notedIn), naming each in one
+// refusal, as the Descriptions' does (owner, 2026-10-19): one placed in the Class after the
+// Semester ended, so with no Report Card for it, and one not placed in it now, whose own
+// Class's Homeroom Teacher writes theirs. Reads nothing more while none is outside.
+async function assertNotedIn(homeroom, semester, placed, studentProfileIds) {
+    const outside = studentProfileIds.filter((found) => !placed.has(found));
+    if (outside.length === 0) return;
+
+    const [placedNow, profiles] = await Promise.all([
+        placedNowIn(homeroom.id),
+        prisma.studentProfile.findMany({
+            where: { id: { in: outside } },
+            select: { id: true, membership: { select: { user: { select: { fullName: true } } } } },
+        }),
+    ]);
+    const nameOf = new Map(profiles.map((row) => [row.id, row.membership.user.fullName]));
+    const joinedAfter = outside.filter((found) => placedNow.has(found));
+    const notPlaced = outside.filter((found) => !placedNow.has(found));
+    const parts = [];
+    if (joinedAfter.length) {
+        parts.push(
+            `No Report Card for Semester ${semester.ordinal} for ${namesOf(joinedAfter, nameOf)}: ` +
+                'placed after it ended, so no note is written'
+        );
+    }
+    if (notPlaced.length) {
+        parts.push(`Not placed in ${homeroom.name} now: ${namesOf(notPlaced, nameOf)}. ${OWN_HOMEROOM}`);
+    }
+    throw badRequest(parts.join('. '), { studentProfileIds: outside, joinedAfter, notPlaced });
+}
+
 const notesWhere = (semester, studentProfileIds) => ({
     semesterId: semester.id,
     studentProfileId: { in: studentProfileIds },
@@ -275,8 +306,9 @@ async function readNotes(auth, classId, semesterId) {
 // The Homeroom Teacher writes the Notes of Students placed in their Class now, many at
 // once; null or an empty text clears one. The Principal or a Vice Principal is told no
 // (403), anyone else gets 404. A Student not placed there now refuses the whole request
-// with 400, naming each: their own Class's Homeroom Teacher writes theirs. So does one
-// placed there who gets no Report Card for the Semester, having joined after it ended.
+// with 400: their own Class's Homeroom Teacher writes theirs. So does one placed there who
+// gets no Report Card for the Semester, having joined after it ended. One 400 names every
+// such Student (assertNotedIn).
 // A CLOSED Semester or a closed year refuses it with 409. Answers the named Students'
 // Notes as they now are.
 async function writeNotes(auth, classId, semesterId, { notes }) {
@@ -289,29 +321,9 @@ async function writeNotes(auth, classId, semesterId, { notes }) {
     if (academicYear.status !== 'ACTIVE') throw conflict(`Academic year ${academicYear.label} is closed`);
 
     const placed = await notedIn(auth, homeroom, semester);
-    const outside = notes.map((row) => row.studentProfileId).filter((found) => !placed.has(found));
-    const placedNow = outside.length ? await placedNowIn(homeroom.id) : new Map();
-    const joinedAfter = outside.filter((found) => placedNow.has(found));
-    if (joinedAfter.length) {
-        throw badRequest(
-            `No Report Card for Semester ${semester.ordinal} for ${namesOf(joinedAfter, placedNow)}: ` +
-                'placed after it ended, so no note is written',
-            { studentProfileIds: joinedAfter }
-        );
-    }
-    if (outside.length) {
-        const profiles = await prisma.studentProfile.findMany({
-            where: { id: { in: outside } },
-            select: { id: true, membership: { select: { user: { select: { fullName: true } } } } },
-        });
-        const nameOf = new Map(profiles.map((row) => [row.id, row.membership.user.fullName]));
-        const names = namesOf(outside, nameOf);
-        throw badRequest(`Not placed in ${homeroom.name} now: ${names}. ${OWN_HOMEROOM}`, {
-            studentProfileIds: outside,
-        });
-    }
-
     const ids = notes.map((row) => row.studentProfileId);
+    await assertNotedIn(homeroom, semester, placed, ids);
+
     const stored = await prisma.homeroomNote.findMany({ where: notesWhere(semester, ids), select: textSelect });
     const written = await saveTexts({
         model: 'homeroomNote',

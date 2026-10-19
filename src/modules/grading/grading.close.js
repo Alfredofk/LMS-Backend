@@ -51,6 +51,9 @@ const log = createLogger('Grading');
 //   take about 14 s, past what an interactive transaction allows by default. Inside
 //   it, after the Semester is claimed, the finalisations, the placements and the Notes
 //   are read again: one changed meanwhile refuses the close, and nothing is written.
+// - The transaction plans the default way, waits up to 10 s for a connection and runs up
+//   to 60 s (owner, 2026-10-19, after measuring it): past either, Prisma rolls it back and
+//   server.js answers 503.
 
 // The national catalog's Subjects in the order it was written in (migration
 // _national_subject_catalog), the order a Report Card lists them (owner, 2026-10-19).
@@ -81,8 +84,14 @@ const DATE_GRACE_DAYS = 30;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-// Writing a whole school's Report Cards outlasts Prisma's 5 s default.
-const WRITE_TIMEOUT_MS = 30_000;
+// Writing a whole school's Report Cards outlasts Prisma's 5 s default: 960 took 6.7 s planned
+// the default way (below), on a machine running 3x slower than the build's measurements
+// (ticket 05, "The close's transaction, measured on its own"; owner, 2026-10-19: 60 s).
+const WRITE_TIMEOUT_MS = 60_000;
+
+// How long the close waits for a pool connection to start its transaction, past Prisma's
+// 2 s default: on a busy server it waits rather than fails (owner, 2026-10-19).
+const WRITE_MAX_WAIT_MS = 10_000;
 
 // A 409's text names at most this many of each kind; its details name them all.
 const NAMED_IN_TEXT = 5;
@@ -156,7 +165,7 @@ async function closingReadOf(auth, semester) {
         reportCardHoldersOf(semester.academicYearId, span),
         prisma.slotFinalisation.findMany({
             where: { semesterId: semester.id, ...LIVE_FINALISATION },
-            select: { classId: true, subjectId: true },
+            select: { id: true, classId: true, subjectId: true },
         }),
     ]);
     const finalised = new Set(finalisations.map(slotKeyOf));
@@ -174,7 +183,7 @@ async function closingReadOf(auth, semester) {
     return {
         span,
         holders,
-        finalised,
+        finalisationIds: new Set(finalisations.map((row) => row.id)),
         notFinalised,
         blocked: closing.filter((slot) => slot.blockers.length > 0),
         lines: closing.flatMap((slot) => slot.lines),
@@ -313,13 +322,16 @@ async function reportCardRowsOf(auth, semester, reportDate, read) {
 }
 
 // Inside the close's transaction, after the Semester is claimed: refuses (409) a close
-// whose slots, placements or Notes changed since they were read - a finalising undone,
-// a Class Move, a Note cleared - so nothing is written on what no longer holds.
+// whose slots, placements or Notes changed since they were read - a finalising undone or
+// done again, a Class Move, a Note cleared - so nothing is written on what no longer holds.
+// The finalisations compare by id, not by slot (owner, 2026-10-19): a slot unfinalised,
+// corrected and finalised again meanwhile keeps its key but is a new row, since unfinalise
+// sets undoneAt and finalise creates one, and its grades were read before the correction.
 async function assertUnchanged(tx, semester, read) {
     const [finalisations, holders, notes] = await Promise.all([
         tx.slotFinalisation.findMany({
             where: { semesterId: semester.id, ...LIVE_FINALISATION },
-            select: { classId: true, subjectId: true },
+            select: { id: true },
         }),
         reportCardHoldersOf(semester.academicYearId, read.span, null, tx),
         tx.homeroomNote.findMany({
@@ -328,8 +340,8 @@ async function assertUnchanged(tx, semester, read) {
         }),
     ]);
     const sameSlots =
-        finalisations.length === read.finalised.size &&
-        finalisations.every((row) => read.finalised.has(slotKeyOf(row)));
+        finalisations.length === read.finalisationIds.size &&
+        finalisations.every((row) => read.finalisationIds.has(row.id));
     const samePlaces =
         holders.size === read.holders.size &&
         [...holders].every(([studentProfileId, classId]) => read.holders.get(studentProfileId) === classId);
@@ -369,6 +381,12 @@ async function closeSemester(auth, id, { reportDate }) {
 
     await prisma.$transaction(
         async (tx) => {
+            // The connection plans every statement with its own values (DATABASE_URL's
+            // plan_cache_mode = force_custom_plan, ticket 05), the foreign key checks Postgres
+            // runs per inserted row included: 14,400 subject lines took 13.5 s so, against 5.7 s
+            // planned the default way. For this transaction only; the reads before it keep
+            // theirs. A raw statement on no table, by the owner's yes (2026-10-19).
+            await tx.$executeRaw`SET LOCAL plan_cache_mode = auto`;
             const claimed = await tx.semester.updateMany({
                 where: { id: semester.id, status: 'FINALIZING' },
                 data: { status: 'CLOSED', closedAt: new Date(), closedByUserId: auth.userId },
@@ -397,7 +415,7 @@ async function closeSemester(auth, id, { reportDate }) {
                 client: tx,
             });
         },
-        { timeout: WRITE_TIMEOUT_MS }
+        { maxWait: WRITE_MAX_WAIT_MS, timeout: WRITE_TIMEOUT_MS }
     );
 
     log.info(`${semesterName(semester)} closed: ${cards.length} Report Card(s) dated ${reportDate}`);

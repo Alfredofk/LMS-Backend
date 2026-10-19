@@ -138,6 +138,19 @@ app.use((error, _req, res, _next) => {
         });
     }
 
+    // A transaction that ran past its timeout, or found no pool connection within its
+    // maxWait: Prisma rolled it back, so nothing it would have written was. A bare 500 told
+    // the reader nothing, and trying again is the remedy (grading-and-report-card ticket 05,
+    // owner 2026-10-19).
+    if (error?.code === 'P2028') {
+        log.warn(`Transaction gave up: ${error.meta?.error ?? error.message}`);
+        return res.status(503).json({
+            success: false,
+            data: null,
+            error: { code: 'TIMEOUT', message: 'That took too long and nothing was saved. Try again' },
+        });
+    }
+
     // Log Error
     log.error(error);
     return res.status(500).json({
