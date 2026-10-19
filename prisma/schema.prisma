@@ -20,6 +20,12 @@ generator client {
     provider = "prisma-client-js"
 }
 
+// DATABASE_URL carries options=-c%20plan_cache_mode%3Dforce_custom_plan on every host
+// (grading-and-report-card 05, owner 2026-10-19). Every query holds the tenant filter
+// "schoolId" = $n, and after five runs of a prepared statement Postgres may keep a generic
+// plan that takes each school for an equal share of a table: for a school holding most of
+// Score it read the whole school, 731-837 ms against 2 ms. Without the option nothing fails,
+// it only gets slow; SHOW plan_cache_mode on the app's connection tells.
 datasource db {
     provider = "postgresql"
     url      = env("DATABASE_URL")
@@ -147,6 +153,9 @@ enum ApprovalAction {
     /// of it is finalised (grading-and-report-card 04).
     START_FINALIZING
     STOP_FINALIZING
+    /// The Principal closing a Semester, which writes its Report Cards
+    /// (grading-and-report-card 05).
+    CLOSE_SEMESTER
 }
 
 // ---------------------------------------------------------------------------
@@ -497,6 +506,8 @@ model School {
     slotDescriptions  SlotDescription[]
     homeroomNotes     HomeroomNote[]
     slotFinalisations SlotFinalisation[]
+    reportCards       ReportCard[]
+    reportCardSubjects ReportCardSubject[]
 
     @@index([deactivatedAt])
 }
@@ -606,6 +617,7 @@ model StudentProfile {
     assessmentExceptions AssessmentException[]
     slotDescriptions SlotDescription[]
     homeroomNotes    HomeroomNote[]
+    reportCards      ReportCard[]
 
     @@index([schoolId])
 }
@@ -737,6 +749,7 @@ model Semester {
     homeroomNotes    HomeroomNote[]
     slotFinalisations SlotFinalisation[]
     examWeeks        ExamWeek[]
+    reportCards      ReportCard[]
 
     @@unique([academicYearId, ordinal])
     @@index([schoolId, status])
@@ -760,6 +773,7 @@ model Subject {
     slotGradeSettings SlotGradeSetting[]
     slotDescriptions SlotDescription[]
     slotFinalisations SlotFinalisation[]
+    reportCardSubjects ReportCardSubject[]
 
     @@unique([schoolId, code])
     @@index([schoolId])
@@ -810,6 +824,8 @@ model Class {
     slotGradeSettings SlotGradeSetting[]
     slotDescriptions SlotDescription[]
     slotFinalisations SlotFinalisation[]
+    reportCards      ReportCard[]
+    reportCardSubjects ReportCardSubject[]
 
     @@unique([schoolId, academicYearId, name])
     @@index([schoolId, gradeLevel])
@@ -1735,6 +1751,90 @@ model SlotFinalisation {
 
     @@index([schoolId])
     @@index([semesterId])
+}
+
+/// A Student's Report Card for one Semester (grading-and-report-card 05, owner
+/// 2026-10-13 and 2026-10-19): written when the Principal closes the Semester, in the
+/// close's transaction, and never recomputed. A reopen's next close writes the next
+/// version (ticket 06); the newest counts.
+/// - Written for each Student with a live profile, placed in a Class of the year at
+///   close, who sat in a Class of the year during the Semester.
+/// - The words it shows are copied at close beside the ids - the School, the Student,
+///   the Class, the Homeroom Teacher and the Principal - so a later rename does not
+///   change it, and the same version always prints the same document (ticket 07).
+/// - Append-only in the database: a trigger refuses every UPDATE, and every DELETE
+///   unless the transaction set lms.allow_report_card_delete, which only the test-data
+///   cleanup does.
+model ReportCard {
+    id                  String   @id @default(cuid())
+    schoolId            String
+    semesterId          String
+    studentProfileId    String
+    /// 1 at the first close.
+    version             Int
+    /// The Class the Student was placed in at close.
+    classId             String
+    /// The date the Principal chose for it, a calendar day.
+    reportDate          DateTime
+    schoolName          String
+    studentName         String
+    nisn                String
+    className           String
+    academicYearLabel   String
+    semesterOrdinal     Int
+    /// Null when the Class had no Homeroom Teacher at close.
+    homeroomTeacherName String?
+    homeroomTeacherNip  String?
+    principalName       String
+    principalNip        String?
+    /// Confirmed Sessions of the Semester, any Class, as attendanceCounts counts them.
+    sick                Int
+    excused             Int
+    absent              Int
+    /// The Homeroom Teacher's Note, which closing requires.
+    note                String
+    closedByUserId      String
+    createdAt           DateTime @default(now())
+
+    school         School              @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    semester       Semester            @relation(fields: [semesterId], references: [id], onDelete: Cascade)
+    studentProfile StudentProfile      @relation(fields: [studentProfileId], references: [id], onDelete: Cascade)
+    class          Class               @relation(fields: [classId], references: [id], onDelete: Cascade)
+    subjects       ReportCardSubject[]
+
+    @@unique([semesterId, studentProfileId, version])
+    @@index([schoolId])
+    @@index([classId, semesterId])
+}
+
+/// One Subject on a Report Card: its Final Grade, rounded once (ticket 02), the KKTP and
+/// the Description it was reported with, from the slot that reports the Student - a
+/// mover's last Class's, or an earlier one's for a Subject only it had. Every Subject
+/// on one has a grade: closing refuses while one has none (owner, 2026-10-19).
+/// Append-only, with its Report Card.
+model ReportCardSubject {
+    id           String  @id @default(cuid())
+    schoolId     String
+    reportCardId String
+    subjectId    String
+    /// The Class whose slot reported it.
+    classId      String
+    /// Its place on the Report Card: the national catalog's order, then the school's
+    /// own Subjects by name.
+    position     Int
+    subjectCode  String
+    subjectName  String
+    finalGrade   Int
+    kktp         Int
+    description  String?
+
+    school     School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    reportCard ReportCard @relation(fields: [reportCardId], references: [id], onDelete: Cascade)
+    subject    Subject    @relation(fields: [subjectId], references: [id])
+    class      Class      @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+    @@unique([reportCardId, subjectId])
+    @@index([schoolId])
 }
 
 /// A student moved from one class to another inside the school (ticket 16). The

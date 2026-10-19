@@ -1,7 +1,9 @@
 import { prisma } from '../../shared/prisma.js';
 import { slotSessionWhere } from '../tracking/tracking.service.js';
 import { ownTermsOf, hardEndIn, usedAttemptsOf } from '../assessment/assessment.submission.js';
+import { byName } from '../assessment/assessment.marking.js';
 import { liveFinalisationOf } from './grading.lock.js';
+import { reportCardHoldersOf } from './grading.reporting.js';
 
 // What still stands between a slot and its finalising (grading-and-report-card ticket
 // 04): one list, read from the slot's grade book (grading.grades.js), behind the
@@ -23,6 +25,11 @@ import { liveFinalisationOf } from './grading.lock.js';
 // - A Description is optional (owner, 2026-10-18) and blocks nothing.
 // - A LATIHAN blocks nothing (assessment ticket 08, owner 2026-10-18): the grade book
 //   leaves it out, so an attempt at one may still be in progress at finalising.
+// - A Student the slot reports who gets a Report Card and has no grade - nothing of
+//   theirs counts, or nothing yet - blocks (ticket 05, owner 2026-10-19: a Report Card
+//   never shows a Subject without a grade): one who joined after every Assessment had
+//   closed, say, or a slot with no Assessment. Its Teacher gives them an offline mark.
+//   Closing reads the same blockers, so it refuses too, and never meets a null grade.
 
 // The statuses that count as they are: a Score, or 0 for "did not submit".
 const COUNTED = new Set(['RELEASED', 'DID_NOT_SUBMIT']);
@@ -112,14 +119,33 @@ function pooledBlockersOf(book) {
     }));
 }
 
+// The Students the slot reports who get a Report Card and have no grade, or null. One
+// whose only Assessment still waits is named here and by that Assessment's blocker.
+async function noGradeBlockerOf(book) {
+    const { classSubject, roster, reporting } = book;
+    const reported = roster.studentProfileIds.filter(reporting.isReportedHere);
+    if (reported.length === 0) return null;
+    const holders = await reportCardHoldersOf(classSubject.class.academicYearId, reporting.span, reported);
+    const ungraded = (studentProfileId) => book.gradeOf(studentProfileId).finalGrade === null;
+    const students = reported
+        .filter((studentProfileId) => holders.has(studentProfileId) && ungraded(studentProfileId))
+        .map((studentProfileId) => ({ studentProfileId, fullName: roster.nameOf.get(studentProfileId) ?? null }))
+        .sort(byName);
+    return students.length ? { kind: 'NO_GRADE', students } : null;
+}
+
 // Everything that blocks finalising the slot now, in the order a Teacher would clear
 // it: the Sessions, then the Class's Assessments by opening, then an earlier Class's,
-// each with its words (blockerTextOf). Empty when it may be finalised.
+// then the Students left without a grade, each with its words (blockerTextOf). Empty
+// when it may be finalised.
 async function blockersOf(book) {
     const { classSubject } = book;
-    const sessions = await prisma.session.count({
-        where: { status: 'SCHEDULED', needsCompletion: true, ...slotSessionWhere(classSubject) },
-    });
+    const [sessions, noGrade] = await Promise.all([
+        prisma.session.count({
+            where: { status: 'SCHEDULED', needsCompletion: true, ...slotSessionWhere(classSubject) },
+        }),
+        noGradeBlockerOf(book),
+    ]);
     const own = book.rows
         .filter((row) => row.classSubject.classId === classSubject.classId)
         .map((row) => assessmentBlockerOf(book, row))
@@ -128,6 +154,7 @@ async function blockersOf(book) {
         ...(sessions ? [{ kind: 'SESSIONS_NEED_COMPLETION', sessions }] : []),
         ...own,
         ...pooledBlockersOf(book),
+        ...(noGrade ? [noGrade] : []),
     ];
     return blockers.map(withText);
 }
@@ -155,6 +182,7 @@ function openText(blocker) {
 function blockerTextOf(blocker) {
     if (blocker.kind === 'SESSIONS_NEED_COMPLETION') return `${blocker.sessions} Session(s) need completion`;
     if (blocker.kind === 'NO_TEACHER') return 'no teacher answers for it';
+    if (blocker.kind === 'NO_GRADE') return `no grade for ${namesOf(blocker.students)}: nothing of theirs counts yet`;
     const name = `${blocker.assessment.type} "${blocker.assessment.title}"`;
     if (blocker.kind === 'POOLED') return `${name} in ${blocker.class.name}: waiting for ${namesOf(blocker.students)}`;
     const parts = ASSESSMENT_PARTS.filter(([key]) => blocker[key]).map(([key, text]) => text(blocker[key]));

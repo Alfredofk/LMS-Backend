@@ -11,9 +11,10 @@ import {
     noteParams,
     descriptionsBody,
     notesBody,
+    closeBody,
 } from './grading.schema.js';
 
-// Mounted at /api/grading (grading-and-report-card tickets 01 to 04).
+// Mounted at /api/grading (grading-and-report-card tickets 01 to 05).
 //
 // Grade settings: the school's default Grade Weights and KKTP, and its Remedial Rule,
 // read by its staff and set by the Principal or a Vice Principal; a slot's own
@@ -31,12 +32,20 @@ import {
 // while no slot is finalised - a Vice Principal is told no in the service; a slot's
 // Answering Teacher finalises it and undoes that; the Principal and the Vice
 // Principals read the readiness board, and a Teacher is told no (403).
+//
+// Closing (ticket 05): the Principal closes a Semester, which writes its Report Cards -
+// a Vice Principal is told no in the service. A Student reads their own Report Cards;
+// one Report Card is read by its Student, the Homeroom Teacher of its Class, the
+// Principal and the Vice Principals, and a Class's by the last three; the service
+// answers 404 to anyone else. A Guardian reaches none of them.
 
 const router = Router();
 
 const staff = requireRole('PRINCIPAL', 'VICE_PRINCIPAL', 'TEACHER');
 const principalOrVice = requireRole('PRINCIPAL', 'VICE_PRINCIPAL');
 const slotStaff = requireRoleHidden('PRINCIPAL', 'VICE_PRINCIPAL', 'TEACHER');
+const student = requireRole('STUDENT');
+const reader = requireRole('PRINCIPAL', 'VICE_PRINCIPAL', 'TEACHER', 'STUDENT');
 
 router.use(requireAuth, requireActiveMembership);
 
@@ -103,5 +112,22 @@ router.post(
 router.get('/semesters/:id/readiness', principalOrVice, validate({ params: idParams }), controller.getReadiness);
 router.post('/class-subjects/:id/finalise', slotStaff, validate({ params: idParams }), controller.finalise);
 router.post('/class-subjects/:id/unfinalise', slotStaff, validate({ params: idParams }), controller.unfinalise);
+
+// ---- closing, Report Cards ----
+
+router.post(
+    '/semesters/:id/close',
+    principalOrVice,
+    validate({ params: idParams, body: closeBody }),
+    controller.closeSemester
+);
+router.get('/report-cards/mine', student, controller.getMyReportCards);
+router.get('/report-cards/:id', reader, validate({ params: idParams }), controller.getReportCard);
+router.get(
+    '/classes/:id/semesters/:semesterId/report-cards',
+    slotStaff,
+    validate({ params: noteParams }),
+    controller.getClassReportCards
+);
 
 export default router;

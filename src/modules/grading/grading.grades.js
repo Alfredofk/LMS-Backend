@@ -122,7 +122,7 @@ async function gradeBookOf(auth, classSubject, now = new Date()) {
             return listed ? [{ row, standing }] : [];
         });
 
-    return {
+    const book = {
         classSubject,
         now,
         roster,
@@ -134,6 +134,10 @@ async function gradeBookOf(auth, classSubject, now = new Date()) {
         exceptionOf,
         answerableOf,
     };
+    // One Student's grade, for the blockers (ticket 05's NO_GRADE) and the close, which
+    // freezes it: grading.readiness.js does not import this file.
+    book.gradeOf = (studentProfileId) => gradeOf(book, studentProfileId);
+    return book;
 }
 
 // One Student's grade, where this slot reports them: each type's average and the

@@ -3,6 +3,8 @@ import * as service from './grading.service.js';
 import * as grades from './grading.grades.js';
 import * as texts from './grading.texts.js';
 import * as finalising from './grading.finalising.js';
+import * as closing from './grading.close.js';
+import * as reportCards from './grading.reportCards.js';
 
 // Thin, like the other controllers.
 
@@ -83,6 +85,26 @@ async function unfinalise(req, res) {
     return ok(res, { grades, message: 'Finalising undone.' });
 }
 
+// ---- closing, Report Cards ----
+
+async function closeSemester(req, res) {
+    const closed = await closing.closeSemester(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, { ...closed, message: 'Semester closed.' });
+}
+
+async function getMyReportCards(req, res) {
+    return ok(res, { reportCards: await reportCards.myReportCards(req.auth) });
+}
+
+async function getReportCard(req, res) {
+    return ok(res, { reportCard: await reportCards.readReportCard(req.auth, req.validated.params.id) });
+}
+
+async function getClassReportCards(req, res) {
+    const { id, semesterId } = req.validated.params;
+    return ok(res, await reportCards.classReportCards(req.auth, id, semesterId));
+}
+
 export {
     getSchoolSettings,
     setSchoolSettings,
@@ -98,4 +120,8 @@ export {
     getReadiness,
     finalise,
     unfinalise,
+    closeSemester,
+    getMyReportCards,
+    getReportCard,
+    getClassReportCards,
 };

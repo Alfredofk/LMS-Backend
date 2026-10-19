@@ -241,8 +241,8 @@ async function listAcademicYears() {
 // - A school that ends early shortens the Semester to end today first
 //   (PATCH /semesters/:id, which cancels the Sessions from tomorrow, ticket 09), and
 //   may close the same day.
-// - It stands in for handoff #60's "both Semesters closed" until Semester closing
-//   comes with Report Cards.
+// - It stands beside the rule that every Semester of it is closed first
+//   (assertSemestersClosed).
 async function assertYearOver(schoolId, year) {
     const today = await todayOf(schoolId);
     const running = year.semesters.filter((semester) => toDay(semester.endDate) > today);
@@ -256,15 +256,31 @@ async function assertYearOver(schoolId, year) {
     );
 }
 
+// A year closes only once every Semester of it is CLOSED (owner, 2026-09-26, handoff
+// #60; built with grading-and-report-card 05): closing a Semester writes its Report
+// Cards (grading.close.js), which a closed year no longer takes. The 409 names the
+// first Semester still open or being finalised.
+function assertSemestersClosed(year) {
+    const unclosed = year.semesters.find((semester) => semester.status !== 'CLOSED');
+    if (!unclosed) return;
+    throw conflict(
+        `Semester ${unclosed.ordinal} of ${year.label} is not closed yet (${unclosed.status}); ` +
+            'the Principal closes it first',
+        { semesterId: unclosed.id, status: unclosed.status }
+    );
+}
+
 // ACTIVE -> CLOSED, claimed like every transition here, so closing twice is a
-// conflict. No semester has to be closed first: semester close is two-phase and
-// not built yet (ticket 07 leaves it to its own work). Until then the year's days
-// must be over (assertYearOver).
+// conflict. The year's days must be over (assertYearOver) and every Semester of it
+// closed (assertSemestersClosed).
 async function closeAcademicYear(auth, id) {
     await assertPrincipalOrVice(auth);
     const year = await loadYear(id);
     // Closing twice stays the claim's 409 below.
-    if (year.status === 'ACTIVE') await assertYearOver(auth.schoolId, year);
+    if (year.status === 'ACTIVE') {
+        await assertYearOver(auth.schoolId, year);
+        assertSemestersClosed(year);
+    }
 
     const claimed = await prisma.academicYear.updateMany({
         where: { id, status: 'ACTIVE' },

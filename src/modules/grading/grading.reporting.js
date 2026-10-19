@@ -14,6 +14,11 @@ import { slotSettingsOf } from './grading.service.js';
 // - The KKTP the cap reads is that slot's too, so the after-rule Score a Student is
 //   shown is the one their grade counts.
 // - The grade view of an earlier Class shows them reported by the last, with no grade.
+// - Who gets a Report Card (ticket 05, owner 2026-10-19): a Student with a live
+//   profile, placed in a Class of the year now, who sat in a Class of the year at some
+//   time during the Semester. One who joined after it ended gets none, and their Note
+//   is not asked for. Closing, the readiness board's Notes, the Homeroom Teacher's Notes
+//   and the slot's NO_GRADE blocker all read it here.
 
 const overlaps = (span, { start, end }) => span.startedAt < end && (span.endedAt === null || span.endedAt > start);
 
@@ -96,4 +101,24 @@ async function remedialTermsOf(auth, studentProfileId, semester, subjectIds) {
     return new Map(found.filter(Boolean));
 }
 
-export { semesterPlacementsOf, reportingClassOf, slotReportingOf, remedialTermsOf };
+// The Students who get a Report Card for a Semester of this year, given its span
+// (semesterSpan), each with the Class they are placed in now: the Class at close.
+// Among the Students named, or every one of the school's; read through the client
+// given, so a close reads it again inside its transaction.
+async function reportCardHoldersOf(academicYearId, span, studentProfileIds = null, client = prisma) {
+    const rows = await client.classMembership.findMany({
+        where: {
+            class: { academicYearId },
+            studentProfile: { endedAt: null },
+            ...(studentProfileIds ? { studentProfileId: { in: studentProfileIds } } : {}),
+        },
+        select: { classId: true, studentProfileId: true, startedAt: true, endedAt: true },
+    });
+    const satDuring = new Set(rows.filter((row) => overlaps(row, span)).map((row) => row.studentProfileId));
+    return new Map(
+        rows.filter((row) => row.endedAt === null && satDuring.has(row.studentProfileId))
+            .map((row) => [row.studentProfileId, row.classId])
+    );
+}
+
+export { semesterPlacementsOf, reportingClassOf, slotReportingOf, remedialTermsOf, reportCardHoldersOf };

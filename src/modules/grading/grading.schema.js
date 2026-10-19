@@ -97,6 +97,23 @@ const descriptionsBody = z.strictObject({ descriptions: textRows(clearable, 'des
 
 const notesBody = z.strictObject({ notes: textRows(clearable, 'note') });
 
+// ---- closing (ticket 05) ----
+
+// A calendar day, 'YYYY-MM-DD'. A date that does not exist is refused, not rolled over
+// (the same check as holidays.schema.js).
+const realDay = (value) => {
+    const parsed = new Date(`${value}T00:00:00Z`);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+};
+const day = z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use the form YYYY-MM-DD')
+    .refine(realDay, 'That date does not exist');
+
+// The date the Principal gives the Report Cards; whether it fits the Semester is the
+// service's call.
+const closeBody = z.strictObject({ reportDate: day });
+
 export {
     idParams,
     schoolSettingsBody,
@@ -105,4 +122,5 @@ export {
     noteParams,
     descriptionsBody,
     notesBody,
+    closeBody,
 };

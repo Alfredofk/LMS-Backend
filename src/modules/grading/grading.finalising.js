@@ -8,7 +8,7 @@ import { byName } from '../assessment/assessment.marking.js';
 import { classSubjectSelect, describe, loadForStaff } from './grading.service.js';
 import { gradeBookOf, slotGrades } from './grading.grades.js';
 import { blockersOf, withText, finalisedView } from './grading.readiness.js';
-import { placedNowIn } from './grading.texts.js';
+import { notedIn } from './grading.texts.js';
 import { LIVE_FINALISATION, slotOf, liveFinalisationOf } from './grading.lock.js';
 
 const log = createLogger('Grading');
@@ -34,16 +34,27 @@ const log = createLogger('Grading');
 //   Teacher left with no successor too: the board shows it with no teacher until the
 //   leaders name one.
 // - The Homeroom Teacher's Note is required (owner, 2026-10-18): the board names, per
-//   Class, the Students placed in it now who have none. It blocks no slot; closing
-//   waits for it (ticket 05).
+//   Class, the Students placed in it now who get a Report Card and have none (ticket 05).
+//   It blocks no slot; closing waits for it (grading.close.js).
+// - The board reads a few slots at a time (ticket 05, measured 2026-10-19), as closing
+//   does.
 
-// Starting and stopping are audited against the Semester.
+// Starting, stopping and closing are audited against the Semester.
 const SEMESTER_SUBJECT = 'Semester';
+
+// How many slots the board and the close read at once (ticket 05, owner 2026-10-19).
+// Measured on 450 slots: 24.8 s one at a time, 13.6 s four at a time, 12.4 s eight at a
+// time - and eight held eight of the pool's nine connections, leaving every other
+// request waiting.
+const SLOTS_AT_ONCE = 4;
 
 const semesterSelect = {
     id: true,
     ordinal: true,
     status: true,
+    // The span, for who gets a Report Card (ticket 05).
+    startDate: true,
+    endDate: true,
     academicYearId: true,
     academicYear: { select: { label: true, status: true } },
 };
@@ -57,6 +68,21 @@ const semesterView = (semester) => ({
 
 // 'Semester 1 of 2026/2027', for messages and log lines.
 const semesterName = (semester) => `Semester ${semester.ordinal} of ${semester.academicYear.label}`;
+
+// fn over every item, at most `width` at a time, its answers in the items' order.
+async function mapAtMost(items, width, fn) {
+    const answers = new Array(items.length);
+    let next = 0;
+    const worker = async () => {
+        while (next < items.length) {
+            const index = next;
+            next += 1;
+            answers[index] = await fn(items[index]);
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(width, items.length) }, worker));
+    return answers;
+}
 
 // ---------------------------------------------------------------------------
 // Access
@@ -209,8 +235,10 @@ async function finalise(auth, id) {
 }
 
 // The Answering Teacher undoes the slot's finalising while the Semester is not CLOSED:
-// the row stays, undone, and the slot is open to change again. Answers with the
-// slot's grades.
+// the row stays, undone, and the slot is open to change again. A slot is finalised only
+// while its Semester is FINALIZING, so that is claimed in the same transaction: a close
+// at the same moment (grading.close.js) either finds the slot undone or wins, and this
+// is refused. Answers with the slot's grades.
 async function unfinalise(auth, id) {
     const classSubject = await loadForFinalising(
         auth,
@@ -218,15 +246,21 @@ async function unfinalise(auth, id) {
         'Only the teacher of this class subject undoes its finalising'
     );
     const { semester } = classSubject;
-    if (semester.status === 'CLOSED') {
-        throw conflict(`Semester ${semester.ordinal} is closed; its class subjects stay finalised`);
-    }
+    const closed = () => conflict(`Semester ${semester.ordinal} is closed; its class subjects stay finalised`);
+    if (semester.status === 'CLOSED') throw closed();
 
-    const claimed = await prisma.slotFinalisation.updateMany({
-        where: { ...slotOf(classSubject), ...LIVE_FINALISATION },
-        data: { undoneAt: new Date(), undoneByUserId: auth.userId },
+    await prisma.$transaction(async (tx) => {
+        const finalizing = await tx.semester.updateMany({
+            where: { id: classSubject.semesterId, status: 'FINALIZING' },
+            data: { updatedAt: new Date() },
+        });
+        if (finalizing.count === 0) throw closed();
+        const claimed = await tx.slotFinalisation.updateMany({
+            where: { ...slotOf(classSubject), ...LIVE_FINALISATION },
+            data: { undoneAt: new Date(), undoneByUserId: auth.userId },
+        });
+        if (claimed.count === 0) throw conflict(`${describe(classSubject)} is not finalised`);
     });
-    if (claimed.count === 0) throw conflict(`${describe(classSubject)} is not finalised`);
 
     log.info(`${describe(classSubject)}: finalising undone`);
     return slotGrades(auth, classSubject.id);
@@ -237,8 +271,8 @@ async function unfinalise(auth, id) {
 // ---------------------------------------------------------------------------
 
 // One ClassSubject per slot of the Semester: the live one, else the one that ended
-// last - a slot whose Teacher left with no successor.
-function slotsOf(classSubjects) {
+// last - a slot whose Teacher left with no successor. By Class, then Subject.
+function orderedSlotsOf(classSubjects) {
     const bySlot = new Map();
     for (const row of classSubjects) {
         const key = `${row.classId}:${row.subjectId}`;
@@ -246,7 +280,9 @@ function slotsOf(classSubjects) {
         const better = !held || (held.endedAt !== null && (row.endedAt === null || row.endedAt > held.endedAt));
         if (better) bySlot.set(key, row);
     }
-    return [...bySlot.values()];
+    return [...bySlot.values()].sort(
+        (a, b) => a.class.name.localeCompare(b.class.name) || a.subject.code.localeCompare(b.subject.code)
+    );
 }
 
 // One slot on the board: its Teacher, whether it is finalised, and what blocks it -
@@ -268,10 +304,11 @@ async function slotOnBoard(auth, classSubject, nameOf) {
     };
 }
 
-// One Class's Notes for the Semester: the Students placed in it now, and the ones of
-// them with no Note - none written, or cleared (owner, 2026-10-18).
-async function notesOnBoard(semester, homeroom) {
-    const placed = await placedNowIn(homeroom.id);
+// One Class's Notes for the Semester: the Students placed in it now who get a Report
+// Card (ticket 05), and the ones of them with no Note - none written, or cleared (owner,
+// 2026-10-18).
+async function notesOnBoard(auth, semester, homeroom) {
+    const placed = await notedIn(auth, homeroom, semester);
     const written = await prisma.homeroomNote.findMany({
         where: { semesterId: semester.id, studentProfileId: { in: [...placed.keys()] }, text: { not: null } },
         select: { studentProfileId: true },
@@ -292,7 +329,7 @@ async function notesOnBoard(semester, homeroom) {
 
 // The readiness board, for the Principal and the Vice Principals: every slot of the
 // Semester - finalised (by whom, when) or not, with what blocks it - and each Class of
-// its year with the Notes still missing. Computed live, one slot at a time.
+// its year with the Notes still missing. Computed live, a few slots at a time.
 async function readinessBoard(auth, id) {
     await assertPrincipalOrVice(auth);
     const semester = await loadSemester(id);
@@ -306,6 +343,7 @@ async function readinessBoard(auth, id) {
             select: {
                 id: true,
                 name: true,
+                academicYearId: true,
                 homeroomTeacher: { select: { id: true, user: { select: { fullName: true } } } },
             },
             orderBy: { name: 'asc' },
@@ -317,13 +355,10 @@ async function readinessBoard(auth, id) {
     });
     const nameOf = new Map(teachers.map((row) => [row.id, row.user.fullName]));
 
-    const slots = [];
-    const ordered = slotsOf(classSubjects).sort(
-        (a, b) => a.class.name.localeCompare(b.class.name) || a.subject.code.localeCompare(b.subject.code)
+    const slots = await mapAtMost(orderedSlotsOf(classSubjects), SLOTS_AT_ONCE, (classSubject) =>
+        slotOnBoard(auth, classSubject, nameOf)
     );
-    for (const classSubject of ordered) slots.push(await slotOnBoard(auth, classSubject, nameOf));
-    const notes = [];
-    for (const homeroom of classes) notes.push(await notesOnBoard(semester, homeroom));
+    const notes = await mapAtMost(classes, SLOTS_AT_ONCE, (homeroom) => notesOnBoard(auth, semester, homeroom));
 
     return {
         semester: semesterView(semester),
@@ -337,4 +372,19 @@ async function readinessBoard(auth, id) {
     };
 }
 
-export { startFinalising, stopFinalising, finalise, unfinalise, readinessBoard };
+export {
+    SEMESTER_SUBJECT,
+    SLOTS_AT_ONCE,
+    mapAtMost,
+    loadSemester,
+    assertYearActive,
+    assertPrincipal,
+    semesterName,
+    semesterView,
+    orderedSlotsOf,
+    startFinalising,
+    stopFinalising,
+    finalise,
+    unfinalise,
+    readinessBoard,
+};

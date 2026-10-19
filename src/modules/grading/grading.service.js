@@ -66,7 +66,8 @@ const classSubjectSelect = {
     subjectId: true,
     semesterId: true,
     teacherMembershipId: true,
-    class: { select: { name: true, academicYear: { select: { label: true, status: true } } } },
+    // The year for who gets a Report Card (ticket 05).
+    class: { select: { name: true, academicYearId: true, academicYear: { select: { label: true, status: true } } } },
     subject: { select: { code: true, name: true } },
     // The dates for the slot's roster and span (ticket 02).
     semester: { select: { ordinal: true, status: true, startDate: true, endDate: true } },

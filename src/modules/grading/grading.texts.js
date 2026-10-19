@@ -2,10 +2,11 @@ import { prisma } from '../../shared/prisma.js';
 import { isPrincipalOrVice, isHomeroomOf } from '../../shared/guards.js';
 import { badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
+import { semesterSpan } from '../sessions/sessions.service.js';
 import { rosterOf } from '../tracking/tracking.service.js';
 import { byName } from '../assessment/assessment.marking.js';
 import { describe, loadManaged, slotKeyOf } from './grading.service.js';
-import { slotReportingOf } from './grading.reporting.js';
+import { slotReportingOf, reportCardHoldersOf } from './grading.reporting.js';
 
 const log = createLogger('Grading');
 
@@ -28,7 +29,9 @@ const log = createLogger('Grading');
 //   Class the Student is placed in now, so a mover's is their new Class's. Required
 //   since 2026-10-18 (owner: the Homeroom Teacher gives each Student advice): the
 //   readiness board (ticket 04) names the missing ones, and closing waits for them.
-//   Clearing one nulls its text, and the row stays, missing again.
+//   Clearing one nulls its text, and the row stays, missing again. It is written only
+//   for a Student who gets a Report Card for the Semester (ticket 05, owner
+//   2026-10-19), so one who joined after it ended is neither listed nor asked for one.
 // - Both are plain text of at most 1,000 characters (the schema's), and neither is
 //   audited: the row says who wrote it last.
 // - Both are written in bulk, many Students in one request, all of them or none. Each
@@ -205,7 +208,7 @@ async function loadNotes(auth, classId, semesterId) {
         prisma.class.findFirst({ where: { id: classId }, select: noteClassSelect }),
         prisma.semester.findFirst({
             where: { id: semesterId },
-            select: { id: true, ordinal: true, status: true, academicYearId: true },
+            select: { id: true, ordinal: true, status: true, academicYearId: true, startDate: true, endDate: true },
         }),
     ]);
     if (!homeroom) throw notFound('Class not found');
@@ -229,17 +232,27 @@ async function placedNowIn(classId) {
     return new Map(rows.map((row) => [row.studentProfileId, row.studentProfile.membership.user.fullName]));
 }
 
+// Of the Students placed in a Class now (placedNowIn), the ones who get a Report Card
+// for this Semester of its year (grading.reporting.js), by name: whose Notes it writes,
+// and whose missing Notes the readiness board names and closing waits for. The
+// semester is read with its dates.
+async function notedIn(auth, homeroom, semester) {
+    const [placed, span] = await Promise.all([placedNowIn(homeroom.id), semesterSpan(auth.schoolId, semester)]);
+    const holders = await reportCardHoldersOf(homeroom.academicYearId, span, [...placed.keys()]);
+    return new Map([...placed].filter(([studentProfileId]) => holders.has(studentProfileId)));
+}
+
 const notesWhere = (semester, studentProfileIds) => ({
     semesterId: semester.id,
     studentProfileId: { in: studentProfileIds },
 });
 
-// The Notes of the Students placed in the Class now, for one Semester of its year: for
-// its Homeroom Teacher, the Principal and the Vice Principals. A Student who moved out
-// is listed in their new Class's.
+// The Notes of the Students placed in the Class now who get a Report Card for one
+// Semester of its year: for its Homeroom Teacher, the Principal and the Vice
+// Principals. A Student who moved out is listed in their new Class's.
 async function readNotes(auth, classId, semesterId) {
     const { homeroom, semester } = await loadNotes(auth, classId, semesterId);
-    const placed = await placedNowIn(homeroom.id);
+    const placed = await notedIn(auth, homeroom, semester);
     const stored = await prisma.homeroomNote.findMany({
         where: notesWhere(semester, [...placed.keys()]),
         select: textSelect,
@@ -262,9 +275,10 @@ async function readNotes(auth, classId, semesterId) {
 // The Homeroom Teacher writes the Notes of Students placed in their Class now, many at
 // once; null or an empty text clears one. The Principal or a Vice Principal is told no
 // (403), anyone else gets 404. A Student not placed there now refuses the whole request
-// with 400, naming each: their own Class's Homeroom Teacher writes theirs. A CLOSED
-// Semester or a closed year refuses it with 409. Answers the named Students' Notes as
-// they now are.
+// with 400, naming each: their own Class's Homeroom Teacher writes theirs. So does one
+// placed there who gets no Report Card for the Semester, having joined after it ended.
+// A CLOSED Semester or a closed year refuses it with 409. Answers the named Students'
+// Notes as they now are.
 async function writeNotes(auth, classId, semesterId, { notes }) {
     const { homeroom, semester, standing } = await loadNotes(auth, classId, semesterId);
     if (standing !== 'writer') throw forbidden(`Only the Homeroom Teacher of ${homeroom.name} writes its notes`);
@@ -274,8 +288,17 @@ async function writeNotes(auth, classId, semesterId, { notes }) {
     const { academicYear } = homeroom;
     if (academicYear.status !== 'ACTIVE') throw conflict(`Academic year ${academicYear.label} is closed`);
 
-    const placed = await placedNowIn(homeroom.id);
+    const placed = await notedIn(auth, homeroom, semester);
     const outside = notes.map((row) => row.studentProfileId).filter((found) => !placed.has(found));
+    const placedNow = outside.length ? await placedNowIn(homeroom.id) : new Map();
+    const joinedAfter = outside.filter((found) => placedNow.has(found));
+    if (joinedAfter.length) {
+        throw badRequest(
+            `No Report Card for Semester ${semester.ordinal} for ${namesOf(joinedAfter, placedNow)}: ` +
+                'placed after it ended, so no note is written',
+            { studentProfileIds: joinedAfter }
+        );
+    }
     if (outside.length) {
         const profiles = await prisma.studentProfile.findMany({
             where: { id: { in: outside } },
@@ -302,4 +325,4 @@ async function writeNotes(auth, classId, semesterId, { notes }) {
     return storedRowsOf('homeroomNote', { semesterId: semester.id }, notes);
 }
 
-export { descriptionsOf, writeDescriptions, placedNowIn, readNotes, writeNotes };
+export { descriptionsOf, writeDescriptions, notedIn, readNotes, writeNotes };
