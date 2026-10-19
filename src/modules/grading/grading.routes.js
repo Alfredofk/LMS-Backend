@@ -12,9 +12,10 @@ import {
     descriptionsBody,
     notesBody,
     closeBody,
+    reopenBody,
 } from './grading.schema.js';
 
-// Mounted at /api/grading (grading-and-report-card tickets 01 to 05).
+// Mounted at /api/grading (grading-and-report-card tickets 01 to 06).
 //
 // Grade settings: the school's default Grade Weights and KKTP, and its Remedial Rule,
 // read by its staff and set by the Principal or a Vice Principal; a slot's own
@@ -38,6 +39,10 @@ import {
 // one Report Card is read by its Student, the Homeroom Teacher of its Class, the
 // Principal and the Vice Principals, and a Class's by the last three; the service
 // answers 404 to anyone else. A Guardian reaches none of them.
+//
+// Reopening (ticket 06): the Principal takes a closed Semester back to finalising, with
+// a reason - a Vice Principal is told no in the service. The staff's reads of a Report
+// Card name every version they may open; a Student reads only the newest.
 
 const router = Router();
 
@@ -120,6 +125,12 @@ router.post(
     principalOrVice,
     validate({ params: idParams, body: closeBody }),
     controller.closeSemester
+);
+router.post(
+    '/semesters/:id/reopen',
+    principalOrVice,
+    validate({ params: idParams, body: reopenBody }),
+    controller.reopenSemester
 );
 router.get('/report-cards/mine', student, controller.getMyReportCards);
 router.get('/report-cards/:id', reader, validate({ params: idParams }), controller.getReportCard);

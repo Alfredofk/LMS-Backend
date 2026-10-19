@@ -4,6 +4,7 @@ import * as grades from './grading.grades.js';
 import * as texts from './grading.texts.js';
 import * as finalising from './grading.finalising.js';
 import * as closing from './grading.close.js';
+import * as reopening from './grading.reopen.js';
 import * as reportCards from './grading.reportCards.js';
 
 // Thin, like the other controllers.
@@ -92,6 +93,11 @@ async function closeSemester(req, res) {
     return ok(res, { ...closed, message: 'Semester closed.' });
 }
 
+async function reopenSemester(req, res) {
+    const reopened = await reopening.reopenSemester(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, { ...reopened, message: 'Semester reopened.' });
+}
+
 async function getMyReportCards(req, res) {
     return ok(res, { reportCards: await reportCards.myReportCards(req.auth) });
 }
@@ -121,6 +127,7 @@ export {
     finalise,
     unfinalise,
     closeSemester,
+    reopenSemester,
     getMyReportCards,
     getReportCard,
     getClassReportCards,

@@ -1,5 +1,5 @@
 import { prisma } from '../../shared/prisma.js';
-import { isPrincipalOrVice, isHomeroomOf } from '../../shared/guards.js';
+import { isPrincipalOrVice } from '../../shared/guards.js';
 import { notFound } from '../../shared/errors.js';
 import { toDay } from '../holidays/holidays.calendar.js';
 
@@ -15,8 +15,10 @@ import { toDay } from '../holidays/holidays.calendar.js';
 //   every one.
 // - A Guardian reads none yet (the guardian-view spec).
 // - Anyone else, another school's member included, gets the same 404 as a missing one.
-// - Ticket 06 writes later versions; the staff will read those, a Student only the
-//   newest.
+// - After a reopen (ticket 06) the next close writes a new version. A Student reads only
+//   the newest; the staff read the earlier ones too, and their views name every version
+//   they may open (owner, 2026-10-19). A version is in the Class it was closed in, so a
+//   Student who moved Class between two closes is listed in their newest version's Class.
 
 const NOT_FOUND = 'Report card not found';
 
@@ -80,6 +82,23 @@ const reportCardView = (row) => ({
     note: row.note,
 });
 
+const versionSelect = {
+    id: true,
+    studentProfileId: true,
+    classId: true,
+    version: true,
+    reportDate: true,
+    createdAt: true,
+};
+
+// One version as a staff reader's list names it.
+const versionView = (row) => ({
+    id: row.id,
+    version: row.version,
+    reportDate: toDay(row.reportDate),
+    writtenAt: row.createdAt,
+});
+
 // Of these rows, the newest version of each Student's Report Card for each Semester.
 function newestOf(rows) {
     const newest = new Map();
@@ -90,12 +109,34 @@ function newestOf(rows) {
     return [...newest.values()];
 }
 
+// Of these rows, one Semester's, every version of a Student's Report Card that the
+// reader opens, the oldest first.
+const versionsOf = (rows, studentProfileId, opens) =>
+    rows
+        .filter((row) => row.studentProfileId === studentProfileId && opens(row))
+        .sort((a, b) => a.version - b.version)
+        .map(versionView);
+
 // The caller's own live Student profile, or null.
 const ownProfileOf = (auth) =>
     prisma.studentProfile.findFirst({
         where: { membershipId: auth.membershipId, endedAt: null },
         select: { id: true },
     });
+
+// Which Report Cards a staff reader opens, as a test on a row's classId: every one for
+// the Principal and the Vice Principals, those of the Classes a Homeroom Teacher leads.
+// Null for anyone else.
+async function staffOpenerOf(auth) {
+    if (await isPrincipalOrVice(auth.membershipId)) return () => true;
+    const led = await prisma.class.findMany({
+        where: { homeroomTeacherMembershipId: auth.membershipId },
+        select: { id: true },
+    });
+    if (led.length === 0) return null;
+    const classIds = new Set(led.map((row) => row.id));
+    return (row) => classIds.has(row.classId);
+}
 
 // ---------------------------------------------------------------------------
 // Reading
@@ -116,12 +157,19 @@ async function myReportCards(auth) {
 }
 
 // One Report Card: for its Student - the newest of theirs only - the Homeroom Teacher
-// of its Class, the Principal and the Vice Principals; anyone else gets 404.
+// of its Class, the Principal and the Vice Principals; anyone else gets 404. The staff's
+// view names every version of it they may open (ticket 06).
 async function readReportCard(auth, id) {
     const row = await prisma.reportCard.findFirst({ where: { id }, select: reportCardSelect });
     if (!row) throw notFound(NOT_FOUND);
-    if (await isPrincipalOrVice(auth.membershipId)) return reportCardView(row);
-    if (await isHomeroomOf(auth.membershipId, row.classId)) return reportCardView(row);
+    const opens = await staffOpenerOf(auth);
+    if (opens?.(row)) {
+        const versions = await prisma.reportCard.findMany({
+            where: { semesterId: row.semesterId, studentProfileId: row.studentProfileId },
+            select: versionSelect,
+        });
+        return { ...reportCardView(row), versions: versionsOf(versions, row.studentProfileId, opens) };
+    }
 
     const profile = await ownProfileOf(auth);
     if (profile?.id !== row.studentProfileId) throw notFound(NOT_FOUND);
@@ -133,8 +181,10 @@ async function readReportCard(auth, id) {
 }
 
 // The Report Cards of a Class for one Semester of its year - the newest of each Student
-// placed in it at close, by name - for its Homeroom Teacher, the Principal and the Vice
-// Principals. Anyone else, and a Semester of another year, gets 404.
+// whose newest was closed in it, by name, each naming its versions - for its Homeroom
+// Teacher, the Principal and the Vice Principals. Anyone else, and a Semester of another
+// year, gets 404. One who moved to another Class before a later close is listed there
+// (ticket 06, owner 2026-10-19), not here with an older version.
 async function classReportCards(auth, classId, semesterId) {
     const [homeroom, semester] = await Promise.all([
         prisma.class.findFirst({
@@ -147,13 +197,17 @@ async function classReportCards(auth, classId, semesterId) {
         }),
     ]);
     if (!homeroom) throw notFound('Class not found');
-    const reads =
-        (await isHomeroomOf(auth.membershipId, homeroom.id)) || (await isPrincipalOrVice(auth.membershipId));
-    if (!reads) throw notFound('Class not found');
+    const opens = await staffOpenerOf(auth);
+    if (!opens?.({ classId: homeroom.id })) throw notFound('Class not found');
     if (!semester || semester.academicYearId !== homeroom.academicYearId) throw notFound('Semester not found');
 
-    const rows = await prisma.reportCard.findMany({
+    const closedHere = await prisma.reportCard.findMany({
         where: { classId: homeroom.id, semesterId: semester.id },
+        select: { studentProfileId: true },
+        distinct: ['studentProfileId'],
+    });
+    const rows = await prisma.reportCard.findMany({
+        where: { semesterId: semester.id, studentProfileId: { in: closedHere.map((row) => row.studentProfileId) } },
         select: reportCardSelect,
     });
     return {
@@ -161,8 +215,9 @@ async function classReportCards(auth, classId, semesterId) {
         academicYear: homeroom.academicYear.label,
         semester: { id: semester.id, ordinal: semester.ordinal, status: semester.status },
         reportCards: newestOf(rows)
+            .filter((row) => row.classId === homeroom.id)
             .sort((a, b) => a.studentName.localeCompare(b.studentName))
-            .map(reportCardView),
+            .map((row) => ({ ...reportCardView(row), versions: versionsOf(rows, row.studentProfileId, opens) })),
     };
 }
 

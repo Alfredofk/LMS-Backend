@@ -114,6 +114,16 @@ const day = z
 // service's call.
 const closeBody = z.strictObject({ reportDate: day });
 
+// ---- reopening (ticket 06) ----
+
+// Why the Principal reopens, required, and the slots unfinalised at once, named by any
+// ClassSubject of each - none at all to fix a Note only. Whether they are the Semester's
+// is the service's call.
+const reopenBody = z.strictObject({
+    reason: z.string().trim().min(1, 'Give the reason for reopening').max(500, 'At most 500 characters'),
+    classSubjectIds: z.array(z.string().min(1)).max(500, 'At most 500 class subjects at once'),
+});
+
 export {
     idParams,
     schoolSettingsBody,
@@ -123,4 +133,5 @@ export {
     descriptionsBody,
     notesBody,
     closeBody,
+    reopenBody,
 };

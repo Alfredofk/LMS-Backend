@@ -54,6 +54,10 @@ const log = createLogger('Grading');
 // - The transaction plans the default way, waits up to 10 s for a connection and runs up
 //   to 60 s (owner, 2026-10-19, after measuring it): past either, Prisma rolls it back and
 //   server.js answers 503.
+// - Closing again after a reopen (ticket 06, grading.reopen.js) is a close like the first:
+//   everything is read as it is then - the Class, its Homeroom Teacher, the Principal - and
+//   every Student who gets one gets the next version, so a version names one close (owner,
+//   2026-10-19). The earlier versions stay as they were.
 
 // The national catalog's Subjects in the order it was written in (migration
 // _national_subject_catalog), the order a Report Card lists them (owner, 2026-10-19).
@@ -250,7 +254,8 @@ function positionsOf(subjects) {
 const nipOf = (membership) => membership?.teacherProfile?.nip ?? null;
 
 // The rows a close writes - a Report Card per Student who gets one, and a line per
-// Subject on it - with the names they show copied as they read now.
+// Subject on it - with the names they show copied as they read now. The version is
+// given inside the transaction (nextVersionOf).
 async function reportCardRowsOf(auth, semester, reportDate, read) {
     const studentProfileIds = [...read.holders.keys()];
     const [school, principal, students, classes, subjects, attendance] = await Promise.all([
@@ -291,8 +296,6 @@ async function reportCardRowsOf(auth, semester, reportDate, read) {
         return {
             semesterId: semester.id,
             studentProfileId,
-            // The first close's; a reopen's next close writes the next (ticket 06).
-            version: 1,
             classId,
             reportDate: toDate(reportDate),
             schoolName: school.name,
@@ -319,6 +322,17 @@ async function reportCardRowsOf(auth, semester, reportDate, read) {
         subjectName: subjectOf.get(line.subjectId).name,
     }));
     return { cards, lines };
+}
+
+// The version a close writes, read inside its transaction after the Semester is claimed,
+// so no other close runs meanwhile: 1 at the first, and after a reopen (ticket 06) the
+// next for every Student, whatever version each had.
+async function nextVersionOf(tx, semester) {
+    const { _max } = await tx.reportCard.aggregate({
+        where: { semesterId: semester.id },
+        _max: { version: true },
+    });
+    return (_max.version ?? 0) + 1;
 }
 
 // Inside the close's transaction, after the Semester is claimed: refuses (409) a close
@@ -360,7 +374,7 @@ async function assertUnchanged(tx, semester, read) {
 // Report Cards; a Vice Principal is told no (403). Refused with 409 while a slot is not
 // finalised, something blocks one, or a Note is missing, naming all of it; with 400 for
 // a date out of range. Writes every Report Card, the Semester CLOSED and the audit in
-// one transaction. Answers with the Semester and how many were written.
+// one transaction. Answers with the Semester, the version written and how many.
 async function closeSemester(auth, id, { reportDate }) {
     await assertPrincipal(auth, 'closes a semester');
     const semester = await loadSemester(id);
@@ -379,7 +393,7 @@ async function closeSemester(auth, id, { reportDate }) {
     await assertClosable(semester, read);
     const { cards, lines } = await reportCardRowsOf(auth, semester, reportDate, read);
 
-    await prisma.$transaction(
+    const version = await prisma.$transaction(
         async (tx) => {
             // The connection plans every statement with its own values (DATABASE_URL's
             // plan_cache_mode = force_custom_plan, ticket 05), the foreign key checks Postgres
@@ -394,8 +408,9 @@ async function closeSemester(auth, id, { reportDate }) {
             if (claimed.count === 0) throw conflict(`${semesterName(semester)} is no longer being finalised`);
             await assertUnchanged(tx, semester, read);
 
+            const next = await nextVersionOf(tx, semester);
             const written = await tx.reportCard.createManyAndReturn({
-                data: cards,
+                data: cards.map((card) => ({ ...card, version: next })),
                 select: { id: true, studentProfileId: true },
             });
             const cardOf = new Map(written.map((row) => [row.studentProfileId, row.id]));
@@ -411,15 +426,18 @@ async function closeSemester(auth, id, { reportDate }) {
                 subjectId: semester.id,
                 action: 'CLOSE_SEMESTER',
                 actorUserId: auth.userId,
-                reason: `Report Cards dated ${reportDate}: ${cards.length} written`,
+                reason: `Report Cards dated ${reportDate}: ${cards.length} written, version ${next}`,
                 client: tx,
             });
+            return next;
         },
         { maxWait: WRITE_MAX_WAIT_MS, timeout: WRITE_TIMEOUT_MS }
     );
 
-    log.info(`${semesterName(semester)} closed: ${cards.length} Report Card(s) dated ${reportDate}`);
-    return { semester: semesterView(await loadSemester(id)), reportDate, reportCards: cards.length };
+    log.info(
+        `${semesterName(semester)} closed: version ${version}, ${cards.length} Report Card(s) dated ${reportDate}`
+    );
+    return { semester: semesterView(await loadSemester(id)), reportDate, version, reportCards: cards.length };
 }
 
-export { closeSemester };
+export { slotRef, closeSemester };

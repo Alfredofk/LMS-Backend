@@ -24,7 +24,9 @@ const log = createLogger('Grading');
 //   new teaching assignment but the leaders' override or replace naming a successor,
 //   and the Semester's dates and timetables are fixed: the checks that take only OPEN
 //   already say so. The Principal steps back to OPEN while no slot is finalised - to
-//   shorten the Semester, say. Both steps are audited against the Semester.
+//   shorten the Semester, say. Both steps are audited against the Semester. One that has
+//   Report Cards - closed once, and reopened (ticket 06) - never goes back to OPEN
+//   (owner, 2026-10-19): it closes again.
 // - A slot - Class x Subject x Semester - is finalised by its Answering Teacher, the
 //   successor too, only while the Semester is FINALIZING and nothing blocks it; a
 //   reader is told no (403), anyone else 404. It keeps the settings it was finalised
@@ -151,7 +153,8 @@ async function startFinalising(auth, id) {
 // FINALIZING -> OPEN, by the Principal, while no slot of it is finalised (owner,
 // 2026-10-18): its Teachers undo theirs first. The Semester is claimed first, so a
 // slot finalised at the same moment either lands before - and is counted - or finds
-// the Semester open and is refused.
+// the Semester open and is refused. Refused too (409) once it has Report Cards: a
+// reopened Semester closes again (ticket 06).
 async function stopFinalising(auth, id) {
     await assertPrincipal(auth, 'stops finalising a semester');
     const semester = await loadSemester(id);
@@ -163,6 +166,9 @@ async function stopFinalising(auth, id) {
             data: { status: 'OPEN' },
         });
         if (claimed.count === 0) throw conflict(`${semesterName(semester)} is not being finalised`);
+        if (await tx.reportCard.count({ where: { semesterId: semester.id } })) {
+            throw conflict(`${semesterName(semester)} was closed and reopened; it closes again rather than opening`);
+        }
         const finalised = await tx.slotFinalisation.count({ where: { semesterId: semester.id, ...LIVE_FINALISATION } });
         if (finalised > 0) {
             throw conflict(

@@ -156,6 +156,10 @@ enum ApprovalAction {
     /// The Principal closing a Semester, which writes its Report Cards
     /// (grading-and-report-card 05).
     CLOSE_SEMESTER
+    /// The Principal taking a CLOSED Semester back to FINALIZING, with a reason: one row
+    /// against the Semester, and one against each SlotFinalisation it undoes
+    /// (grading-and-report-card 06).
+    REOPEN_SEMESTER
 }
 
 // ---------------------------------------------------------------------------
