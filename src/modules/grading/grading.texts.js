@@ -187,6 +187,8 @@ const OWN_HOMEROOM = 'The Homeroom Teacher of their own Class writes their note'
 const noteClassSelect = {
     id: true,
     name: true,
+    // For the Promotion Outcomes' choices (ticket 09, grading.promotion.js).
+    gradeLevel: true,
     academicYearId: true,
     academicYear: { select: { label: true, status: true } },
 };
@@ -202,7 +204,8 @@ async function notesStandingOf(auth, classId) {
 
 // A Class's Notes for one Semester of its year, and the caller's standing. Anyone with
 // none, another school's member included, gets the same 404 as a missing Class; a
-// Semester of another year is not found either.
+// Semester of another year is not found either. Its Promotion Outcomes (ticket 09) have
+// the same readers and writer, so grading.promotion.js loads them through it too.
 async function loadNotes(auth, classId, semesterId) {
     const [homeroom, semester] = await Promise.all([
         prisma.class.findFirst({ where: { id: classId }, select: noteClassSelect }),
@@ -337,4 +340,4 @@ async function writeNotes(auth, classId, semesterId, { notes }) {
     return storedRowsOf('homeroomNote', { semesterId: semester.id }, notes);
 }
 
-export { descriptionsOf, writeDescriptions, notedIn, readNotes, writeNotes };
+export { descriptionsOf, writeDescriptions, loadNotes, notedIn, readNotes, writeNotes };

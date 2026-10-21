@@ -1,15 +1,24 @@
 import { prisma } from '../../shared/prisma.js';
 import { recordAudit } from '../../shared/approval.js';
 import { badRequest, conflict } from '../../shared/errors.js';
+import { phaseFor } from '../../shared/schoolType.js';
 import { createLogger } from '../../lib/helpers.js';
 import { semesterSpan, todayOf } from '../sessions/sessions.service.js';
 import { attendanceCounts } from '../attendance/attendance.service.js';
 import { toDate, toDay } from '../holidays/holidays.calendar.js';
-import { classSubjectSelect, describe } from './grading.service.js';
+import { classSubjectSelect, describe, reportCardTablesOf } from './grading.service.js';
+import { TYPES } from './grading.compute.js';
 import { gradeBookOf } from './grading.grades.js';
 import { blockersOf } from './grading.readiness.js';
 import { reportCardHoldersOf } from './grading.reporting.js';
 import { LIVE_FINALISATION } from './grading.lock.js';
+import {
+    isEvenSemester,
+    resultOf,
+    promotionColumnsOf,
+    automaticallyPromotedOf,
+    ownOutcomesOf,
+} from './grading.promotionRule.js';
 import {
     SEMESTER_SUBJECT,
     SLOTS_AT_ONCE,
@@ -44,9 +53,19 @@ const log = createLogger('Grading');
 //   Grade (ticket 02), computed with the settings the slot was finalised with, its KKTP
 //   and its Description; the Sessions Sick, Excused and Absent, confirmed ones only, in
 //   any Class (attendanceSummary's rule); and the Note. The names it shows are copied,
-//   the Principal's and both NIPs too, so a rename later changes none of it.
+//   the Principal's and both NIPs too, so a rename later changes none of it - and, for
+//   the printed one (ticket 07, owner 2026-10-20), the School's NPSN and city and the
+//   Class's phase.
 // - Every Subject on it has a grade: a Student without one blocks their slot
 //   (grading.readiness.js's NO_GRADE).
+// - For the fuller print (ticket 08, owner 2026-10-20) it also holds each Subject's four
+//   type averages, rounded as printed, and the School's choice of the two blank tables;
+//   and, for its letterhead (ticket 10), the School's address, phone and logo file. A
+//   logo is never written over (school.letterhead.js), so the key keeps its image.
+// - An even Semester's holds the year's Promotion Outcome (ticket 09, owner 2026-10-20):
+//   the Homeroom Teacher's, or the automatic one for a Student whose every grade reaches
+//   its KKTP (grading.promotionRule.js). Closing waits for every other Student's, named
+//   in the same 409, and refuses one changed meanwhile.
 // - The grades are computed before the transaction, a few slots at a time - 450 slots
 //   take about 14 s, past what an interactive transaction allows by default. Inside
 //   it, after the Semester is claimed, the finalisations, the placements and the Notes
@@ -102,6 +121,17 @@ const NAMED_IN_TEXT = 5;
 
 const CHANGED_MEANWHILE = 'changed while it was being closed. Try again';
 
+// The column each type's average is frozen in, on a Report Card's Subject (ticket 08).
+const AVERAGE_COLUMNS = { TUGAS: 'averageTugas', KUIS: 'averageKuis', UTS: 'averageUts', UAS: 'averageUas' };
+
+// The four averages a Report Card prints: each type's rounded one where it counts toward
+// the Final Grade, and null for a type with nothing that counts or weighted 0, since
+// that one is no part of the grade it stands beside (owner, 2026-10-20).
+const averagesOf = (types) =>
+    Object.fromEntries(
+        TYPES.map((type) => [AVERAGE_COLUMNS[type], types[type]?.weight > 0 ? types[type].rounded : null])
+    );
+
 const slotKeyOf = (row) => `${row.classId}:${row.subjectId}`;
 
 const slotRef = (classSubject) => ({
@@ -145,14 +175,18 @@ async function closingSlotOf(auth, classSubject, holders) {
     const reported = book.roster.studentProfileIds.filter(
         (studentProfileId) => book.reporting.isReportedHere(studentProfileId) && holders.has(studentProfileId)
     );
-    const lines = reported.map((studentProfileId) => ({
-        studentProfileId,
-        subjectId: classSubject.subjectId,
-        classId: classSubject.classId,
-        finalGrade: book.gradeOf(studentProfileId).finalGrade?.value ?? null,
-        kktp: book.settings.kktp.value,
-        description: book.descriptions.descriptionOf(studentProfileId)?.text ?? null,
-    }));
+    const lines = reported.map((studentProfileId) => {
+        const grade = book.gradeOf(studentProfileId);
+        return {
+            studentProfileId,
+            subjectId: classSubject.subjectId,
+            classId: classSubject.classId,
+            finalGrade: grade.finalGrade?.value ?? null,
+            kktp: book.settings.kktp.value,
+            ...averagesOf(grade.types),
+            description: book.descriptions.descriptionOf(studentProfileId)?.text ?? null,
+        };
+    });
     return { classSubject, blockers, lines };
 }
 
@@ -184,40 +218,62 @@ async function closingReadOf(auth, semester) {
         where: { semesterId: semester.id, studentProfileId: { in: [...holders.keys()] }, text: { not: null } },
         select: { studentProfileId: true, text: true },
     });
+    const lines = closing.flatMap((slot) => slot.lines);
+    const even = isEvenSemester(semester);
+    const [own, automatic] = even
+        ? await Promise.all([ownOutcomesOf(holders), automaticallyPromotedOf(semester, holders.keys(), lines)])
+        : [new Map(), new Set()];
     return {
         span,
         holders,
         finalisationIds: new Set(finalisations.map((row) => row.id)),
         notFinalised,
         blocked: closing.filter((slot) => slot.blockers.length > 0),
-        lines: closing.flatMap((slot) => slot.lines),
+        lines,
         noteOf: new Map(notes.map((row) => [row.studentProfileId, row.text])),
+        even,
+        ownOutcomeOf: new Map([...own].map(([studentProfileId, row]) => [studentProfileId, row.outcome])),
+        automatic,
     };
 }
 
-// Refuses (409) a close that something still stops, naming all of it: the slots not
-// finalised, the finalised ones something blocks, and the Students without a Note.
-async function assertClosable(semester, read) {
-    const missing = [...read.holders].filter(([studentProfileId]) => !read.noteOf.has(studentProfileId));
-    if (read.notFinalised.length === 0 && read.blocked.length === 0 && missing.length === 0) return;
-
+// The Students of [studentProfileId, classId] pairs by name and Class, for a refusal.
+async function namedIn(pairs) {
     const [profiles, classes] = await Promise.all([
         prisma.studentProfile.findMany({
-            where: { id: { in: missing.map(([studentProfileId]) => studentProfileId) } },
+            where: { id: { in: pairs.map(([studentProfileId]) => studentProfileId) } },
             select: { id: true, membership: { select: { user: { select: { fullName: true } } } } },
         }),
         prisma.class.findMany({
-            where: { id: { in: [...new Set(missing.map(([, classId]) => classId))] } },
+            where: { id: { in: [...new Set(pairs.map(([, classId]) => classId))] } },
             select: { id: true, name: true },
         }),
     ]);
     const nameOf = new Map(profiles.map((row) => [row.id, row.membership.user.fullName]));
     const classOf = new Map(classes.map((row) => [row.id, row]));
-    const notesMissing = missing.map(([studentProfileId, classId]) => ({
+    return pairs.map(([studentProfileId, classId]) => ({
         studentProfileId,
         fullName: nameOf.get(studentProfileId) ?? null,
         class: classOf.get(classId),
     }));
+}
+
+const whoseIn = (rows) => someOf(rows.map((row) => `${row.fullName ?? 'a student'} in ${row.class.name}`));
+
+// Refuses (409) a close that something still stops, naming all of it: the slots not
+// finalised, the finalised ones something blocks, the Students without a Note, and in an
+// even Semester those with no Promotion Outcome, their own or the automatic one.
+async function assertClosable(semester, read) {
+    const missing = [...read.holders].filter(([studentProfileId]) => !read.noteOf.has(studentProfileId));
+    const undecided = !read.even
+        ? []
+        : [...read.holders].filter(
+            ([studentProfileId]) => !read.ownOutcomeOf.get(studentProfileId) && !read.automatic.has(studentProfileId)
+        );
+    const clear = read.notFinalised.length === 0 && read.blocked.length === 0;
+    if (clear && missing.length === 0 && undecided.length === 0) return;
+
+    const [notesMissing, promotionsMissing] = await Promise.all([namedIn(missing), namedIn(undecided)]);
 
     const parts = [];
     if (read.notFinalised.length) {
@@ -227,14 +283,13 @@ async function assertClosable(semester, read) {
         parts.push(`${describe(classSubject)}: ${blockers.map((blocker) => blocker.text).join('; ')}`);
     }
     if (read.blocked.length > NAMED_IN_TEXT) parts.push(`${read.blocked.length - NAMED_IN_TEXT} more blocked`);
-    if (notesMissing.length) {
-        const whose = notesMissing.map((row) => `${row.fullName ?? 'a student'} in ${row.class.name}`);
-        parts.push(`no Homeroom Teacher's note for ${someOf(whose)}`);
-    }
+    if (notesMissing.length) parts.push(`no Homeroom Teacher's note for ${whoseIn(notesMissing)}`);
+    if (promotionsMissing.length) parts.push(`no promotion decided for ${whoseIn(promotionsMissing)}`);
     throw conflict(`${semesterName(semester)} cannot be closed yet: ${parts.join('; ')}`, {
         notFinalised: read.notFinalised.map(slotRef),
         blocked: read.blocked.map(({ classSubject, blockers }) => ({ ...slotRef(classSubject), blockers })),
         notesMissing,
+        ...(read.even ? { promotionsMissing } : {}),
     });
 }
 
@@ -258,8 +313,21 @@ const nipOf = (membership) => membership?.teacherProfile?.nip ?? null;
 // given inside the transaction (nextVersionOf).
 async function reportCardRowsOf(auth, semester, reportDate, read) {
     const studentProfileIds = [...read.holders.keys()];
-    const [school, principal, students, classes, subjects, attendance] = await Promise.all([
-        prisma.school.findFirst({ where: { id: auth.schoolId }, select: { name: true } }),
+    const [school, tables, principal, students, classes, subjects, attendance] = await Promise.all([
+        prisma.school.findFirst({
+            where: { id: auth.schoolId },
+            select: {
+                name: true,
+                npsn: true,
+                city: true,
+                schoolType: true,
+                durationYears: true,
+                address: true,
+                phone: true,
+                logoStorageKey: true,
+            },
+        }),
+        reportCardTablesOf(),
         prisma.schoolMembership.findFirst({
             where: { id: auth.membershipId },
             select: { user: { select: { fullName: true } }, teacherProfile: { select: { nip: true } } },
@@ -273,6 +341,7 @@ async function reportCardRowsOf(auth, semester, reportDate, read) {
             select: {
                 id: true,
                 name: true,
+                gradeLevel: true,
                 homeroomTeacher: {
                     select: { user: { select: { fullName: true } }, teacherProfile: { select: { nip: true } } },
                 },
@@ -289,6 +358,14 @@ async function reportCardRowsOf(auth, semester, reportDate, read) {
     const subjectOf = new Map(subjects.map((row) => [row.id, row]));
     const positionOf = positionsOf(subjects);
 
+    // An even Semester's outcome: the Homeroom Teacher's, else the automatic one -
+    // assertClosable has made sure one of them is there.
+    const promotionOf = (studentProfileId, gradeLevel) => {
+        if (!read.even) return {};
+        const own = read.ownOutcomeOf.get(studentProfileId) ?? null;
+        const outcome = resultOf(own, read.automatic.has(studentProfileId), school, gradeLevel);
+        return promotionColumnsOf(school, gradeLevel, outcome);
+    };
     const cards = [...read.holders].map(([studentProfileId, classId]) => {
         const student = studentOf.get(studentProfileId);
         const homeroom = classOf.get(classId);
@@ -299,9 +376,15 @@ async function reportCardRowsOf(auth, semester, reportDate, read) {
             classId,
             reportDate: toDate(reportDate),
             schoolName: school.name,
+            schoolNpsn: school.npsn,
+            schoolCity: school.city,
+            schoolAddress: school.address,
+            schoolPhone: school.phone,
+            schoolLogoKey: school.logoStorageKey,
             studentName: student.membership.user.fullName,
             nisn: student.nisn,
             className: homeroom.name,
+            phase: phaseFor(homeroom.gradeLevel),
             academicYearLabel: semester.academicYear.label,
             semesterOrdinal: semester.ordinal,
             homeroomTeacherName: homeroom.homeroomTeacher?.user.fullName ?? null,
@@ -312,6 +395,8 @@ async function reportCardRowsOf(auth, semester, reportDate, read) {
             excused: counts.excused,
             absent: counts.absent,
             note: read.noteOf.get(studentProfileId),
+            ...tables,
+            ...promotionOf(studentProfileId, homeroom.gradeLevel),
             closedByUserId: auth.userId,
         };
     });
@@ -336,13 +421,14 @@ async function nextVersionOf(tx, semester) {
 }
 
 // Inside the close's transaction, after the Semester is claimed: refuses (409) a close
-// whose slots, placements or Notes changed since they were read - a finalising undone or
-// done again, a Class Move, a Note cleared - so nothing is written on what no longer holds.
+// whose slots, placements, Notes or Promotion Outcomes (ticket 09) changed since they were
+// read - a finalising undone or done again, a Class Move, a Note cleared, an outcome
+// changed - so nothing is written on what no longer holds.
 // The finalisations compare by id, not by slot (owner, 2026-10-19): a slot unfinalised,
 // corrected and finalised again meanwhile keeps its key but is a new row, since unfinalise
 // sets undoneAt and finalise creates one, and its grades were read before the correction.
 async function assertUnchanged(tx, semester, read) {
-    const [finalisations, holders, notes] = await Promise.all([
+    const [finalisations, holders, notes, own] = await Promise.all([
         tx.slotFinalisation.findMany({
             where: { semesterId: semester.id, ...LIVE_FINALISATION },
             select: { id: true },
@@ -352,6 +438,7 @@ async function assertUnchanged(tx, semester, read) {
             where: { semesterId: semester.id, studentProfileId: { in: [...read.holders.keys()] }, text: { not: null } },
             select: { studentProfileId: true, text: true },
         }),
+        read.even ? ownOutcomesOf(read.holders, tx) : new Map(),
     ]);
     const sameSlots =
         finalisations.length === read.finalisationIds.size &&
@@ -364,6 +451,11 @@ async function assertUnchanged(tx, semester, read) {
     if (!sameSlots) throw conflict(`The finalised class subjects of ${semesterName(semester)} ${CHANGED_MEANWHILE}`);
     if (!samePlaces) throw conflict(`The placements in ${semesterName(semester)} ${CHANGED_MEANWHILE}`);
     if (!sameNotes) throw conflict(`The Homeroom Teachers' notes of ${semesterName(semester)} ${CHANGED_MEANWHILE}`);
+    const outcomeNow = (studentProfileId) => own.get(studentProfileId)?.outcome ?? null;
+    const sameOutcomes = [...read.holders.keys()].every(
+        (studentProfileId) => outcomeNow(studentProfileId) === (read.ownOutcomeOf.get(studentProfileId) ?? null)
+    );
+    if (!sameOutcomes) throw conflict(`The promotions of ${semesterName(semester)} ${CHANGED_MEANWHILE}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -440,4 +532,4 @@ async function closeSemester(auth, id, { reportDate }) {
     return { semester: semesterView(await loadSemester(id)), reportDate, version, reportCards: cards.length };
 }
 
-export { slotRef, closeSemester };
+export { AVERAGE_COLUMNS, slotRef, closeSemester };

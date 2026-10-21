@@ -136,6 +136,9 @@ enum ApprovalAction {
     UPDATE_LOCATION
     /// The Principal changing the school's time zone (teaching-and-learning 07).
     UPDATE_TIME_ZONE
+    /// The Principal changing the school's letterhead - its address, its phone or its
+    /// logo (grading-and-report-card 10).
+    UPDATE_LETTERHEAD
     /// A holiday taken back - a national one by an admin, a school one by its Principal.
     WITHDRAW
     /// The Principal switching whether the school observes joint leave.
@@ -448,6 +451,13 @@ model School {
     /// Whether this school takes joint leave (cuti bersama) off, the Principal's
     /// choice - regional education calendars differ (teaching-and-learning 08).
     observesJointLeave Boolean @default(true)
+    /// The printed Report Card's letterhead (grading-and-report-card 10), set by the
+    /// Principal: free text, null for none. The logo is a stored JPG or PNG, a new
+    /// file at each upload and never written over, since a closed Report Card keeps
+    /// the one it was closed with.
+    address        String?
+    phone          String?
+    logoStorageKey String?
     /// Opaque, regenerable. Locates a school; grants nothing (ADR-0002).
     schoolCode    String     @unique
     // Access withdrawn by a platform admin, with the data left where it is.
@@ -846,6 +856,9 @@ model ClassMembership {
     studentProfileId String
     startedAt        DateTime          @default(now())
     endedAt          DateTime?
+    /// The Homeroom Teacher's own Promotion Outcome for the year, on the open placement
+    /// (grading-and-report-card ticket 09). Null leaves it to the automatic one, which
+    /// the even Semester's close freezes onto the Report Card with the rest.
     outcome          PromotionOutcome?
     outcomeSetByUserId String?
     outcomeSetAt     DateTime?
@@ -1625,6 +1638,11 @@ model SchoolGradeSetting {
     /// 0-100.
     kktp         Int?
     remedialRule RemedialRule?
+    /// Whether the printed Report Card carries a blank Extracurricular table and a blank
+    /// Personality table, to fill in by hand (ticket 08, owner 2026-10-20). Null prints
+    /// none. Frozen onto each Report Card at close.
+    extracurricularTable Boolean?
+    personalityTable     Boolean?
     /// Who saved it last.
     setByUserId  String
     createdAt    DateTime      @default(now())
@@ -1781,9 +1799,22 @@ model ReportCard {
     /// The date the Principal chose for it, a calendar day.
     reportDate          DateTime
     schoolName          String
+    /// The School's NPSN and city at close, for the printed Report Card's heading and the
+    /// place beside its date (ticket 07, owner 2026-10-20). Null on one written before.
+    schoolNpsn          String?
+    schoolCity          String?
+    /// The letterhead at close (ticket 10): the School's address, phone and logo file.
+    /// Null on one written before, or where the School had none. The logo's key never
+    /// leaves the server.
+    schoolAddress       String?
+    schoolPhone         String?
+    schoolLogoKey       String?
     studentName         String
     nisn                String
     className           String
+    /// The phase (fase) of the Class's Grade Level at close (ticket 07). Null on one
+    /// written before.
+    phase               String?
     academicYearLabel   String
     semesterOrdinal     Int
     /// Null when the Class had no Homeroom Teacher at close.
@@ -1797,6 +1828,16 @@ model ReportCard {
     absent              Int
     /// The Homeroom Teacher's Note, which closing requires.
     note                String
+    /// The School's choice of the two blank tables at close (ticket 08), so a closed
+    /// Report Card keeps the form it was closed with. False on one written before.
+    extracurricularTable Boolean @default(false)
+    personalityTable     Boolean @default(false)
+    /// The year's Promotion Outcome, on an even Semester's only (ticket 09, owner
+    /// 2026-10-20): the Homeroom Teacher's decision, or PROMOTED - GRADUATED on the top
+    /// grade - for a Student whose every Final Grade of both Semesters reaches its KKTP.
+    /// With the grade level it leads to, null for GRADUATED. What Rollover reads.
+    promotionOutcome    PromotionOutcome?
+    nextGradeLevel      Int?
     closedByUserId      String
     createdAt           DateTime @default(now())
 
@@ -1830,6 +1871,13 @@ model ReportCardSubject {
     subjectName  String
     finalGrade   Int
     kktp         Int
+    /// Each type's average after the Remedial Rule, rounded once, half up, from the exact
+    /// value (ticket 08). Null where the type has nothing that counts or is weighted 0, and
+    /// on one written before.
+    averageTugas Int?
+    averageKuis  Int?
+    averageUts   Int?
+    averageUas   Int?
     description  String?
 
     school     School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)

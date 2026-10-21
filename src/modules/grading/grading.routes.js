@@ -11,14 +11,16 @@ import {
     noteParams,
     descriptionsBody,
     notesBody,
+    promotionsBody,
     closeBody,
     reopenBody,
 } from './grading.schema.js';
 
-// Mounted at /api/grading (grading-and-report-card tickets 01 to 06).
+// Mounted at /api/grading (grading-and-report-card tickets 01 to 09).
 //
-// Grade settings: the school's default Grade Weights and KKTP, and its Remedial Rule,
-// read by its staff and set by the Principal or a Vice Principal; a slot's own
+// Grade settings: the school's default Grade Weights and KKTP, its Remedial Rule, and
+// whether its Report Cards carry the two blank tables (ticket 08), read by its staff
+// and set by the Principal or a Vice Principal; a slot's own
 // weights and KKTP, named by any ClassSubject of the slot, read by its staff and set
 // or cleared by its Answering Teacher. Every write sends back the updatedAt it read.
 // A slot's running grades (ticket 02) are read by its staff, never by a Student; they
@@ -43,6 +45,13 @@ import {
 // Reopening (ticket 06): the Principal takes a closed Semester back to finalising, with
 // a reason - a Vice Principal is told no in the service. The staff's reads of a Report
 // Card name every version they may open; a Student reads only the newest.
+//
+// The printed Report Card (ticket 07): one version's PDF, for exactly the readers of its
+// JSON.
+//
+// Promotion Outcomes (ticket 09): a Class's for the even Semester, with the Notes'
+// readers and writer - its Homeroom Teacher decides, the Principal and the Vice
+// Principals read - and the service's 404 to anyone else.
 
 const router = Router();
 
@@ -100,6 +109,21 @@ router.put(
     controller.writeNotes
 );
 
+// ---- a Class's promotion outcomes ----
+
+router.get(
+    '/classes/:id/semesters/:semesterId/promotions',
+    slotStaff,
+    validate({ params: noteParams }),
+    controller.getPromotions
+);
+router.put(
+    '/classes/:id/semesters/:semesterId/promotions',
+    slotStaff,
+    validate({ params: noteParams, body: promotionsBody }),
+    controller.writePromotions
+);
+
 // ---- finalising ----
 
 router.post(
@@ -134,6 +158,7 @@ router.post(
 );
 router.get('/report-cards/mine', student, controller.getMyReportCards);
 router.get('/report-cards/:id', reader, validate({ params: idParams }), controller.getReportCard);
+router.get('/report-cards/:id/pdf', reader, validate({ params: idParams }), controller.getReportCardPdf);
 router.get(
     '/classes/:id/semesters/:semesterId/report-cards',
     slotStaff,

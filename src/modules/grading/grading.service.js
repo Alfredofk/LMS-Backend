@@ -31,6 +31,10 @@ const log = createLogger('Grading');
 // - Clearing a slot's own values nulls them, and the row stays: nothing is deleted.
 // - A slot in a CLOSED Semester, or a closed year, takes no change.
 // - Every write sends back the updatedAt it read (the 2026-10-09 convention).
+// - The school also chooses whether its printed Report Card carries a blank
+//   Extracurricular table and a blank Personality table (ticket 08, owner 2026-10-20):
+//   the same writers and audit as its defaults, neither before it chooses, and frozen
+//   onto each Report Card at close. A slot has no say in them.
 
 const WEIGHT_COLUMNS = { TUGAS: 'weightTugas', KUIS: 'weightKuis', UTS: 'weightUts', UAS: 'weightUas' };
 
@@ -118,23 +122,49 @@ function settingsFrom(slotRow, schoolRow) {
     };
 }
 
+// The printed Report Card's two blank tables as the school chose them (ticket 08), or
+// neither before it chose.
+const tablesFrom = (schoolRow) => ({
+    extracurricularTable: firstOwn([
+        ['SCHOOL', schoolRow?.extracurricularTable],
+        ['BUILT_IN', false],
+    ]),
+    personalityTable: firstOwn([
+        ['SCHOOL', schoolRow?.personalityTable],
+        ['BUILT_IN', false],
+    ]),
+});
+
+// Everything the school sets: its defaults, its Remedial Rule and the tables.
+const schoolSettingsFrom = (schoolRow) => ({ ...settingsFrom(null, schoolRow), ...tablesFrom(schoolRow) });
+
 // What a read answers: each setting with its source, and the updatedAt a write sends
 // back - the row's, or null while nothing was saved.
 const settingsView = (settings, row) => ({ ...settings, updatedAt: row?.updatedAt ?? null });
 
-const SETTING_NAMES = { weights: 'weights', kktp: 'KKTP', remedialRule: 'remedial rule' };
+const SETTING_NAMES = {
+    weights: 'weights',
+    kktp: 'KKTP',
+    remedialRule: 'remedial rule',
+    extracurricularTable: 'extracurricular table',
+    personalityTable: 'personality table',
+};
 const SOURCE_NOTES = { SCHOOL: " (the school's)", BUILT_IN: ' (built in)' };
 
-// '20/20/25/35', or '75 (built in)' where a value is not the writer's level's own.
+// '20/20/25/35', 'on', or '75 (built in)' where a value is not the writer's level's own.
 function textOf(key, setting, own) {
-    const value = key === 'weights' ? TYPES.map((type) => setting.value[type]).join('/') : setting.value;
+    let value = setting.value;
+    if (key === 'weights') value = TYPES.map((type) => setting.value[type]).join('/');
+    if (typeof value === 'boolean') value = value ? 'on' : 'off';
     return `${value}${setting.source === own ? '' : SOURCE_NOTES[setting.source]}`;
 }
 
-// What a write changes, one line per setting: its value, or the level it comes from.
-// 'weights 25/25/25/25 (built in) -> 20/20/25/35'. Empty when it changes nothing.
+// What a write changes, one line per setting it has - a slot has no tables: its value, or
+// the level it comes from. 'weights 25/25/25/25 (built in) -> 20/20/25/35'. Empty when it
+// changes nothing.
 function changesOf(before, after, own) {
     return Object.keys(SETTING_NAMES)
+        .filter((key) => key in before)
         .map((key) => [key, textOf(key, before[key], own), textOf(key, after[key], own)])
         .filter(([, from, to]) => from !== to)
         .map(([key, from, to]) => `${SETTING_NAMES[key]} ${from} -> ${to}`);
@@ -180,7 +210,10 @@ async function loadManaged(
     return classSubject;
 }
 
-const schoolRowOf = () => prisma.schoolGradeSetting.findFirst({ select: { ...ownSelect, remedialRule: true } });
+const schoolRowOf = () =>
+    prisma.schoolGradeSetting.findFirst({
+        select: { ...ownSelect, remedialRule: true, extracurricularTable: true, personalityTable: true },
+    });
 
 const slotKeyOf = (classSubject) => ({
     classId: classSubject.classId,
@@ -222,16 +255,20 @@ const raceLost = (error) => (error?.code === 'P2002' ? conflict(CHANGED_MEANWHIL
 // The school's
 // ---------------------------------------------------------------------------
 
-// The school's defaults and its Remedial Rule, for its staff.
+// The school's defaults, its Remedial Rule and its Report Card's tables, for its staff.
 async function readSchoolSettings() {
     const row = await schoolRowOf();
-    return settingsView(settingsFrom(null, row), row);
+    return settingsView(schoolSettingsFrom(row), row);
 }
 
 // The Principal or a Vice Principal sets the school's default weights, its default
-// KKTP, its Remedial Rule, or any of them at once; a Teacher gets 403. Audited in the
-// same transaction, one line per change. A save that changes nothing writes nothing.
-async function setSchoolSettings(auth, { weights, kktp, remedialRule, updatedAt }) {
+// KKTP, its Remedial Rule, its Report Card's tables (ticket 08), or any of them at once;
+// a Teacher gets 403. Audited in the same transaction, one line per change. A save that
+// changes nothing writes nothing.
+async function setSchoolSettings(
+    auth,
+    { weights, kktp, remedialRule, extracurricularTable, personalityTable, updatedAt }
+) {
     await assertPrincipalOrVice(auth);
     const row = await schoolRowOf();
     assertSeen(row, updatedAt);
@@ -240,8 +277,10 @@ async function setSchoolSettings(auth, { weights, kktp, remedialRule, updatedAt 
     if (weights) Object.assign(data, weightColumnsOf(weights));
     if (kktp !== undefined) data.kktp = kktp;
     if (remedialRule) data.remedialRule = remedialRule;
-    const changes = changesOf(settingsFrom(null, row), settingsFrom(null, { ...row, ...data }), 'SCHOOL');
-    if (changes.length === 0) return settingsView(settingsFrom(null, row), row);
+    if (extracurricularTable !== undefined) data.extracurricularTable = extracurricularTable;
+    if (personalityTable !== undefined) data.personalityTable = personalityTable;
+    const changes = changesOf(schoolSettingsFrom(row), schoolSettingsFrom({ ...row, ...data }), 'SCHOOL');
+    if (changes.length === 0) return settingsView(schoolSettingsFrom(row), row);
 
     try {
         await prisma.$transaction(async (tx) => {
@@ -262,6 +301,16 @@ async function setSchoolSettings(auth, { weights, kktp, remedialRule, updatedAt 
 
     log.info(`Grade settings at ${auth.schoolName}: ${changes.join('; ')}`);
     return readSchoolSettings();
+}
+
+// Which blank tables the school's Report Cards carry, as the close freezes them
+// (ticket 08): { extracurricularTable, personalityTable }.
+async function reportCardTablesOf() {
+    const tables = tablesFrom(await schoolRowOf());
+    return {
+        extracurricularTable: tables.extracurricularTable.value,
+        personalityTable: tables.personalityTable.value,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -338,6 +387,7 @@ export {
     slotKeyOf,
     readSchoolSettings,
     setSchoolSettings,
+    reportCardTablesOf,
     slotSettingsOf,
     readSlotSettings,
     setSlotSettings,

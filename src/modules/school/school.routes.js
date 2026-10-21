@@ -16,6 +16,7 @@ import {
     appointPrincipalBody,
     locationBody,
     timeZoneBody,
+    letterheadBody,
 } from './school.schema.js';
 
 // Two routers, because two different people use them.
@@ -31,6 +32,10 @@ import {
 
 // KTP: JPG or PNG, at most 2 MB - the owner's rule (ticket 04).
 const ktpUpload = singleFile('ktp', { maxBytes: 2 * 1024 * 1024, types: ['jpg', 'png'] });
+
+// The letterhead's logo: JPG or PNG, at most 2 MB (grading-and-report-card 10). Whether
+// the Report Card can print it is the service's to check.
+const logoUpload = singleFile('logo', { maxBytes: 2 * 1024 * 1024, types: ['jpg', 'png'] });
 
 const router = Router();
 
@@ -93,6 +98,12 @@ memberRouter.post('/code/rotate', controller.rotateCode);
 memberRouter.patch('/location', validate({ body: locationBody }), controller.updateLocation);
 // The zone the school's timetable is written in (teaching-and-learning ticket 07).
 memberRouter.patch('/time-zone', validate({ body: timeZoneBody }), controller.updateTimeZone);
+// The Report Card's letterhead: the address and phone, and the logo
+// (grading-and-report-card ticket 10).
+memberRouter.patch('/letterhead', validate({ body: letterheadBody }), controller.updateLetterhead);
+memberRouter.get('/logo', controller.readLogo);
+memberRouter.put('/logo', logoUpload, controller.setLogo);
+memberRouter.delete('/logo', controller.removeLogo);
 
 export default router;
 export { adminRouter, memberRouter };

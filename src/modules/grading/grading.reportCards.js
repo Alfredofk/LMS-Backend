@@ -1,7 +1,14 @@
 import { prisma } from '../../shared/prisma.js';
 import { isPrincipalOrVice } from '../../shared/guards.js';
 import { notFound } from '../../shared/errors.js';
+import { getStorage } from '../../shared/storage.js';
+import { createLogger } from '../../lib/helpers.js';
 import { toDay } from '../holidays/holidays.calendar.js';
+import { TYPES, LETTER_SCALE, letterOf } from './grading.compute.js';
+import { AVERAGE_COLUMNS } from './grading.close.js';
+import { renderReportCard } from './grading.pdf.js';
+
+const log = createLogger('Grading');
 
 // Reading Report Cards (grading-and-report-card ticket 05), written frozen by the close
 // (grading.close.js) and read as they were written.
@@ -19,6 +26,17 @@ import { toDay } from '../holidays/holidays.calendar.js';
 //   the newest; the staff read the earlier ones too, and their views name every version
 //   they may open (owner, 2026-10-19). A version is in the Class it was closed in, so a
 //   Student who moved Class between two closes is listed in their newest version's Class.
+// - Each version prints as a PDF (ticket 07, grading.pdf.js), rendered on request from
+//   the frozen row and never stored, for exactly the readers of its JSON (owner,
+//   2026-10-20).
+// - Each Subject carries its four type averages as frozen, and the letter of its Final
+//   Grade, from the one fixed scale the view names too; the view says which blank tables
+//   the School chose at close (ticket 08, owner 2026-10-20).
+// - An even Semester's carries the year's Promotion Outcome and the grade level it leads
+//   to (ticket 09); an odd one's null.
+// - The School's address and phone as at close, and whether it had a logo (ticket 10).
+//   The logo's file is read only to print it, and its key never leaves the server; a
+//   file gone from storage prints without it, and the log says so.
 
 const NOT_FOUND = 'Report card not found';
 
@@ -30,9 +48,15 @@ const reportCardSelect = {
     classId: true,
     reportDate: true,
     schoolName: true,
+    schoolNpsn: true,
+    schoolCity: true,
+    schoolAddress: true,
+    schoolPhone: true,
+    schoolLogoKey: true,
     studentName: true,
     nisn: true,
     className: true,
+    phase: true,
     academicYearLabel: true,
     semesterOrdinal: true,
     homeroomTeacherName: true,
@@ -43,6 +67,10 @@ const reportCardSelect = {
     excused: true,
     absent: true,
     note: true,
+    extracurricularTable: true,
+    personalityTable: true,
+    promotionOutcome: true,
+    nextGradeLevel: true,
     createdAt: true,
     subjects: {
         select: {
@@ -51,6 +79,10 @@ const reportCardSelect = {
             subjectName: true,
             finalGrade: true,
             kktp: true,
+            averageTugas: true,
+            averageKuis: true,
+            averageUts: true,
+            averageUas: true,
             description: true,
         },
         orderBy: { position: 'asc' },
@@ -58,28 +90,43 @@ const reportCardSelect = {
 };
 
 // A Report Card as it was written: the date the Principal chose as a calendar day, and
-// writtenAt the moment the Semester closed.
+// writtenAt the moment the Semester closed. The NPSN, the city and the phase are null on
+// one written before ticket 07; the type averages on one written before ticket 08, and
+// it has no blank table.
 const reportCardView = (row) => ({
     id: row.id,
     version: row.version,
     reportDate: toDay(row.reportDate),
     writtenAt: row.createdAt,
-    school: { name: row.schoolName },
+    school: {
+        name: row.schoolName,
+        npsn: row.schoolNpsn,
+        city: row.schoolCity,
+        address: row.schoolAddress,
+        phone: row.schoolPhone,
+        hasLogo: row.schoolLogoKey !== null,
+    },
     academicYear: row.academicYearLabel,
     semester: { id: row.semesterId, ordinal: row.semesterOrdinal },
     student: { studentProfileId: row.studentProfileId, fullName: row.studentName, nisn: row.nisn },
     class: { id: row.classId, name: row.className },
+    phase: row.phase,
     homeroomTeacher:
         row.homeroomTeacherName === null ? null : { fullName: row.homeroomTeacherName, nip: row.homeroomTeacherNip },
     principal: { fullName: row.principalName, nip: row.principalNip },
     subjects: row.subjects.map((line) => ({
         subject: { id: line.subjectId, code: line.subjectCode, name: line.subjectName },
+        types: Object.fromEntries(TYPES.map((type) => [type, line[AVERAGE_COLUMNS[type]]])),
         finalGrade: line.finalGrade,
         kktp: line.kktp,
+        letter: letterOf(line.finalGrade),
         description: line.description,
     })),
     attendance: { sick: row.sick, excused: row.excused, absent: row.absent },
     note: row.note,
+    blankTables: { extracurricular: row.extracurricularTable, personality: row.personalityTable },
+    letterScale: LETTER_SCALE,
+    promotion: row.promotionOutcome ? { outcome: row.promotionOutcome, nextGradeLevel: row.nextGradeLevel } : null,
 });
 
 const versionSelect = {
@@ -156,20 +203,15 @@ async function myReportCards(auth) {
         .map(reportCardView);
 }
 
-// One Report Card: for its Student - the newest of theirs only - the Homeroom Teacher
-// of its Class, the Principal and the Vice Principals; anyone else gets 404. The staff's
-// view names every version of it they may open (ticket 06).
-async function readReportCard(auth, id) {
+// One Report Card as its reader may open it: its Student - the newest of theirs only -
+// the Homeroom Teacher of its Class, the Principal and the Vice Principals; anyone else
+// gets 404. Answers the row, and the staff reader's test (staffOpenerOf), null for its
+// Student. The one rule behind its JSON and its PDF.
+async function loadReadable(auth, id) {
     const row = await prisma.reportCard.findFirst({ where: { id }, select: reportCardSelect });
     if (!row) throw notFound(NOT_FOUND);
     const opens = await staffOpenerOf(auth);
-    if (opens?.(row)) {
-        const versions = await prisma.reportCard.findMany({
-            where: { semesterId: row.semesterId, studentProfileId: row.studentProfileId },
-            select: versionSelect,
-        });
-        return { ...reportCardView(row), versions: versionsOf(versions, row.studentProfileId, opens) };
-    }
+    if (opens?.(row)) return { row, opens };
 
     const profile = await ownProfileOf(auth);
     if (profile?.id !== row.studentProfileId) throw notFound(NOT_FOUND);
@@ -177,7 +219,42 @@ async function readReportCard(auth, id) {
         where: { semesterId: row.semesterId, studentProfileId: row.studentProfileId, version: { gt: row.version } },
     });
     if (newer > 0) throw notFound(NOT_FOUND);
-    return reportCardView(row);
+    return { row, opens: null };
+}
+
+// One Report Card, as loadReadable allows. The staff's view names every version of it
+// they may open (ticket 06).
+async function readReportCard(auth, id) {
+    const { row, opens } = await loadReadable(auth, id);
+    if (!opens) return reportCardView(row);
+    const versions = await prisma.reportCard.findMany({
+        where: { semesterId: row.semesterId, studentProfileId: row.studentProfileId },
+        select: versionSelect,
+    });
+    return { ...reportCardView(row), versions: versionsOf(versions, row.studentProfileId, opens) };
+}
+
+// One Report Card printed (ticket 07), as loadReadable allows: its PDF and a file name
+// that says whose, which Semester and which version, as 'Rapor-Andi-2026-2027-Semester-1-v2.pdf'.
+async function reportCardPdf(auth, id) {
+    const { row } = await loadReadable(auth, id);
+    const view = reportCardView(row);
+    const words = [view.student.fullName, view.academicYear, `Semester ${view.semester.ordinal}`];
+    const name = words.join(' ').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '');
+    const logo = await logoOf(row);
+    return { buffer: await renderReportCard(view, { logo }), fileName: `Rapor-${name}-v${view.version}.pdf` };
+}
+
+// The logo frozen on a Report Card (ticket 10), its bytes, or null: none was frozen, or
+// its file is gone from storage - it then prints without one rather than not at all.
+async function logoOf(row) {
+    if (!row.schoolLogoKey) return null;
+    try {
+        return await getStorage().read(row.schoolLogoKey);
+    } catch (error) {
+        log.warn(`Report Card ${row.id} printed without its logo: ${error.code ?? error.message}`);
+        return null;
+    }
 }
 
 // The Report Cards of a Class for one Semester of its year - the newest of each Student
@@ -221,4 +298,4 @@ async function classReportCards(auth, classId, semesterId) {
     };
 }
 
-export { myReportCards, readReportCard, classReportCards };
+export { myReportCards, readReportCard, reportCardPdf, classReportCards };

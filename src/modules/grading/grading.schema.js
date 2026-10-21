@@ -42,12 +42,15 @@ const seen = {
 
 const hasChange = (value) => Object.keys(value).some((key) => key !== 'updatedAt');
 
-// The school's defaults and its remedial rule, any of them at once.
+// The school's defaults, its remedial rule and its Report Card's two blank tables
+// (ticket 08), any of them at once.
 const schoolSettingsBody = z
     .strictObject({
         weights: weights.optional(),
         kktp: kktp.optional(),
         remedialRule: z.enum(REMEDIAL_RULES).optional(),
+        extracurricularTable: z.boolean().optional(),
+        personalityTable: z.boolean().optional(),
         ...seen,
     })
     .refine(hasChange, 'Send at least one change');
@@ -97,6 +100,30 @@ const descriptionsBody = z.strictObject({ descriptions: textRows(clearable, 'des
 
 const notesBody = z.strictObject({ notes: textRows(clearable, 'note') });
 
+// ---- promotion outcomes (ticket 09) ----
+
+// Many Students at once (owner, 2026-10-20), each named once with the outcome - null
+// clears it, back to the automatic rule - and the updatedAt of the placement it read,
+// which always exists. Which outcomes the Class takes is the service's call.
+const promotionsBody = z.strictObject({
+    promotions: z
+        .array(
+            z.strictObject({
+                studentProfileId: z.string().min(1),
+                outcome: z.enum(['PROMOTED', 'RETAINED', 'GRADUATED']).nullable(),
+                updatedAt: z.iso
+                    .datetime({ offset: true, error: 'Send back the updatedAt you last read' })
+                    .transform((value) => new Date(value)),
+            })
+        )
+        .min(1, 'Send at least one promotion')
+        .max(200, 'At most 200 promotions at once')
+        .refine(
+            (rows) => new Set(rows.map((row) => row.studentProfileId)).size === rows.length,
+            'A student is named twice'
+        ),
+});
+
 // ---- closing (ticket 05) ----
 
 // A calendar day, 'YYYY-MM-DD'. A date that does not exist is refused, not rolled over
@@ -132,6 +159,7 @@ export {
     noteParams,
     descriptionsBody,
     notesBody,
+    promotionsBody,
     closeBody,
     reopenBody,
 };

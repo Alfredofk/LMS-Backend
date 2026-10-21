@@ -1,5 +1,6 @@
 import { ok } from '../../shared/errors.js';
 import * as service from './school.service.js';
+import * as letterheads from './school.letterhead.js';
 
 // Thin by design, like auth.controller.js: read what validation produced, call
 // the service, wrap the answer in the envelope. No try/catch - Express 5 hands a
@@ -112,6 +113,33 @@ async function updateTimeZone(req, res) {
     return ok(res, { school, message: 'School time zone updated.' });
 }
 
+// ---- the letterhead (grading-and-report-card 10) ----
+
+async function updateLetterhead(req, res) {
+    const letterhead = await letterheads.updateLetterhead(req.auth, req.validated.body);
+    return ok(res, { letterhead, message: 'Letterhead updated.' });
+}
+
+async function setLogo(req, res) {
+    const letterhead = await letterheads.setLogo(req.auth, req.file);
+    return ok(res, { letterhead, message: 'Logo saved.' });
+}
+
+async function removeLogo(req, res) {
+    const letterhead = await letterheads.removeLogo(req.auth);
+    return ok(res, { letterhead, message: 'Logo removed.' });
+}
+
+async function readLogo(req, res) {
+    const { buffer, contentType, fileName } = await letterheads.readLogo(req.auth);
+    res.set({
+        'Content-Type': contentType,
+        'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+        'Cache-Control': 'private, no-store',
+    });
+    return res.send(buffer);
+}
+
 async function appointPrincipal(req, res) {
     const result = await service.appointPrincipal(req.validated.params.id, {
         ...reviewer(req),
@@ -137,4 +165,8 @@ export {
     rotateCode,
     updateLocation,
     updateTimeZone,
+    updateLetterhead,
+    setLogo,
+    removeLogo,
+    readLogo,
 };

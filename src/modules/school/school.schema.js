@@ -146,6 +146,22 @@ const locationBody = z.strictObject({ latitude, longitude });
 // service's rule, from ticket 02 on).
 const timeZoneBody = z.strictObject({ timeZone });
 
+// The letterhead's text (grading-and-report-card 10): free text, an address of at most
+// 300 characters and a phone of at most 30, which may carry an area code and an
+// extension. Null or empty clears one; one left out stays.
+const letterheadText = (max) =>
+    z
+        .string()
+        .trim()
+        .max(max, `At most ${max} characters`)
+        .nullable()
+        .optional()
+        .transform((value) => (value === '' ? null : value));
+
+const letterheadBody = z
+    .strictObject({ address: letterheadText(300), phone: letterheadText(30) })
+    .refine((value) => value.address !== undefined || value.phone !== undefined, 'Send the address, the phone or both');
+
 // A Platform Admin appointing a school's Principal when the one before cannot hand
 // it over (owner, 2026-09-27). The admin sees no member list, so the successor is
 // named by the email of an active teacher there. Always with a reason, audited.
@@ -167,4 +183,5 @@ export {
     appointPrincipalBody,
     locationBody,
     timeZoneBody,
+    letterheadBody,
 };

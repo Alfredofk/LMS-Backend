@@ -73,7 +73,9 @@ function afterRuleOf(counting, { rule, kktp }) {
 // A Student's grade from what counts on each Assessment, [{ type, value }], and the
 // slot's weights: each type's average with the weight it carries once the types with
 // nothing that counts drop out, and the final grade, or null while nothing weighted
-// counts.
+// counts. Each average comes in hundredths and rounded, the whole number the Report
+// Card prints (ticket 08): rounded once from the exact sum, as the final grade is, so
+// 84.4967 is 84 although its hundredths read 84.50.
 function finalGradeOf(entries, weights) {
     const sums = new Map();
     for (const { type, value } of entries) {
@@ -88,6 +90,7 @@ function finalGradeOf(entries, weights) {
         if (!sum) return null;
         return {
             average: hundredthsOf(sum.total, sum.count * BigInt(MILLI)),
+            rounded: Number(roundHalfUp(sum.total, sum.count * BigInt(MILLI))),
             weight: weighted.includes(type) ? hundredthsOf(BigInt(weights[type]) * 100n, weightTotal) : 0,
             count: Number(sum.count),
         };
@@ -109,4 +112,21 @@ function finalGradeOf(entries, weights) {
     };
 }
 
-export { TYPES, ruleResultOf, afterRuleOf, finalGradeOf };
+// ---------------------------------------------------------------------------
+// The letter
+// ---------------------------------------------------------------------------
+
+// The letter a Final Grade earns on the Report Card (ticket 08, owner 2026-10-20): one
+// fixed scale for now. A School's own scale would be a setting frozen at close.
+const LETTER_SCALE = [
+    { letter: 'A', from: 90, to: 100 },
+    { letter: 'B', from: 80, to: 89 },
+    { letter: 'C', from: 70, to: 79 },
+    { letter: 'D', from: 60, to: 69 },
+    { letter: 'E', from: 0, to: 59 },
+];
+
+// The letter of a whole Final Grade, 0 to 100.
+const letterOf = (grade) => LETTER_SCALE.find((band) => grade >= band.from).letter;
+
+export { TYPES, LETTER_SCALE, ruleResultOf, afterRuleOf, finalGradeOf, letterOf };

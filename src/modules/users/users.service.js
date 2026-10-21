@@ -13,6 +13,7 @@ import {
 } from '../auth/auth.service.js';
 import { cancelPendingMembership, endMembership } from '../membership/membership.service.js';
 import { discardKtp } from '../school/school.service.js';
+import { letterheadView } from '../school/school.letterhead.js';
 
 const log = createLogger('Users');
 
@@ -46,6 +47,9 @@ const membershipSelect = {
             timeZone: true,
             deactivatedAt: true,
             deactivationReason: true,
+            address: true,
+            phone: true,
+            logoStorageKey: true,
         },
     },
     roles: {
@@ -121,6 +125,9 @@ function schoolForMember(school, roles, { readsCode }) {
             : null,
         deactivatedAt: school.deactivatedAt,
         deactivationReason: principal ? school.deactivationReason : null,
+        // The Report Card's letterhead, the Principal's to set (grading-and-report-card
+        // 10): read back as the location is, by them alone.
+        letterhead: principal ? letterheadView(school) : null,
     };
 }
 

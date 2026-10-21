@@ -10,6 +10,12 @@ import { gradeBookOf, slotGrades } from './grading.grades.js';
 import { blockersOf, withText, finalisedView } from './grading.readiness.js';
 import { notedIn } from './grading.texts.js';
 import { LIVE_FINALISATION, slotOf, liveFinalisationOf } from './grading.lock.js';
+import {
+    isEvenSemester,
+    gradesReportedBy,
+    automaticallyPromotedOf,
+    ownOutcomesOf,
+} from './grading.promotionRule.js';
 
 const log = createLogger('Grading');
 
@@ -40,6 +46,9 @@ const log = createLogger('Grading');
 //   It blocks no slot; closing waits for it (grading.close.js).
 // - The board reads a few slots at a time (ticket 05, measured 2026-10-19), as closing
 //   does.
+// - In the even Semester the board also names, per Class, the Students with no
+//   Promotion Outcome, their Homeroom Teacher's or the automatic one (ticket 09,
+//   grading.promotionRule.js), from the grades it reads anyway. Closing waits for them.
 
 // Starting, stopping and closing are audited against the Semester.
 const SEMESTER_SUBJECT = 'Semester';
@@ -293,13 +302,13 @@ function orderedSlotsOf(classSubjects) {
 
 // One slot on the board: its Teacher, whether it is finalised, and what blocks it -
 // read as finalising would, so a slot finalised and changed since (a Student moved in,
-// say) shows it too. A slot nobody answers for is blocked by that first.
-async function slotOnBoard(auth, classSubject, nameOf) {
+// say) shows it too. A slot nobody answers for is blocked by that first. Given grades,
+// it adds the Final Grades it reports to them (ticket 09).
+async function slotOnBoard(auth, classSubject, nameOf, grades = null) {
     const teacherId = await answeringTeacherOf(classSubject);
-    const [finalised, blockers] = await Promise.all([
-        finalisedView(classSubject),
-        gradeBookOf(auth, classSubject).then(blockersOf),
-    ]);
+    const [finalised, book] = await Promise.all([finalisedView(classSubject), gradeBookOf(auth, classSubject)]);
+    const blockers = await blockersOf(book);
+    if (grades) grades.push(...gradesReportedBy(book));
     return {
         classSubjectId: classSubject.id,
         class: { id: classSubject.classId, name: classSubject.class.name },
@@ -310,16 +319,32 @@ async function slotOnBoard(auth, classSubject, nameOf) {
     };
 }
 
+// The Students of a Class with no Promotion Outcome, by name: none of their Homeroom
+// Teacher's, and not promoted without one by the grades given (ticket 09).
+async function undecidedIn(semester, homeroom, placed, grades) {
+    const ids = new Set(placed.keys());
+    const [own, automatic] = await Promise.all([
+        ownOutcomesOf(new Map([...ids].map((id) => [id, homeroom.id]))),
+        automaticallyPromotedOf(semester, ids, grades),
+    ]);
+    return [...placed]
+        .filter(([studentProfileId]) => !own.get(studentProfileId)?.outcome && !automatic.has(studentProfileId))
+        .map(([studentProfileId, fullName]) => ({ studentProfileId, fullName }))
+        .sort(byName);
+}
+
 // One Class's Notes for the Semester: the Students placed in it now who get a Report
 // Card (ticket 05), and the ones of them with no Note - none written, or cleared (owner,
-// 2026-10-18).
-async function notesOnBoard(auth, semester, homeroom) {
+// 2026-10-18). In the even Semester, given the grades, also the ones of them with no
+// Promotion Outcome (ticket 09); null in the odd one.
+async function notesOnBoard(auth, semester, homeroom, grades = null) {
     const placed = await notedIn(auth, homeroom, semester);
     const written = await prisma.homeroomNote.findMany({
         where: { semesterId: semester.id, studentProfileId: { in: [...placed.keys()] }, text: { not: null } },
         select: { studentProfileId: true },
     });
     const hasNote = new Set(written.map((row) => row.studentProfileId));
+    const promotionsMissing = grades ? await undecidedIn(semester, homeroom, placed, grades) : null;
     return {
         class: { id: homeroom.id, name: homeroom.name },
         homeroomTeacher: homeroom.homeroomTeacher
@@ -330,6 +355,7 @@ async function notesOnBoard(auth, semester, homeroom) {
             .filter(([studentProfileId]) => !hasNote.has(studentProfileId))
             .map(([studentProfileId, fullName]) => ({ studentProfileId, fullName }))
             .sort(byName),
+        promotionsMissing,
     };
 }
 
@@ -361,10 +387,14 @@ async function readinessBoard(auth, id) {
     });
     const nameOf = new Map(teachers.map((row) => [row.id, row.user.fullName]));
 
+    // The even Semester's Final Grades, gathered from the books the slots are read with.
+    const grades = isEvenSemester(semester) ? [] : null;
     const slots = await mapAtMost(orderedSlotsOf(classSubjects), SLOTS_AT_ONCE, (classSubject) =>
-        slotOnBoard(auth, classSubject, nameOf)
+        slotOnBoard(auth, classSubject, nameOf, grades)
     );
-    const notes = await mapAtMost(classes, SLOTS_AT_ONCE, (homeroom) => notesOnBoard(auth, semester, homeroom));
+    const notes = await mapAtMost(classes, SLOTS_AT_ONCE, (homeroom) =>
+        notesOnBoard(auth, semester, homeroom, grades)
+    );
 
     return {
         semester: semesterView(semester),
@@ -372,6 +402,7 @@ async function readinessBoard(auth, id) {
             slots: slots.length,
             finalised: slots.filter((slot) => slot.finalised).length,
             notesMissing: notes.reduce((sum, row) => sum + row.missing.length, 0),
+            promotionsMissing: grades ? notes.reduce((sum, row) => sum + row.promotionsMissing.length, 0) : null,
         },
         slots,
         notes,

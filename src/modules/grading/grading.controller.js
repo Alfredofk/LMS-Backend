@@ -2,6 +2,7 @@ import { ok } from '../../shared/errors.js';
 import * as service from './grading.service.js';
 import * as grades from './grading.grades.js';
 import * as texts from './grading.texts.js';
+import * as promotion from './grading.promotion.js';
 import * as finalising from './grading.finalising.js';
 import * as closing from './grading.close.js';
 import * as reopening from './grading.reopen.js';
@@ -60,6 +61,19 @@ async function writeNotes(req, res) {
     return ok(res, { notes, message: 'Notes saved.' });
 }
 
+// ---- a Class's promotion outcomes ----
+
+async function getPromotions(req, res) {
+    const { id, semesterId } = req.validated.params;
+    return ok(res, await promotion.readPromotions(req.auth, id, semesterId));
+}
+
+async function writePromotions(req, res) {
+    const { id, semesterId } = req.validated.params;
+    const promotions = await promotion.writePromotions(req.auth, id, semesterId, req.validated.body);
+    return ok(res, { ...promotions, message: 'Promotions saved.' });
+}
+
 // ---- finalising ----
 
 async function startFinalising(req, res) {
@@ -106,6 +120,18 @@ async function getReportCard(req, res) {
     return ok(res, { reportCard: await reportCards.readReportCard(req.auth, req.validated.params.id) });
 }
 
+// The printed Report Card (ticket 07): file bytes, outside the envelope like the other
+// file routes, opened in the browser.
+async function getReportCardPdf(req, res) {
+    const { buffer, fileName } = await reportCards.reportCardPdf(req.auth, req.validated.params.id);
+    res.set({
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+        'Cache-Control': 'private, no-store',
+    });
+    return res.send(buffer);
+}
+
 async function getClassReportCards(req, res) {
     const { id, semesterId } = req.validated.params;
     return ok(res, await reportCards.classReportCards(req.auth, id, semesterId));
@@ -121,6 +147,8 @@ export {
     writeDescriptions,
     getNotes,
     writeNotes,
+    getPromotions,
+    writePromotions,
     startFinalising,
     stopFinalising,
     getReadiness,
@@ -130,5 +158,6 @@ export {
     reopenSemester,
     getMyReportCards,
     getReportCard,
+    getReportCardPdf,
     getClassReportCards,
 };
