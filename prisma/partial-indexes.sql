@@ -11,11 +11,16 @@
 -- must permit repeats of the excluded rows, and a total unique constraint would
 -- silently forbid legitimate history.
 
--- A user may hold only one membership that is pending or active.
--- REJECTED and LEFT rows must repeat: a person can be rejected twice, and
--- moving between schools depends on old LEFT rows staying put (ADR-0004).
-CREATE UNIQUE INDEX "SchoolMembership_one_pending_or_active_per_user"
-    ON "SchoolMembership" ("userId")
+-- A user may hold only one membership that is pending or active at each school,
+-- at any number of schools (governing-body ticket 01, ADR-0011). REJECTED and LEFT
+-- rows must repeat: a person can be rejected twice, and coming back to a school
+-- depends on old LEFT rows staying put (ADR-0004). Replaced
+-- "SchoolMembership_one_pending_or_active_per_user", one across every school, in
+-- 20261021155034_several_memberships_place_bound_tokens (owner's yes, 2026-10-21).
+-- A Student's one membership on the whole platform is the services' rule
+-- (membership.eligibility.js): no index relates a role row to another school's.
+CREATE UNIQUE INDEX "SchoolMembership_one_live_per_user_per_school"
+    ON "SchoolMembership" ("userId", "schoolId")
     WHERE "status" IN ('PENDING', 'ACTIVE');
 
 -- One teacher per class + subject + semester.

@@ -8,6 +8,7 @@ import {
     loginBody,
     emailOnlyBody,
     refreshBody,
+    placeBody,
     resetPasswordBody,
     tokenQuery,
     googleBody,
@@ -55,6 +56,10 @@ router.post('/google', validate({ body: googleBody }), controller.googleSignIn);
 // Rotation is its own ceiling: a refresh token is good exactly once, so
 // replaying one cannot be repeated for profit and needs no separate limiter.
 router.post('/refresh', validate({ body: refreshBody }), controller.refresh);
+
+// Moving a sign-in to another of one's Schools (governing-body ticket 01). It
+// spends the refresh token as /refresh does, so the same reasoning covers it.
+router.post('/place', validate({ body: placeBody }), controller.choosePlace);
 
 router.post('/logout', validate({ body: refreshBody }), controller.logout);
 

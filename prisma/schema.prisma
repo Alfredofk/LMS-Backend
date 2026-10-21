@@ -236,6 +236,13 @@ model PasswordResetToken {
 model RefreshToken {
     id                String    @id @default(cuid())
     userId            String
+    /// The Place this sign-in is for (governing-body ticket 01, ADR-0011): every
+    /// refresh rebuilds this School's claims, and deactivating it revokes this row.
+    /// Null for none yet - an applicant, a row issued before the ticket, or one who
+    /// belongs to several Schools and has chosen none. Such a row takes the one
+    /// ACTIVE School at its next refresh. Not a tenant column: RefreshToken is
+    /// identity, above tenancy (UNSCOPED_MODELS).
+    schoolId          String?
     tokenHash         String    @unique
     expiresAt         DateTime
     revokedAt         DateTime?
@@ -243,10 +250,12 @@ model RefreshToken {
     replacedByTokenId String?
     createdAt         DateTime  @default(now())
 
-    user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+    user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+    school School? @relation(fields: [schoolId], references: [id], onDelete: SetNull)
 
     @@index([userId])
     @@index([userId, revokedAt])
+    @@index([schoolId, revokedAt])
 }
 
 /// The platform operator, above every school. Not a school role - no School has
@@ -522,6 +531,7 @@ model School {
     slotFinalisations SlotFinalisation[]
     reportCards       ReportCard[]
     reportCardSubjects ReportCardSubject[]
+    refreshTokens     RefreshToken[]
 
     @@index([deactivatedAt])
 }
@@ -532,9 +542,12 @@ model School {
 
 /// A User's affiliation with one School.
 ///
-/// At most ONE row per user may be PENDING or ACTIVE. That is a partial unique
-/// index in migration SQL, not @@unique - REJECTED and LEFT rows must repeat, or
-/// nobody could ever be rejected twice or move schools.
+/// At most ONE row per user per School may be PENDING or ACTIVE, at any number of
+/// Schools (governing-body ticket 01, ADR-0011). That is a partial unique index in
+/// migration SQL, not @@unique - REJECTED and LEFT rows must repeat, or nobody
+/// could ever be rejected twice or come back. A Student holds one live membership
+/// on the whole platform; that is a rule of the services (membership.eligibility.js),
+/// since it spans rows no index can relate.
 model SchoolMembership {
     id          String           @id @default(cuid())
     schoolId    String
@@ -573,7 +586,8 @@ model SchoolMembership {
     // same school (ticket 06) needs the repeats too.
     //
     // The real rule is the partial index in partial-indexes.sql: one
-    // PENDING-or-ACTIVE membership per user, across every school.
+    // PENDING-or-ACTIVE membership per user per school (governing-body ticket 01;
+    // until then, one across every school).
     @@index([schoolId, status])
     @@index([userId])
 }

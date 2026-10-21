@@ -5,12 +5,7 @@ import { googleVerifier } from '../../shared/google.js';
 import { recordAudit } from '../../shared/approval.js';
 import { AppError, badRequest, conflict, notFound, unauthorized } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
-import {
-    publicUser,
-    issueRefreshToken,
-    revokeAllRefreshTokens,
-    authResponse,
-} from '../auth/auth.service.js';
+import { publicUser, placesOf, revokeAllRefreshTokens, signIn } from '../auth/auth.service.js';
 import { cancelPendingMembership, endMembership } from '../membership/membership.service.js';
 import { discardKtp } from '../school/school.service.js';
 import { letterheadView } from '../school/school.letterhead.js';
@@ -23,11 +18,12 @@ const log = createLogger('Users');
 // and which roles they requested - that is the whole point of the endpoint, since
 // otherwise a person waiting on approval has no way to tell whether anything is
 // happening. They see no roster, no classes, no other member: this reads their
-// own membership row by userId and never opens a school scope, so nothing
+// own membership rows by userId and never opens a school scope, so nothing
 // tenant-owned is reachable from the token they hold (ADR-0001).
 //
 // Unscoped for the same reason buildAuthClaims is: a PENDING user's token carries
-// no schoolId, so there is no ambient school for the extension to filter by.
+// no schoolId, so there is no ambient school for the extension to filter by - and
+// since governing-body ticket 01 their rows span schools besides the token's.
 const membershipSelect = {
     id: true,
     status: true,
@@ -137,8 +133,9 @@ function schoolForMember(school, roles, { readsCode }) {
 // (ADR-0002). The code only finds the school; rotating it stays the Principal's.
 //
 // Only on an ACTIVE membership of a school still active: a LEFT member's roles keep
-// their ACTIVE status as history (guards.js). This runs unscoped, under
-// loadMembership, so the Class is looked up by its schoolId by hand.
+// their ACTIVE status as history (guards.js). The membership may be another
+// school's than the token's (governing-body ticket 01), so the Class is looked up
+// unscoped, by its schoolId by hand.
 async function readsSchoolCode(membership) {
     if (membership.status !== 'ACTIVE' || membership.school.deactivatedAt) return false;
 
@@ -147,14 +144,16 @@ async function readsSchoolCode(membership) {
     );
     if (leader) return true;
 
-    const homeroom = await prisma.class.findFirst({
-        where: {
-            schoolId: membership.school.id,
-            homeroomTeacherMembershipId: membership.id,
-            academicYear: { status: 'ACTIVE' },
-        },
-        select: { id: true },
-    });
+    const homeroom = await runUnscoped('whether a member reads their school code', async () =>
+        await prisma.class.findFirst({
+            where: {
+                schoolId: membership.school.id,
+                homeroomTeacherMembershipId: membership.id,
+                academicYear: { status: 'ACTIVE' },
+            },
+            select: { id: true },
+        })
+    );
     return Boolean(homeroom);
 }
 
@@ -177,50 +176,85 @@ function studentForMember(profile) {
     };
 }
 
-async function loadMembership(userId) {
-    return runUnscoped('reading a user own membership status', async () => {
-        const membership = await prisma.schoolMembership.findFirst({
-            where: { userId, status: { in: ['PENDING', 'ACTIVE'] } },
+const LIVE = ['PENDING', 'ACTIVE'];
+
+// Every membership row of the person, newest first: what /users/me picks from. A
+// person's rows are few - one or two per school they ever asked at.
+async function membershipRowsOf(userId) {
+    return runUnscoped('reading a user own memberships', async () =>
+        await prisma.schoolMembership.findMany({
+            where: { userId },
             select: membershipSelect,
-        });
+            orderBy: { updatedAt: 'desc' },
+        })
+    );
+}
 
-        // A rejected applicant has no pending or active row, and ticket 05 requires
-        // the reason they were turned down to be visible to them. So when there is
-        // nothing live, the most recent REJECTED, CANCELLED (their own withdrawal)
-        // or LEFT (ticket 06 - with endReason when they were removed) row is shown
-        // instead. The status field is what tells them apart, and none of them
-        // grants anything anywhere (buildAuthClaims only reads ACTIVE).
-        const decided =
-            membership ??
-            (await prisma.schoolMembership.findFirst({
-                where: { userId, status: { in: ['REJECTED', 'CANCELLED', 'LEFT'] } },
-                orderBy: { updatedAt: 'desc' },
-                select: membershipSelect,
-            }));
+// Live rows ahead of decided ones, each part newest first. A rejected applicant
+// has no live row, and ticket 05 requires the reason they were turned down to be
+// visible to them, so with nothing live the most recent REJECTED, CANCELLED
+// (their own withdrawal) or LEFT (ticket 06 - with endReason when they were
+// removed) row is shown instead. The status field is what tells them apart, and
+// none of them grants anything anywhere (buildAuthClaims only reads ACTIVE).
+const liveFirst = (rows) => [
+    ...rows.filter((row) => LIVE.includes(row.status)),
+    ...rows.filter((row) => !LIVE.includes(row.status)),
+];
 
-        if (!decided) return null;
+// /users/me's `membership`: the School the token is for (governing-body ticket 01,
+// owner 2026-10-21), whatever has become of it since. A token for none gets:
+// - while the person may open no School, the answer from before several
+//   memberships - their live row, else the latest outcome - which is how an
+//   applicant, a removed member and a deactivated school's member learn where
+//   they stand;
+// - the one School they may open, for a token minted before its approval;
+// - null while they may open several and have chosen none.
+function currentOf(rows, auth, places) {
+    if (auth.membershipId) return rows.find((row) => row.id === auth.membershipId) ?? null;
+    if (places.length > 1) return null;
+    if (places.length === 1) {
+        return rows.find((row) => row.school.id === places[0].id && row.status === 'ACTIVE') ?? null;
+    }
+    return liveFirst(rows)[0] ?? null;
+}
 
-        return {
-            id: decided.id,
-            status: decided.status,
-            requestedAt: decided.requestedAt,
-            approvedAt: decided.approvedAt,
-            endedAt: decided.endedAt,
-            endReason: decided.endReason,
-            school: schoolForMember(decided.school, decided.roles, { readsCode: await readsSchoolCode(decided) }),
-            roles: decided.roles,
-            teacher: decided.teacherProfile,
-            student: studentForMember(decided.studentProfile),
-            children: decided.guardianLinks.map((link) => ({
-                id: link.id,
-                status: link.status,
-                relationship: link.relationship,
-                rejectionReason: link.rejectionReason,
-                endedAt: link.endedAt,
-                student: { fullName: link.studentProfile.membership.user.fullName },
-            })),
-        };
-    });
+// /users/me's `otherSchools` (owner, 2026-10-21; named so by the owner the same day,
+// since an ACTIVE membership at a school switched off is no request): for every
+// School the person may not open, their newest row there - a request waiting,
+// turned down or cancelled, an end with its reason, or that ACTIVE membership. Live
+// first, so a new request is not hidden behind an older outcome at its school.
+function otherSchoolsOf(rows, places) {
+    const shown = new Set(places.map((place) => place.id));
+    const newest = [];
+    for (const row of liveFirst(rows)) {
+        if (shown.has(row.school.id)) continue;
+        shown.add(row.school.id);
+        newest.push(row);
+    }
+    return newest;
+}
+
+async function membershipView(row) {
+    return {
+        id: row.id,
+        status: row.status,
+        requestedAt: row.requestedAt,
+        approvedAt: row.approvedAt,
+        endedAt: row.endedAt,
+        endReason: row.endReason,
+        school: schoolForMember(row.school, row.roles, { readsCode: await readsSchoolCode(row) }),
+        roles: row.roles,
+        teacher: row.teacherProfile,
+        student: studentForMember(row.studentProfile),
+        children: row.guardianLinks.map((link) => ({
+            id: link.id,
+            status: link.status,
+            relationship: link.relationship,
+            rejectionReason: link.rejectionReason,
+            endedAt: link.endedAt,
+            student: { fullName: link.studentProfile.membership.user.fullName },
+        })),
+    };
 }
 
 async function loadUser(userId) {
@@ -231,32 +265,42 @@ async function loadUser(userId) {
 
 // The account, whether it is a Platform Admin - read from the table as
 // requirePlatformAdmin reads it, so the frontend knows to offer the admin's screens
-// (2026-10-03) - and the membership.
+// (2026-10-03) - and the memberships: the token's (currentOf), the Places the
+// person may open, as the sign-in responses carry them, and what stands at every
+// other school (otherSchoolsOf) - governing-body ticket 01.
 //
 // The phone number (ticket 23) is added here rather than to publicUser, so the
 // sign-in responses keep their shape, as they did for isPlatformAdmin.
-async function meOf(user) {
-    const admin = await prisma.platformAdmin.findUnique({ where: { userId: user.id }, select: { id: true } });
+async function meOf(user, auth) {
+    const [admin, rows, places] = await Promise.all([
+        prisma.platformAdmin.findUnique({ where: { userId: user.id }, select: { id: true } }),
+        membershipRowsOf(user.id),
+        placesOf(user.id),
+    ]);
+    const current = currentOf(rows, auth, places);
+
     return {
         user: { ...publicUser(user), phone: user.phone },
         isPlatformAdmin: Boolean(admin),
-        membership: await loadMembership(user.id),
+        membership: current ? await membershipView(current) : null,
+        places,
+        otherSchools: await Promise.all(otherSchoolsOf(rows, places).map(membershipView)),
     };
 }
 
-async function getMe(userId) {
-    return meOf(await loadUser(userId));
+async function getMe(auth) {
+    return meOf(await loadUser(auth.userId), auth);
 }
 
-async function updateMe(userId, { fullName, phone }) {
-    await loadUser(userId);
+async function updateMe(auth, { fullName, phone }) {
+    await loadUser(auth.userId);
 
     const user = await prisma.user.update({
-        where: { id: userId },
+        where: { id: auth.userId },
         data: { fullName, phone },
     });
 
-    return meOf(user);
+    return meOf(user, auth);
 }
 
 // Changing a password signs out every device, then signs this one back in.
@@ -270,9 +314,11 @@ async function updateMe(userId, { fullName, phone }) {
 // minutes - the accepted cost of a stateless access token, and why the tenant
 // guards in guards.js read status from the database rather than from claims.
 //
-// The new sign-in keeps this device's remember-me choice, taken from the access
-// token (`rem`) because that is all this request carries.
-async function changePassword(userId, { currentPassword, newPassword }, { rememberMe = false } = {}) {
+// The new sign-in keeps this device's remember-me choice and its School, both
+// taken from the access token (`rem`, `schoolId`) because that is all this request
+// carries (governing-body ticket 01).
+async function changePassword(auth, { currentPassword, newPassword }) {
+    const { userId } = auth;
     const user = await loadUser(userId);
 
     // An account made through Google has nothing to compare against yet. Its
@@ -294,11 +340,11 @@ async function changePassword(userId, { currentPassword, newPassword }, { rememb
     });
 
     await revokeAllRefreshTokens(userId);
-    const { token } = await issueRefreshToken(userId, { rememberMe });
+    const { answer } = await signIn(updated, { rememberMe: auth.rememberMe, schoolId: auth.schoolId });
 
     log.success(`Password changed for ${user.email}`);
 
-    return authResponse(updated, token, { rememberMe });
+    return answer;
 }
 
 // ---------------------------------------------------------------------------
@@ -339,45 +385,56 @@ async function confirmIdentity(user, { password, googleIdToken }) {
 // are about. The same address, or the same Google account, can then register as
 // a new User.
 //
-// What the person belongs to goes first, in the same transaction:
+// What the person belongs to goes first, in the same transaction - every school
+// they belong to or asked to join (governing-body ticket 01):
 // - a join request still waiting is cancelled, as if they had taken it back;
 // - an ACTIVE membership leaves through endMembership, the one Leaving function -
 //   refused, while the school is in operation, for a Principal and for a teacher
 //   or student (who send a leave request instead). At a deactivated school
 //   nobody could approve that request, so anyone leaves here (owner, 2026-09-27);
 // - a school registration still under review is closed, and its KTP deleted.
+// One school holding them back refuses it all, and the refusal names every such
+// school in its details.
 async function deleteAccount(userId, body) {
     const user = await loadUser(userId);
     await confirmIdentity(user, body);
 
-    const membership = await runUnscoped('finding what an account being deleted belongs to', async () =>
-        await prisma.schoolMembership.findFirst({
-            where: { userId, status: { in: ['PENDING', 'ACTIVE'] } },
+    const memberships = await runUnscoped('finding what an account being deleted belongs to', async () =>
+        await prisma.schoolMembership.findMany({
+            where: { userId, status: { in: LIVE } },
             select: {
                 id: true,
                 status: true,
                 roles: { where: { status: 'ACTIVE' }, select: { role: true } },
                 school: { select: { id: true, name: true, deactivatedAt: true } },
             },
+            orderBy: { id: 'asc' },
         })
     );
 
     // Only a school in operation holds anyone back. A deactivated one can take no
     // leave request and needs no Principal while it is off; if it is restored
     // without one, the Platform Admin appoints another (owner, 2026-09-27).
-    if (membership?.status === 'ACTIVE' && !membership.school.deactivatedAt) {
-        const held = membership.roles.map((entry) => entry.role);
-        if (held.includes('PRINCIPAL')) {
-            throw conflict(
-                'A school cannot be left without its Principal, so this account cannot be deleted yet'
-            );
-        }
-        if (held.some((role) => NEEDS_LEAVE_REQUEST.includes(role))) {
-            throw conflict(
-                'A teacher or a student leaves with the Principal’s approval. Send a leave request ' +
-                    'with your resignation letter first, then delete your account.'
-            );
-        }
+    const holding = (roles) =>
+        memberships
+            .filter((entry) => entry.status === 'ACTIVE' && !entry.school.deactivatedAt)
+            .filter((entry) => entry.roles.some((held) => roles.includes(held.role)))
+            .map((entry) => entry.school.name);
+
+    const headOf = holding(['PRINCIPAL']);
+    if (headOf.length > 0) {
+        throw conflict(
+            'A school cannot be left without its Principal, so this account cannot be deleted yet',
+            { schools: headOf }
+        );
+    }
+    const leavesWithApproval = holding(NEEDS_LEAVE_REQUEST);
+    if (leavesWithApproval.length > 0) {
+        throw conflict(
+            'A teacher or a student leaves with the Principal’s approval. Send a leave request ' +
+                'with your resignation letter first, then delete your account.',
+            { schools: leavesWithApproval }
+        );
     }
 
     const registration = await prisma.schoolRegistration.findFirst({
@@ -387,17 +444,20 @@ async function deleteAccount(userId, body) {
 
     const now = new Date();
 
-    const write = () =>
-        prisma.$transaction(async (tx) => {
-            if (membership?.status === 'PENDING') {
-                await cancelPendingMembership(tx, {
-                    membershipId: membership.id,
-                    schoolId: membership.school.id,
-                    userId,
-                    now,
-                });
-            }
-            if (membership?.status === 'ACTIVE') {
+    await prisma.$transaction(async (tx) => {
+        // Each inside its own school's scope: the tenant extension reads the scope
+        // at every query, so one transaction spans the schools.
+        for (const membership of memberships) {
+            await runInSchool(membership.school.id, membership.school.name, async () => {
+                if (membership.status === 'PENDING') {
+                    await cancelPendingMembership(tx, {
+                        membershipId: membership.id,
+                        schoolId: membership.school.id,
+                        userId,
+                        now,
+                    });
+                    return;
+                }
                 await endMembership(tx, {
                     membershipId: membership.id,
                     schoolId: membership.school.id,
@@ -408,66 +468,65 @@ async function deleteAccount(userId, body) {
                         : ENDED_BY_DELETION,
                     now,
                 });
-            }
+            });
+        }
 
-            // Unscoped even inside a school's scope: a registration predates any
-            // school, and its audit row must not be stamped with this one.
-            if (registration) {
-                await runUnscoped('closing the school registration of an account being deleted', async () => {
-                    const claimed = await tx.schoolRegistration.updateMany({
-                        where: { id: registration.id, status: 'PENDING' },
-                        data: {
-                            status: 'REJECTED',
-                            rejectionReason: REGISTRATION_CLOSED,
-                            reviewedAt: now,
-                            ktpStoragePath: null,
-                        },
-                    });
-                    if (claimed.count === 0) {
-                        throw conflict('Your school registration was decided meanwhile. Try again.');
-                    }
-
-                    await recordAudit({
-                        subjectType: 'SchoolRegistration',
-                        subjectId: registration.id,
-                        action: 'CANCEL',
-                        actorUserId: userId,
-                        reason: REGISTRATION_CLOSED,
-                        client: tx,
-                    });
+        // Unscoped even inside a school's scope: a registration predates any
+        // school, and its audit row must not be stamped with this one.
+        if (registration) {
+            await runUnscoped('closing the school registration of an account being deleted', async () => {
+                const claimed = await tx.schoolRegistration.updateMany({
+                    where: { id: registration.id, status: 'PENDING' },
+                    data: {
+                        status: 'REJECTED',
+                        rejectionReason: REGISTRATION_CLOSED,
+                        reviewedAt: now,
+                        ktpStoragePath: null,
+                    },
                 });
-            }
+                if (claimed.count === 0) {
+                    throw conflict('Your school registration was decided meanwhile. Try again.');
+                }
 
-            // .invalid is a reserved TLD: the address can never receive mail, and
-            // the id keeps it unique. The phone number goes with it (ticket 23):
-            // nothing keeps a way to reach a person who asked to be deleted.
-            const released = await tx.user.updateMany({
-                where: { id: userId, deletedAt: null },
-                data: {
-                    email: `deleted+${userId}@deleted.invalid`,
-                    googleSub: null,
-                    passwordHash: null,
-                    phone: null,
-                    deletedAt: now,
-                },
+                await recordAudit({
+                    subjectType: 'SchoolRegistration',
+                    subjectId: registration.id,
+                    action: 'CANCEL',
+                    actorUserId: userId,
+                    reason: REGISTRATION_CLOSED,
+                    client: tx,
+                });
             });
-            if (released.count === 0) throw conflict('This account is already deleted');
+        }
 
-            await tx.refreshToken.updateMany({
-                where: { userId, revokedAt: null },
-                data: { revokedAt: now },
-            });
-            await tx.emailVerificationToken.updateMany({
-                where: { userId, usedAt: null },
-                data: { usedAt: now },
-            });
-            await tx.passwordResetToken.updateMany({
-                where: { userId, usedAt: null },
-                data: { usedAt: now },
-            });
+        // .invalid is a reserved TLD: the address can never receive mail, and
+        // the id keeps it unique. The phone number goes with it (ticket 23):
+        // nothing keeps a way to reach a person who asked to be deleted.
+        const released = await tx.user.updateMany({
+            where: { id: userId, deletedAt: null },
+            data: {
+                email: `deleted+${userId}@deleted.invalid`,
+                googleSub: null,
+                passwordHash: null,
+                phone: null,
+                deletedAt: now,
+            },
         });
+        if (released.count === 0) throw conflict('This account is already deleted');
 
-    await (membership ? runInSchool(membership.school.id, membership.school.name, write) : write());
+        await tx.refreshToken.updateMany({
+            where: { userId, revokedAt: null },
+            data: { revokedAt: now },
+        });
+        await tx.emailVerificationToken.updateMany({
+            where: { userId, usedAt: null },
+            data: { usedAt: now },
+        });
+        await tx.passwordResetToken.updateMany({
+            where: { userId, usedAt: null },
+            data: { usedAt: now },
+        });
+    });
 
     // After the commit, as the admin's decision does it: a file that fails to go
     // is logged for a human, and cannot undo the deletion.
@@ -475,16 +534,19 @@ async function deleteAccount(userId, body) {
 
     log.info(`Account ${userId} deleted`);
 
+    const ended = memberships.map((entry) => ({
+        school: { name: entry.school.name },
+        status: entry.status === 'PENDING' ? 'CANCELLED' : 'LEFT',
+    }));
+
     return {
         deleted: true,
-        membership: membership
-            ? {
-                school: { name: membership.school.name },
-                status: membership.status === 'PENDING' ? 'CANCELLED' : 'LEFT',
-            }
-            : null,
+        // `membership` keeps its shape from before several memberships for one who
+        // had at most one; `memberships` names them all (governing-body ticket 01).
+        membership: ended.length === 1 ? ended[0] : null,
+        memberships: ended,
         schoolRegistrationClosed: Boolean(registration),
     };
 }
 
-export { loadMembership, getMe, updateMe, changePassword, deleteAccount };
+export { getMe, updateMe, changePassword, deleteAccount };

@@ -23,8 +23,9 @@ async function request(req, res) {
     );
 }
 
+// The one join request waiting, or the one named (governing-body ticket 01).
 async function cancelRequest(req, res) {
-    const membership = await service.cancelJoinRequest(req.auth.userId);
+    const membership = await service.cancelJoinRequest(req.auth.userId, req.validated?.params?.id ?? null);
     return ok(res, {
         membership,
         message: 'Join request cancelled. You are free to ask to join any school.',

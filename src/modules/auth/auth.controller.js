@@ -51,6 +51,10 @@ async function refresh(req, res) {
     return ok(res, await service.refreshAuth(req.validated.body.refreshToken));
 }
 
+async function choosePlace(req, res) {
+    return ok(res, await service.choosePlace(req.validated.body));
+}
+
 async function logout(req, res) {
     await service.logout(req.validated.body.refreshToken);
     return ok(res, { message: 'Signed out.' });
@@ -81,6 +85,7 @@ export {
     login,
     googleSignIn,
     refresh,
+    choosePlace,
     logout,
     forgotPassword,
     checkResetToken,

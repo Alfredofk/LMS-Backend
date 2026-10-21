@@ -56,8 +56,11 @@ router.use(requireAuth);
 router.post('/lookup', joinSchoolLimiter, validate({ body: lookupBody }), controller.lookup);
 router.post('/requests', joinSchoolLimiter, validate({ body: requestBody }), controller.request);
 // Taking a PENDING join request back. No limiter beyond generalLimiter: it guesses
-// nothing, and asking again is what /requests already rations.
+// nothing, and asking again is what /requests already rations. Since one may wait
+// at several schools (governing-body ticket 01), the request is named by its id;
+// the bare route keeps working while only one waits.
 router.post('/requests/cancel', controller.cancelRequest);
+router.post('/requests/:id/cancel', validate({ params: idParams }), controller.cancelRequest);
 // The /me routes are the ones here whose caller DOES hold a membership, so each
 // takes requireActiveMembership on its own rather than the router taking it.
 // Adding a role shares joinSchoolLimiter because a GUARDIAN claim is the same

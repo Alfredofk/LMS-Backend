@@ -13,7 +13,7 @@ import {
 } from '../../shared/auth.js';
 import { sendVerificationEmail, sendPasswordResetEmail } from '../../shared/mailer.js';
 import { googleVerifier } from '../../shared/google.js';
-import { AppError, badRequest, conflict, unauthorized } from '../../shared/errors.js';
+import { AppError, badRequest, conflict, notFound, unauthorized } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
 
 const log = createLogger('Auth');
@@ -58,8 +58,21 @@ function deliver(context, send) {
 }
 
 // ---------------------------------------------------------------------------
-// Claims
+// Claims and Places
 // ---------------------------------------------------------------------------
+
+// What a person may open (governing-body ticket 01, ADR-0011): an ACTIVE
+// membership at a school still active. A person may hold one at several schools,
+// and each is a Place a sign-in can be for.
+//
+// A deactivated school issues no claims, which is the whole mechanism behind
+// withdrawing its access (ticket 14): without a schoolId in the token there is no
+// ambient scope, so every tenant-owned query throws and requireActiveMembership
+// answers 403. The membership row itself is untouched - the school coming back
+// should find its people still in it.
+const OPENABLE = { status: 'ACTIVE', endedAt: null, school: { deactivatedAt: null } };
+
+const NO_CLAIMS = { membershipId: null, schoolId: null, schoolName: null, roles: [] };
 
 // The join between authentication and tenancy (ADR-0001), and the one place in
 // this module that must step outside the tenant scope.
@@ -68,50 +81,59 @@ function deliver(context, send) {
 // before any school is known, which is precisely what the lookup is trying to
 // find out. Scoped, the extension would throw (prisma.js:88). The same carve-out
 // seed.js:129 makes, for the same reason.
-//
+async function openableMembershipsOf(userId) {
+    return runUnscoped('listing the schools a user may open, before any school scope exists', async () =>
+        await prisma.schoolMembership.findMany({
+            where: { userId, ...OPENABLE },
+            select: {
+                id: true,
+                schoolId: true,
+                school: { select: { name: true } },
+                roles: { where: { status: 'ACTIVE' }, select: { role: true } },
+            },
+            orderBy: { school: { name: 'asc' } },
+        })
+    );
+}
+
+// One entry of the dropdown that moves a person between their schools (K17). The
+// subdomain joins it in ticket 02, a Governing Body seat in ticket 03.
+const placeView = (membership) => ({
+    kind: 'SCHOOL',
+    id: membership.schoolId,
+    name: membership.school.name,
+    roles: membership.roles.map((entry) => entry.role),
+});
+
+const placesOf = async (userId) => (await openableMembershipsOf(userId)).map(placeView);
+
+// Which membership a sign-in opens. Asked for a School, it is that School's while
+// the person may open it, and none otherwise: a token is for one Place, and never
+// falls to another by itself. Asked for none, it is the one School they may open,
+// and none when they may open several - they choose (owner, 2026-10-21).
+function chosenOf(openable, schoolId) {
+    if (schoolId) return openable.find((entry) => entry.schoolId === schoolId) ?? null;
+    return openable.length === 1 ? openable[0] : null;
+}
+
 // Only an ACTIVE membership with ACTIVE roles produces claims. A PENDING member
 // gets a token carrying no school at all, so every tenant-owned query they could
-// reach throws rather than returning rows.
-async function buildAuthClaims(userId) {
-    return runUnscoped(
-        'resolving a membership before any school scope exists',
-        async () => {
-            const membership = await prisma.schoolMembership.findFirst({
-                // A deactivated school issues no claims, which is the whole
-                // mechanism behind withdrawing its access (ticket 14): without a
-                // schoolId in the token there is no ambient scope, so every
-                // tenant-owned query throws and requireActiveMembership answers
-                // 403. The membership row itself is untouched - the school coming
-                // back should find its people still in it.
-                where: {
-                    userId,
-                    status: 'ACTIVE',
-                    endedAt: null,
-                    school: { deactivatedAt: null },
-                },
-                select: {
-                    id: true,
-                    schoolId: true,
-                    school: { select: { name: true } },
-                    roles: {
-                        where: { status: 'ACTIVE' },
-                        select: { role: true },
-                    },
-                },
-            });
+// reach throws rather than returning rows. The Places come back beside the claims,
+// read once.
+async function buildAuthClaims(userId, schoolId = null) {
+    const openable = await openableMembershipsOf(userId);
+    const membership = chosenOf(openable, schoolId);
 
-            if (!membership) {
-                return { membershipId: null, schoolId: null, schoolName: null, roles: [] };
-            }
-
-            return {
-                membershipId: membership.id,
-                schoolId: membership.schoolId,
-                schoolName: membership.school.name,
-                roles: membership.roles.map((entry) => entry.role),
-            };
+    const claims = membership
+        ? {
+            membershipId: membership.id,
+            schoolId: membership.schoolId,
+            schoolName: membership.school.name,
+            roles: membership.roles.map((entry) => entry.role),
         }
-    );
+        : NO_CLAIMS;
+
+    return { claims, places: openable.map(placeView) };
 }
 
 // ---------------------------------------------------------------------------
@@ -122,13 +144,16 @@ async function buildAuthClaims(userId) {
 // remember-me lifetimes in shared/auth.js. One source of truth: change a lifetime
 // there and the table follows, with no chance of a row outliving the token it
 // stands for.
-async function issueRefreshToken(userId, { rememberMe = false } = {}) {
-    const token = signRefreshToken({ userId, rememberMe });
+//
+// schoolId is the Place the row is for (governing-body ticket 01), null for none.
+async function issueRefreshToken(userId, { rememberMe = false, schoolId = null, expiresAt = null } = {}) {
+    const token = signRefreshToken({ userId, rememberMe, expiresAt });
     const { exp } = verifyRefreshToken(token);
 
     const row = await prisma.refreshToken.create({
         data: {
             userId,
+            schoolId,
             tokenHash: hashToken(token),
             expiresAt: new Date(exp * 1000),
         },
@@ -145,22 +170,41 @@ const revokeAllRefreshTokens = (userId) =>
         data: { revokedAt: new Date() },
     });
 
-// rememberMe must be the same choice the refreshToken beside it was signed with.
-async function authResponse(user, refreshToken, { rememberMe = false } = {}) {
-    const claims = await buildAuthClaims(user.id);
+// One sign-in: an access token for its Place, a refresh token bound to the same
+// Place, and every Place the person may open (K17). Returns the answer for the
+// client, and the new refresh token's row id for a rotation to point at.
+//
+// The Place asked for stays the row's even when it no longer opens - a member
+// removed from it gets a token with no school, as before, and moves through
+// choosePlace. Asked for none, the row is bound to the School it opened, if any:
+// an applicant approved since, or a row issued before the ticket, from then on
+// refreshes into that School alone.
+//
+// rememberMe must be the same choice the refresh token was signed with.
+async function signIn(user, { rememberMe = false, schoolId = null, expiresAt = null } = {}) {
+    const { claims, places } = await buildAuthClaims(user.id, schoolId);
+    const issued = await issueRefreshToken(user.id, {
+        rememberMe,
+        schoolId: schoolId ?? claims.schoolId,
+        expiresAt,
+    });
 
     return {
-        accessToken: signAccessToken({ userId: user.id, ...claims, rememberMe }),
-        refreshToken,
-        user: publicUser(user),
-        membership: claims.membershipId
-            ? {
-                id: claims.membershipId,
-                schoolId: claims.schoolId,
-                schoolName: claims.schoolName,
-                roles: claims.roles,
-            }
-            : null,
+        tokenId: issued.id,
+        answer: {
+            accessToken: signAccessToken({ userId: user.id, ...claims, rememberMe }),
+            refreshToken: issued.token,
+            user: publicUser(user),
+            membership: claims.membershipId
+                ? {
+                    id: claims.membershipId,
+                    schoolId: claims.schoolId,
+                    schoolName: claims.schoolName,
+                    roles: claims.roles,
+                }
+                : null,
+            places,
+        },
     };
 }
 
@@ -284,26 +328,28 @@ async function login({ email, password, rememberMe }) {
         );
     }
 
-    const { token } = await issueRefreshToken(user.id, { rememberMe });
-    return authResponse(user, token, { rememberMe });
+    // No Place asked for: the one School they may open, none with several
+    // (governing-body ticket 01). Ticket 02 names it by the subdomain.
+    return (await signIn(user, { rememberMe })).answer;
 }
 
-// Rotation. Every refresh mints a new token and revokes the one presented, so a
-// refresh token is good exactly once.
+// A refresh token presented for rotation: signed, on file, never used, not
+// expired, and its account still able to sign in. The remember-me choice comes
+// back from its signed payload, never from the request.
 //
-// That is what makes theft detectable: if a revoked token comes back, either the
-// legitimate holder replayed it or someone copied it - and there is no way to
-// tell which. Signing that user out everywhere is the only safe answer, and costs
-// the honest user one login.
+// A rotated token coming back is the signature of theft: either the legitimate
+// holder replayed it or someone copied it - and there is no way to tell which.
+// Signing that user out everywhere is the only safe answer, and costs the honest
+// user one login. The same holds for a move to another Place (choosePlace), which
+// spends the token as a refresh does.
 //
-// "Session" is not the word for this anywhere in the codebase: CONTEXT.md gives it
-// to one meeting of a ClassSubject. A sign-in belongs to a device.
-//
-// The remember-me choice is inherited from the token presented - read from its
-// signed payload, never from the request - and the new token gets that choice's
-// full lifetime again. A token minted before `rem` existed carries none, and is
-// treated as not remembered.
-async function refreshAuth(rawToken) {
+// Only a rotated one (replacedByTokenId): a token revoked by a sign-out, a password
+// change, an account's deletion or its school's deactivation is simply over, and is
+// refused alone (governing-body ticket 01, 2026-10-21). Deactivating SMP A revokes
+// the sign-ins for SMP A only; the laptop still holding one presents it at its
+// next refresh, and cutting the person's sign-ins at their other schools for that
+// would undo the "only".
+async function loadLiveRefreshToken(rawToken) {
     const rejected = unauthorized('Invalid or expired refresh token');
 
     let payload;
@@ -312,7 +358,6 @@ async function refreshAuth(rawToken) {
     } catch {
         throw rejected;
     }
-    const rememberMe = payload.rem === true;
 
     const row = await prisma.refreshToken.findUnique({
         where: { tokenHash: hashToken(rawToken) },
@@ -321,8 +366,10 @@ async function refreshAuth(rawToken) {
     if (!row) throw rejected;
 
     if (row.revokedAt) {
-        await revokeAllRefreshTokens(row.userId);
-        log.warn(`Refresh token reuse for user ${row.userId} - signed out everywhere`);
+        if (row.replacedByTokenId) {
+            await revokeAllRefreshTokens(row.userId);
+            log.warn(`Refresh token reuse for user ${row.userId} - signed out everywhere`);
+        }
         throw rejected;
     }
 
@@ -331,15 +378,56 @@ async function refreshAuth(rawToken) {
     const user = await prisma.user.findUnique({ where: { id: row.userId } });
     if (!user || user.deletedAt || !user.emailVerifiedAt) throw rejected;
 
-    const issued = await issueRefreshToken(user.id, { rememberMe });
-    await prisma.refreshToken.update({
+    return { row, user, rememberMe: payload.rem === true };
+}
+
+// The presented row, revoked and pointing at the one that replaced it.
+const retireRefreshToken = (row, replacedByTokenId) =>
+    prisma.refreshToken.update({
         where: { id: row.id },
-        data: { revokedAt: new Date(), replacedByTokenId: issued.id },
+        data: { revokedAt: new Date(), replacedByTokenId },
     });
 
-    // Claims are rebuilt here, not carried over. This is the moment an approval
-    // granted since the last login actually reaches the user's token.
-    return authResponse(user, issued.token, { rememberMe });
+// Rotation. Every refresh mints a new token and revokes the one presented, so a
+// refresh token is good exactly once - which is what makes theft detectable
+// (loadLiveRefreshToken).
+//
+// "Session" is not the word for this anywhere in the codebase: CONTEXT.md gives it
+// to one meeting of a ClassSubject. A sign-in belongs to a device.
+//
+// The remember-me choice is inherited from the token presented, and the new token
+// gets that choice's full lifetime again. A token minted before `rem` existed
+// carries none, and is treated as not remembered.
+//
+// Claims are rebuilt here, not carried over, for the Place the row is bound to
+// (governing-body ticket 01). This is the moment an approval granted since the
+// last login actually reaches the user's token.
+async function refreshAuth(rawToken) {
+    const { row, user, rememberMe } = await loadLiveRefreshToken(rawToken);
+
+    const { tokenId, answer } = await signIn(user, { rememberMe, schoolId: row.schoolId });
+    await retireRefreshToken(row, tokenId);
+
+    return answer;
+}
+
+// Moving a sign-in to another of the person's Schools, within one origin
+// (governing-body ticket 01, owner 2026-10-21; ticket 02 adds the move across
+// subdomains). The refresh token presented is rotated as a refresh rotates it,
+// bound to the School asked for, and ends when it would have: the move renews
+// nothing. A School they may not open - another's, one they left, one switched
+// off, an unknown id - is one 404, answered before the token is spent.
+async function choosePlace({ refreshToken, schoolId }) {
+    const { row, user, rememberMe } = await loadLiveRefreshToken(refreshToken);
+
+    const { claims } = await buildAuthClaims(user.id, schoolId);
+    if (!claims.schoolId) throw notFound('School not found');
+
+    const { tokenId, answer } = await signIn(user, { rememberMe, schoolId, expiresAt: row.expiresAt });
+    await retireRefreshToken(row, tokenId);
+
+    log.info(`A sign-in moved to ${claims.schoolName}`);
+    return answer;
 }
 
 // Idempotent. Logging out twice, or with a token we never issued, is not a
@@ -451,8 +539,7 @@ async function googleSignIn({ idToken, rememberMe }) {
 
     const user = await resolveGoogleUser(google);
 
-    const { token } = await issueRefreshToken(user.id, { rememberMe });
-    return authResponse(user, token, { rememberMe });
+    return (await signIn(user, { rememberMe })).answer;
 }
 
 // ---------------------------------------------------------------------------
@@ -532,7 +619,8 @@ export {
     RESET_TTL_MS,
     publicUser,
     buildAuthClaims,
-    authResponse,
+    placesOf,
+    signIn,
     issueRefreshToken,
     revokeAllRefreshTokens,
     registerUser,
@@ -540,6 +628,7 @@ export {
     resendVerification,
     login,
     refreshAuth,
+    choosePlace,
     logout,
     googleSignIn,
     forgotPassword,

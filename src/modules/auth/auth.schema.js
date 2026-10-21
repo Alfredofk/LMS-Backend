@@ -80,6 +80,13 @@ const refreshBody = z.object({
     refreshToken: z.string().min(1, 'Missing refresh token'),
 });
 
+// Moving a sign-in to another of one's Schools (governing-body ticket 01): the
+// refresh token is the sign-in, so it is all that proves whose move this is.
+const placeBody = z.strictObject({
+    refreshToken: z.string().min(1, 'Missing refresh token'),
+    schoolId: z.string().min(1, 'Say which school'),
+});
+
 const resetPasswordBody = z.object({
     token: z.string().min(1, 'Missing token'),
     password,
@@ -104,6 +111,7 @@ export {
     loginBody,
     emailOnlyBody,
     refreshBody,
+    placeBody,
     resetPasswordBody,
     googleBody,
 };

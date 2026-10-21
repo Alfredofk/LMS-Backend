@@ -13,6 +13,7 @@ import {
 import { AppError, badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
 import { attendanceSummary } from '../attendance/attendance.service.js';
+import { assertMayJoin, assertStudentAlone } from './membership.eligibility.js';
 
 const log = createLogger('Membership');
 
@@ -35,10 +36,11 @@ const REOPENABLE = ['REJECTED', 'CANCELLED'];
 //
 // Two scopes are in play, and the difference matters:
 // - The applicant's token carries no schoolId (buildAuthClaims only fills it for
-//   an ACTIVE membership), so requireAuth opened no school. Every tenant-owned
-//   read or write here therefore names its own scope: runUnscoped() for "does this
-//   person belong anywhere", runInSchool() for everything inside the school they
-//   are asking to join.
+//   an ACTIVE membership), or since governing-body ticket 01 another school's,
+//   where they already belong. Either way requireAuth opened no scope of the
+//   school they ask to join. Every tenant-owned read or write here therefore names
+//   its own scope: runUnscoped() for "which schools does this person belong to",
+//   runInSchool() for everything inside the school they are asking to join.
 // - The reviewer's token does carry a schoolId, so requireAuth already opened the
 //   scope and their queries need no wrapper at all. A request id from another
 //   school simply is not found - 404, never 403 (ADR-0001).
@@ -187,12 +189,10 @@ async function resolveSchool(schoolCode) {
     return school;
 }
 
-// Who may ask to join: a verified, live account that belongs nowhere yet.
-//
-// The membership question spans schools, so it runs unscoped - that is precisely
-// what is being asked, "which school, if any". The partial unique index
-// SchoolMembership_one_pending_or_active_per_user is the real ceiling; this check
-// exists so the answer is a sentence instead of a constraint violation.
+// Who may ask to join: a verified, live account. What they already belong to is
+// assertMayJoin's question, asked once the school is known (governing-body ticket
+// 01): one live membership per school, at any number of schools, and a Student's
+// one on the whole platform.
 async function assertEligibleApplicant(userId) {
     const user = await prisma.user.findUnique({
         where: { id: userId },
@@ -203,31 +203,14 @@ async function assertEligibleApplicant(userId) {
         throw new AppError(403, 'EMAIL_NOT_VERIFIED', 'Verify your email address first');
     }
 
-    const held = await runUnscoped(
-        'checking whether a user already belongs to a school',
-        async () => {
-            const found = await prisma.schoolMembership.findFirst({
-                where: { userId, status: { in: ['PENDING', 'ACTIVE'] } },
-                select: { id: true, status: true },
-            });
-            return found;
-        }
-    );
-
-    if (held) {
-        throw conflict(
-            held.status === 'PENDING'
-                ? 'You already have a join request waiting for approval'
-                : 'You already belong to a school. Leave it first.'
-        );
-    }
-
     return user;
 }
 
 async function lookupSchool(userId, { schoolCode }) {
     await assertEligibleApplicant(userId);
-    return publicSchoolView(await resolveSchool(schoolCode));
+    const school = await resolveSchool(schoolCode);
+    await assertMayJoin(userId, school.id);
+    return publicSchoolView(school);
 }
 
 // A guardian gives a phone number the school can reach them on (ticket 23, owner
@@ -298,6 +281,7 @@ async function requestJoin(userId, body) {
     const account = await assertEligibleApplicant(userId);
     const school = await resolveSchool(body.schoolCode);
     const roles = assertRoleCombinationAllowed(body.roles);
+    await assertMayJoin(userId, school.id, roles);
     assertGuardianPhone(roles, body.guardian, account);
 
     // The grade has to exist at this type of school: there is no grade 7 at an SD.
@@ -372,11 +356,11 @@ async function requestJoin(userId, body) {
                 school: publicSchoolView(school),
             };
         } catch (error) {
-            // The partial unique index, reached by two requests racing each other
-            // past assertEligibleApplicant. The index is the rule; that check is
-            // only the polite version of it.
+            // The partial unique index, reached by two requests to this school
+            // racing each other past assertMayJoin. The index is the rule; that
+            // check is only the polite version of it.
             if (error?.code === 'P2002') {
-                throw conflict('You already have a join request waiting for approval');
+                throw conflict('You already have a join request waiting for approval at this school');
             }
             throw error;
         }
@@ -766,17 +750,28 @@ async function linkChild(auth, body) {
 // and the person cancelling cannot both win - whoever commits second finds
 // nothing PENDING and gets a 409.
 
-// A whole join request. The applicant holds no school yet - their token opened
-// no scope - so the membership is found unscoped and written inside its school,
-// the way requestJoin does it. Afterwards they are free to ask anywhere.
-async function cancelJoinRequest(userId) {
-    const pending = await runUnscoped('finding the join request a user is cancelling', async () =>
-        await prisma.schoolMembership.findFirst({
-            where: { userId, status: 'PENDING' },
+// A whole join request. Its school is not the one the applicant's token opened,
+// if any, so the membership is found unscoped and written inside its school, the
+// way requestJoin does it. Afterwards they are free to ask there again.
+//
+// Named by its id, or not at all while only one is waiting - the route from
+// before several memberships, which keeps today's frontend working (governing-body
+// ticket 01, owner 2026-10-21). With several waiting it asks which, and lists them.
+async function cancelJoinRequest(userId, membershipId = null) {
+    const waiting = await runUnscoped('finding the join request a user is cancelling', async () =>
+        await prisma.schoolMembership.findMany({
+            where: { userId, status: 'PENDING', ...(membershipId ? { id: membershipId } : {}) },
             select: { id: true, school: { select: { id: true, name: true } } },
+            orderBy: { requestedAt: 'asc' },
         })
     );
-    if (!pending) throw notFound('You have no join request waiting');
+    if (waiting.length === 0) throw notFound('You have no join request waiting');
+    if (waiting.length > 1) {
+        throw conflict('You have join requests waiting at several schools. Say which one to cancel', {
+            requests: waiting.map((entry) => ({ id: entry.id, school: { name: entry.school.name } })),
+        });
+    }
+    const [pending] = waiting;
 
     await runInSchool(pending.school.id, pending.school.name, async () => {
         await prisma.$transaction((tx) =>
@@ -2425,6 +2420,16 @@ async function decideRequest(auth, id, { action, classId, reason, roles }) {
                 where: { id: membership.id },
                 data: { updatedAt: now },
             });
+
+            // A Student holds one membership on the whole platform (governing-body
+            // ticket 01), checked again across schools now that this one is locked.
+            if (action === 'APPROVE' && releasable.length > 0) {
+                await assertStudentAlone(tx, {
+                    userId: membership.user.id,
+                    membershipId: membership.id,
+                    releasing: releasable.map((role) => role.role),
+                });
+            }
 
             for (const role of releasable) {
                 const claimed = await tx.membershipRole.updateMany({

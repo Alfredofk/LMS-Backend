@@ -15,6 +15,7 @@ import { isPrincipal } from '../../shared/guards.js';
 import { AppError, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
 import * as membershipService from '../membership/membership.service.js';
+import { isStudentAnywhere } from '../membership/membership.eligibility.js';
 import { onTimeZoneChanged } from '../sessions/sessions.service.js';
 
 const log = createLogger('School');
@@ -136,18 +137,12 @@ const createdSchoolSelect = {
 // Rules shared by submit and approve
 // ---------------------------------------------------------------------------
 
-// One pending-or-active membership per User (ADR-0002, and the partial unique
-// index behind it). Approval makes the applicant an ACTIVE Principal, so someone
-// who already belongs somewhere - or has asked to - cannot found a school.
-//
-// SchoolMembership is tenant-owned; callers run this inside runUnscoped(),
-// because the question is precisely "which school, if any".
-async function assertHoldsNoMembership(userId, message) {
-    const held = await prisma.schoolMembership.findFirst({
-        where: { userId, status: { in: ['PENDING', 'ACTIVE'] } },
-        select: { id: true },
-    });
-    if (held) throw conflict(message);
+// Approval makes the applicant this school's ACTIVE Principal. One who belongs to
+// other schools may found one beside them (governing-body ticket 01, ADR-0011) - a
+// new school is one where they hold nothing yet. A Student may not: they hold one
+// membership on the whole platform (owner, 2026-10-18 K2).
+async function assertNotStudent(userId, message) {
+    if (await isStudentAnywhere(userId)) throw conflict(message);
 }
 
 // The KTP goes the moment a decision is made, approve or reject (UU PDP
@@ -195,9 +190,9 @@ async function submitRegistration(userId, body, file) {
         });
         if (pending) throw conflict('You already have a school registration under review');
 
-        await assertHoldsNoMembership(
+        await assertNotStudent(
             userId,
-            'You already belong to a school, or have asked to join one'
+            'A student belongs to one school only, so cannot register a school'
         );
 
         // One answer whether a School holds the NPSN or another registration is
@@ -416,9 +411,9 @@ async function approveRegistration(id, { adminId, adminUserId }) {
         });
         if (!applicant || applicant.deletedAt) throw conflict('The applicant account no longer exists');
 
-        await assertHoldsNoMembership(
+        await assertNotStudent(
             registration.applicantUserId,
-            'The applicant already belongs to a school, or has asked to join one'
+            'The applicant is a student at a school, or has asked to be one, and a student belongs to one school only'
         );
 
         const schoolCode = await generateSchoolCode();
@@ -541,11 +536,14 @@ async function rejectRegistration(id, { adminId, adminUserId, reason }) {
 //   buildAuthClaims() then issues no school claims to any member, so their tokens
 //   carry no schoolId and every tenant-owned query is out of reach; the School
 //   Code stops resolving for new joins.
-// - Live sessions are cut, because an access token is minted from a refresh token:
+// - Live sign-ins are cut, because an access token is minted from a refresh token:
 //   leaving those alone would let a member renew their way back in for up to
 //   fourteen days. Revoking them means the school is gone at the next refresh -
 //   within one access-token lifetime (JWT_ACCESS_TTL, 15 minutes by default) for
 //   somebody holding a valid one right now.
+// - Only the sign-ins for this school (governing-body ticket 01): those bound to
+//   it, and a member's bound to none, which their next refresh could open here.
+//   A member's sign-ins at their other schools go on.
 // - **Nothing is deleted, and no membership changes.** Ending memberships is
 //   leaving, which is ADR-0004 and ticket 06; a school that comes back should find
 //   its people still in it.
@@ -587,13 +585,13 @@ async function deactivateSchool(id, { adminId, adminUserId, reason }) {
             });
             const userIds = [...new Set(members.map((entry) => entry.userId))];
 
-            const revoked =
-                userIds.length > 0
-                    ? await tx.refreshToken.updateMany({
-                        where: { userId: { in: userIds }, revokedAt: null },
-                        data: { revokedAt: now },
-                    })
-                    : { count: 0 };
+            const revoked = await tx.refreshToken.updateMany({
+                where: {
+                    revokedAt: null,
+                    OR: [{ schoolId }, { schoolId: null, userId: { in: userIds } }],
+                },
+                data: { revokedAt: now },
+            });
 
             await recordAudit({
                 schoolId,
@@ -622,8 +620,8 @@ async function deactivateSchool(id, { adminId, adminUserId, reason }) {
 // hand. The note is optional - there is nobody waiting to be told why their access
 // came back - but it is recorded when given.
 //
-// Members have to sign in again: their refresh tokens were revoked on the way out,
-// and reactivating does not un-revoke them. That is deliberate. A revoked token
+// Members have to sign in again: their sign-ins for this school were revoked on
+// the way out, and reactivating does not un-revoke them. That is deliberate. A revoked token
 // coming back to life is exactly the shape of a replay, and auth.service.js treats
 // it as theft.
 async function reactivateSchool(id, { adminUserId, reason }) {

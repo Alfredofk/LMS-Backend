@@ -5,18 +5,18 @@ import * as service from './users.service.js';
 // There is no /users/:id in this ticket: reading another person is a membership
 // question, and membership does not exist yet (tickets 04-06).
 
+// The token itself is passed on, not only its user: /users/me answers for the
+// School the token is for (governing-body ticket 01).
 async function getMe(req, res) {
-    return ok(res, await service.getMe(req.auth.userId));
+    return ok(res, await service.getMe(req.auth));
 }
 
 async function updateMe(req, res) {
-    return ok(res, await service.updateMe(req.auth.userId, req.validated.body));
+    return ok(res, await service.updateMe(req.auth, req.validated.body));
 }
 
 async function changePassword(req, res) {
-    const auth = await service.changePassword(req.auth.userId, req.validated.body, {
-        rememberMe: req.auth.rememberMe,
-    });
+    const auth = await service.changePassword(req.auth, req.validated.body);
     return ok(res, {
         ...auth,
         message: 'Password changed. You are signed out on every other device.',

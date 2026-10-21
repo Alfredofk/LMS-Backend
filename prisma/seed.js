@@ -75,17 +75,15 @@ async function ensureUser({ email, fullName, phone = null }, passwordHash) {
 }
 
 // An ACTIVE membership with its roles ACTIVE, inside the school's scope. A user
-// who already belongs somewhere keeps that - one PENDING-or-ACTIVE membership per
-// user is a database rule - and is reported rather than forced.
+// who already belongs here keeps what they hold - one PENDING-or-ACTIVE membership
+// per user per school is a database rule (governing-body ticket 01) - and is left
+// as it is. Belonging to other schools as well is allowed now.
 async function ensureMember(school, user, roles) {
-    const held = await runUnscoped('seed: does this demo user belong anywhere', async () =>
+    const held = await runUnscoped('seed: does this demo user belong to this school', async () =>
         await prisma.schoolMembership.findFirst({
-            where: { userId: user.id, status: { in: ['PENDING', 'ACTIVE'] } },
+            where: { userId: user.id, schoolId: school.id, status: { in: ['PENDING', 'ACTIVE'] } },
         })
     );
-    if (held && held.schoolId !== school.id) {
-        throw new Error(`${user.email} already belongs to another school; not touching it`);
-    }
     if (held) return held;
 
     const now = new Date();

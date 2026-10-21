@@ -64,9 +64,17 @@ function signAccessToken({ userId, membershipId, schoolId, schoolName, roles, re
 // byte-identical - identical signature, identical hash - and the unique index on
 // RefreshToken.tokenHash rejects the second one. Signing in on a phone and a
 // laptop at the same moment is enough to hit it.
-function signRefreshToken({ userId, rememberMe }) {
+//
+// expiresAt keeps an end already set: a sign-in moved to another Place is not
+// renewed by the move (governing-body ticket 01), so its token ends when the one
+// it replaced would have.
+function signRefreshToken({ userId, rememberMe, expiresAt = null }) {
     const rem = rememberMe === true;
-    return jwt.sign({ sub: userId, jti: crypto.randomUUID(), rem }, secret('JWT_REFRESH_SECRET'), {
+    const payload = { sub: userId, jti: crypto.randomUUID(), rem };
+    if (expiresAt) {
+        return jwt.sign({ ...payload, exp: Math.floor(expiresAt.getTime() / 1000) }, secret('JWT_REFRESH_SECRET'));
+    }
+    return jwt.sign(payload, secret('JWT_REFRESH_SECRET'), {
         expiresIn: rem ? REFRESH_TTL_REMEMBERED : REFRESH_TTL_DEFAULT,
     });
 }
