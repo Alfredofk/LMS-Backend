@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { MAX_SUBDOMAIN_LENGTH } from '../../shared/subdomain.js';
+
 // Zod v4: string formats live at the top level, so it is z.email() and not
 // z.string().email() (validate.js:4-6).
 
@@ -66,12 +68,18 @@ const registerBody = z.object({ email, password, fullName });
 // Left out, it means no.
 const rememberMe = z.boolean().default(false);
 
+// The School whose subdomain the sign-in page is on (governing-body ticket 02, K14):
+// the sign-in is for that School. Left out, it is the main domain's (K15). A host's
+// label is not case-sensitive; whether one is known is the service's.
+const subdomain = z.string().trim().toLowerCase().min(1).max(MAX_SUBDOMAIN_LENGTH).optional();
+
 const loginBody = z.object({
     email,
     // Never validated for shape on login: an old password that predates a rule
     // change must still be able to authenticate and then be changed.
     password: z.string().min(1, 'Password is required'),
     rememberMe,
+    subdomain,
 });
 
 const emailOnlyBody = z.object({ email });
@@ -87,6 +95,15 @@ const placeBody = z.strictObject({
     schoolId: z.string().min(1, 'Say which school'),
 });
 
+// A handoff to another of one's Schools, on its subdomain (governing-body ticket 02,
+// K3): the same two fields. The refresh token is read, not spent - the sign-in that
+// asks stays on its own subdomain.
+const handoffBody = placeBody;
+
+const redeemBody = z.strictObject({
+    code: z.string().min(1, 'Missing handoff code'),
+});
+
 const resetPasswordBody = z.object({
     token: z.string().min(1, 'Missing token'),
     password,
@@ -97,6 +114,7 @@ const resetPasswordBody = z.object({
 const googleBody = z.object({
     idToken: z.string().min(1, 'Missing Google ID token'),
     rememberMe,
+    subdomain,
 });
 
 export {
@@ -112,6 +130,8 @@ export {
     emailOnlyBody,
     refreshBody,
     placeBody,
+    handoffBody,
+    redeemBody,
     resetPasswordBody,
     googleBody,
 };

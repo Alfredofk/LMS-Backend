@@ -36,6 +36,7 @@ const membershipSelect = {
             id: true,
             name: true,
             schoolCode: true,
+            subdomain: true,
             schoolType: true,
             durationYears: true,
             latitude: true,
@@ -109,6 +110,8 @@ function schoolForMember(school, roles, { readsCode }) {
         id: school.id,
         name: school.name,
         schoolCode: readsCode ? school.schoolCode : null,
+        // Every member's, as the address they reach the School at (governing-body 02).
+        subdomain: school.subdomain,
         schoolType: school.schoolType,
         durationYears: school.durationYears,
         timeZone: school.timeZone,

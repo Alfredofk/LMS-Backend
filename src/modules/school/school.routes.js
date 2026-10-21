@@ -17,6 +17,8 @@ import {
     locationBody,
     timeZoneBody,
     letterheadBody,
+    subdomainParams,
+    subdomainBody,
 } from './school.schema.js';
 
 // Two routers, because two different people use them.
@@ -105,5 +107,27 @@ memberRouter.get('/logo', controller.readLogo);
 memberRouter.put('/logo', logoUpload, controller.setLogo);
 memberRouter.delete('/logo', controller.removeLogo);
 
+// Two more for subdomains (governing-body ticket 02).
+//
+// The public one, mounted at /api/places: the page a subdomain opens asks whose it
+// is before anyone signs in. A subdomain is in the address bar, so it is no secret
+// and generalLimiter is its ceiling. Ticket 03 answers a Governing Body's here too.
+//
+// The Platform Admin's, mounted at /api/admin/schools: keyed by the School, not
+// the registration, since a Governing Body's Schools (ticket 05) have none.
+const placesRouter = Router();
+
+placesRouter.get('/:subdomain', validate({ params: subdomainParams }), controller.resolvePlace);
+
+const adminSchoolRouter = Router();
+
+adminSchoolRouter.use(requireAuth, requirePlatformAdmin);
+
+adminSchoolRouter.patch(
+    '/:id/subdomain',
+    validate({ params: idParams, body: subdomainBody }),
+    controller.changeSubdomain
+);
+
 export default router;
-export { adminRouter, memberRouter };
+export { adminRouter, memberRouter, placesRouter, adminSchoolRouter };

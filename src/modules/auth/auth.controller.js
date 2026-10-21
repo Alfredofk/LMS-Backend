@@ -55,6 +55,14 @@ async function choosePlace(req, res) {
     return ok(res, await service.choosePlace(req.validated.body));
 }
 
+async function issueHandoff(req, res) {
+    return ok(res, { handoff: await service.issueHandoff(req.validated.body) }, 201);
+}
+
+async function redeemHandoff(req, res) {
+    return ok(res, await service.redeemHandoff(req.validated.body));
+}
+
 async function logout(req, res) {
     await service.logout(req.validated.body.refreshToken);
     return ok(res, { message: 'Signed out.' });
@@ -86,6 +94,8 @@ export {
     googleSignIn,
     refresh,
     choosePlace,
+    issueHandoff,
+    redeemHandoff,
     logout,
     forgotPassword,
     checkResetToken,

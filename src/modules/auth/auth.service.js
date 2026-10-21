@@ -15,6 +15,7 @@ import { sendVerificationEmail, sendPasswordResetEmail } from '../../shared/mail
 import { googleVerifier } from '../../shared/google.js';
 import { AppError, badRequest, conflict, notFound, unauthorized } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
+import { loadSchoolBySubdomain } from '../school/school.subdomain.js';
 
 const log = createLogger('Auth');
 
@@ -88,7 +89,7 @@ async function openableMembershipsOf(userId) {
             select: {
                 id: true,
                 schoolId: true,
-                school: { select: { name: true } },
+                school: { select: { name: true, subdomain: true } },
                 roles: { where: { status: 'ACTIVE' }, select: { role: true } },
             },
             orderBy: { school: { name: 'asc' } },
@@ -96,12 +97,14 @@ async function openableMembershipsOf(userId) {
     );
 }
 
-// One entry of the dropdown that moves a person between their schools (K17). The
-// subdomain joins it in ticket 02, a Governing Body seat in ticket 03.
+// One entry of the dropdown that moves a person between their schools (K17), with
+// the subdomain a handoff lands on (ticket 02). A Governing Body seat joins it in
+// ticket 03.
 const placeView = (membership) => ({
     kind: 'SCHOOL',
     id: membership.schoolId,
     name: membership.school.name,
+    subdomain: membership.school.subdomain,
     roles: membership.roles.map((entry) => entry.role),
 });
 
@@ -306,7 +309,16 @@ async function resendVerification(email) {
 // Login, refresh, logout
 // ---------------------------------------------------------------------------
 
-async function login({ email, password, rememberMe }) {
+// A sign-in on a School's subdomain is for that School (governing-body ticket 02,
+// K14); one on the main domain names none (K15): the one School the person may
+// open, none with several - they choose, and a handoff takes them there.
+//
+// An unknown subdomain, or a deactivated School's, is refused before anything about
+// the account is read: it says nothing of the account. One who may not open the
+// School is refused only after the password checks out (signInFor), so a guess
+// learns nothing of which schools an address belongs to.
+async function login({ email, password, rememberMe, subdomain }) {
+    const place = subdomain ? await loadSchoolBySubdomain(subdomain) : null;
     const user = await prisma.user.findUnique({ where: { email } });
     // No passwordHash means an account made through Google that has not set a
     // password yet. It fails exactly like an unknown address, dummy hash and all.
@@ -328,9 +340,20 @@ async function login({ email, password, rememberMe }) {
         );
     }
 
-    // No Place asked for: the one School they may open, none with several
-    // (governing-body ticket 01). Ticket 02 names it by the subdomain.
-    return (await signIn(user, { rememberMe })).answer;
+    return signInFor(user, place, { rememberMe });
+}
+
+// The last step of a sign-in by password or by Google: for the School a subdomain
+// named, refused as K14 words it when the person may not open it; for none, the
+// main domain's default.
+async function signInFor(user, place, { rememberMe }) {
+    if (!place) return (await signIn(user, { rememberMe })).answer;
+
+    const { claims } = await buildAuthClaims(user.id, place.id);
+    if (!claims.schoolId) {
+        throw new AppError(403, 'NOT_REGISTERED_HERE', 'This account is not registered at this school');
+    }
+    return (await signIn(user, { rememberMe, schoolId: place.id })).answer;
 }
 
 // A refresh token presented for rotation: signed, on file, never used, not
@@ -427,6 +450,95 @@ async function choosePlace({ refreshToken, schoolId }) {
     await retireRefreshToken(row, tokenId);
 
     log.info(`A sign-in moved to ${claims.schoolName}`);
+    return answer;
+}
+
+// ---------------------------------------------------------------------------
+// Handoff - a sign-in carried to another subdomain (governing-body ticket 02, K3)
+// ---------------------------------------------------------------------------
+
+// A browser keeps tokens per origin, so a sign-in does not cross subdomains by
+// itself. The dropdown asks for a single-use code for one of the person's Schools;
+// the frontend opens that School's subdomain with it (building the address from its
+// own configuration - owner, 2026-10-21), and the page there trades it for tokens.
+const HANDOFF_TTL_MS = 60 * 1000;
+
+const handoffRejected = () => unauthorized('This sign-in link is invalid or has expired');
+
+// Whether a sign-in still lives: its refresh token row, followed through each
+// rotation to the newest, neither revoked nor past its end. A refresh between the
+// code's issue and its redemption is a rotation, not an end.
+async function isSignInAlive(tokenId) {
+    let row = await prisma.refreshToken.findUnique({ where: { id: tokenId } });
+    for (let hops = 0; row?.replacedByTokenId && hops < 10; hops += 1) {
+        row = await prisma.refreshToken.findUnique({ where: { id: row.replacedByTokenId } });
+    }
+    return Boolean(row && !row.revokedAt && row.expiresAt > new Date());
+}
+
+// POST /api/auth/handoff. The refresh token proves the sign-in and says when it
+// ends; it is read, not spent, since the sign-in that asks stays on its own
+// subdomain. A School the person may not open is the 404 choosePlace answers. The
+// code is handed out once and stored only as a hash, like a verification token.
+async function issueHandoff({ refreshToken, schoolId }) {
+    const { row, user, rememberMe } = await loadLiveRefreshToken(refreshToken);
+
+    const { claims, places } = await buildAuthClaims(user.id, schoolId);
+    if (!claims.schoolId) throw notFound('School not found');
+
+    const code = generateToken();
+    const expiresAt = expiresIn(HANDOFF_TTL_MS);
+    await prisma.handoffCode.create({
+        data: {
+            userId: user.id,
+            schoolId,
+            sourceTokenId: row.id,
+            codeHash: hashToken(code),
+            expiresAt,
+            sessionExpiresAt: row.expiresAt,
+            rememberMe,
+        },
+    });
+
+    log.info(`A handoff to ${claims.schoolName} issued`);
+    return { code, subdomain: places.find((place) => place.id === schoolId).subdomain, expiresAt };
+}
+
+// POST /api/auth/handoff/redeem, from the page the code opened. Public: the code
+// is the credential. It redeems once - the claim is the lock, so two tabs racing
+// cannot both win - within 60 seconds, while the sign-in that asked for it lives,
+// and while the School still opens for the person. Every failure is one 401.
+//
+// The new sign-in ends when the one that asked would have (K3), with its
+// remember-me choice; from its first refresh on it is renewed as any sign-in is
+// (owner, 2026-10-21, option A).
+async function redeemHandoff({ code }) {
+    const handoff = await prisma.handoffCode.findUnique({ where: { codeHash: hashToken(code) } });
+    if (!handoff) throw handoffRejected();
+
+    const now = new Date();
+    const claimed = await prisma.handoffCode.updateMany({
+        where: { id: handoff.id, usedAt: null, expiresAt: { gt: now } },
+        data: { usedAt: now },
+    });
+    if (claimed.count === 0) throw handoffRejected();
+    if (handoff.sessionExpiresAt <= now || !(await isSignInAlive(handoff.sourceTokenId))) {
+        throw handoffRejected();
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: handoff.userId } });
+    if (!user || user.deletedAt || !user.emailVerifiedAt) throw handoffRejected();
+
+    const { claims } = await buildAuthClaims(user.id, handoff.schoolId);
+    if (!claims.schoolId) throw handoffRejected();
+
+    const { answer } = await signIn(user, {
+        rememberMe: handoff.rememberMe,
+        schoolId: handoff.schoolId,
+        expiresAt: handoff.sessionExpiresAt,
+    });
+
+    log.info(`A handoff to ${claims.schoolName} redeemed`);
     return answer;
 }
 
@@ -529,17 +641,19 @@ async function resolveGoogleUser({ sub, email, name }) {
     return user;
 }
 
-// The Google equivalent of login(), answering in exactly the same shape.
+// The Google equivalent of login(), answering in exactly the same shape, and
+// honouring a subdomain as login does (governing-body ticket 02).
 //
 // An address Google itself has not verified proves nothing about who owns it,
 // so it is refused rather than trusted.
-async function googleSignIn({ idToken, rememberMe }) {
+async function googleSignIn({ idToken, rememberMe, subdomain }) {
+    const place = subdomain ? await loadSchoolBySubdomain(subdomain) : null;
     const google = await googleVerifier.verify(idToken);
     if (!google.emailVerified) throw googleRejected();
 
     const user = await resolveGoogleUser(google);
 
-    return (await signIn(user, { rememberMe })).answer;
+    return signInFor(user, place, { rememberMe });
 }
 
 // ---------------------------------------------------------------------------
@@ -629,6 +743,8 @@ export {
     login,
     refreshAuth,
     choosePlace,
+    issueHandoff,
+    redeemHandoff,
     logout,
     googleSignIn,
     forgotPassword,

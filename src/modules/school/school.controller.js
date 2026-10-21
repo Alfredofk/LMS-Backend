@@ -1,6 +1,7 @@
 import { ok } from '../../shared/errors.js';
 import * as service from './school.service.js';
 import * as letterheads from './school.letterhead.js';
+import * as subdomains from './school.subdomain.js';
 
 // Thin by design, like auth.controller.js: read what validation produced, call
 // the service, wrap the answer in the envelope. No try/catch - Express 5 hands a
@@ -151,7 +152,24 @@ async function appointPrincipal(req, res) {
     });
 }
 
+// ---- subdomains (governing-body ticket 02) ----------------------------------
+
+// Public: the page a subdomain opens asks whose it is.
+async function resolvePlace(req, res) {
+    return ok(res, { place: await subdomains.resolvePlace(req.validated.params.subdomain) });
+}
+
+async function changeSubdomain(req, res) {
+    const school = await subdomains.changeSubdomain(req.auth.userId, req.validated.params.id, req.validated.body);
+    return ok(res, {
+        school,
+        message: `${school.name} is at "${school.subdomain}" now. The old address no longer opens it.`,
+    });
+}
+
 export {
+    resolvePlace,
+    changeSubdomain,
     submit,
     listMine,
     list,

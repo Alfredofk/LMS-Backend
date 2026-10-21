@@ -9,6 +9,8 @@ import {
     emailOnlyBody,
     refreshBody,
     placeBody,
+    handoffBody,
+    redeemBody,
     resetPasswordBody,
     tokenQuery,
     googleBody,
@@ -60,6 +62,13 @@ router.post('/refresh', validate({ body: refreshBody }), controller.refresh);
 // Moving a sign-in to another of one's Schools (governing-body ticket 01). It
 // spends the refresh token as /refresh does, so the same reasoning covers it.
 router.post('/place', validate({ body: placeBody }), controller.choosePlace);
+
+// Carrying a sign-in to another of one's Schools on its subdomain (governing-body
+// ticket 02). Issuing proves the sign-in with its refresh token, as /refresh does;
+// redeeming takes a 256-bit single-use code good for 60 seconds, as unguessable as
+// a verification link's token. generalLimiter is the ceiling of both.
+router.post('/handoff', validate({ body: handoffBody }), controller.issueHandoff);
+router.post('/handoff/redeem', validate({ body: redeemBody }), controller.redeemHandoff);
 
 router.post('/logout', validate({ body: refreshBody }), controller.logout);
 

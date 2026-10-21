@@ -16,6 +16,7 @@ import { AppError, conflict, forbidden, notFound } from '../../shared/errors.js'
 import { createLogger } from '../../lib/helpers.js';
 import * as membershipService from '../membership/membership.service.js';
 import { isStudentAnywhere } from '../membership/membership.eligibility.js';
+import { freeSubdomainOf } from './school.subdomain.js';
 import { onTimeZoneChanged } from '../sessions/sessions.service.js';
 
 const log = createLogger('School');
@@ -62,6 +63,7 @@ const schoolView = (school) => ({
     id: school.id,
     name: school.name,
     schoolCode: school.schoolCode,
+    subdomain: school.subdomain,
     latitude: school.latitude ?? null,
     longitude: school.longitude ?? null,
     timeZone: school.timeZone ?? null,
@@ -125,6 +127,7 @@ const createdSchoolSelect = {
         id: true,
         name: true,
         schoolCode: true,
+        subdomain: true,
         latitude: true,
         longitude: true,
         timeZone: true,
@@ -441,6 +444,12 @@ async function approveRegistration(id, { adminId, adminUserId }) {
                     longitude: registration.longitude,
                     timeZone: registration.timeZone,
                     schoolCode,
+                    // The K9 subdomain, read inside the transaction (governing-body 02).
+                    subdomain: await freeSubdomainOf(tx, {
+                        schoolType: registration.schoolType,
+                        name: registration.schoolName,
+                        city: registration.city,
+                    }),
                 },
             });
 
@@ -481,7 +490,9 @@ async function approveRegistration(id, { adminId, adminUserId }) {
         });
 
         await discardKtp(registration.ktpStoragePath, id);
-        log.success(`School founded: ${school.name} (${school.npsn}), code ${school.schoolCode}`);
+        log.success(
+            `School founded: ${school.name} (${school.npsn}), code ${school.schoolCode}, subdomain ${school.subdomain}`
+        );
 
         return getRegistration(id);
     });

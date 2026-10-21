@@ -163,6 +163,9 @@ enum ApprovalAction {
     /// against the Semester, and one against each SlotFinalisation it undoes
     /// (grading-and-report-card 06).
     REOPEN_SEMESTER
+    /// A Platform Admin changing a School's subdomain (governing-body ticket 02). The old
+    /// one stops resolving at once.
+    UPDATE_SUBDOMAIN
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +197,7 @@ model User {
     emailVerificationToken EmailVerificationToken[]
     passwordResetTokens    PasswordResetToken[]
     refreshTokens          RefreshToken[]
+    handoffCodes           HandoffCode[]
     schoolRegistrations    SchoolRegistration[]     @relation("RegistrationApplicant")
 
     @@index([deletedAt])
@@ -256,6 +260,32 @@ model RefreshToken {
     @@index([userId])
     @@index([userId, revokedAt])
     @@index([schoolId, revokedAt])
+}
+
+/// A single-use code that carries a sign-in to another of the person's Places, on
+/// another subdomain (governing-body ticket 02, K3). Stored hashed like the tokens
+/// above, good for 60 seconds, bound to the User and the School it opens. Above
+/// tenancy, like RefreshToken: schoolId names the target, not a tenant.
+model HandoffCode {
+    id               String    @id @default(cuid())
+    userId           String
+    schoolId         String
+    /// The refresh token row of the sign-in that asked for it. The code redeems only
+    /// while that sign-in lives - its rotations followed - so a sign-out, a password
+    /// change or a deletion in between voids it.
+    sourceTokenId    String
+    codeHash         String    @unique
+    expiresAt        DateTime
+    /// When the sign-in that asked for it ends: the new one ends no later (K3).
+    sessionExpiresAt DateTime
+    rememberMe       Boolean
+    usedAt           DateTime?
+    createdAt        DateTime  @default(now())
+
+    user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+    school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+    @@index([userId])
 }
 
 /// The platform operator, above every school. Not a school role - no School has
@@ -469,6 +499,13 @@ model School {
     logoStorageKey String?
     /// Opaque, regenerable. Locates a school; grants nothing (ADR-0002).
     schoolCode    String     @unique
+    /// The School's label under the platform's base domain (governing-body ticket 02,
+    /// K9): `smapenabur1` for smapenabur1.<base>. It names the Place a sign-in is
+    /// for and grants nothing - joining still takes the School Code (K16). Given at
+    /// creation by the K9 rule (src/shared/subdomain.js), it does not follow a rename;
+    /// only a Platform Admin changes it. Only the label is stored: the base domain is
+    /// the frontend's configuration.
+    subdomain     String     @unique
     // Access withdrawn by a platform admin, with the data left where it is.
     //
     // Deactivation is never a delete: School has thirteen cascading relations, so
@@ -532,6 +569,7 @@ model School {
     reportCards       ReportCard[]
     reportCardSubjects ReportCardSubject[]
     refreshTokens     RefreshToken[]
+    handoffCodes      HandoffCode[]
 
     @@index([deactivatedAt])
 }

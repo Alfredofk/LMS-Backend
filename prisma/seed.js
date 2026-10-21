@@ -24,6 +24,7 @@ import crypto from 'node:crypto';
 import { prisma } from '../src/shared/prisma.js';
 import { runInSchool, runUnscoped } from '../src/shared/tenantContext.js';
 import { hashPassword } from '../src/shared/auth.js';
+import { freeSubdomainOf } from '../src/modules/school/school.subdomain.js';
 
 const PASSWORD = 'Demo1234!';
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -122,7 +123,10 @@ async function seed() {
     if (!school) {
         const now = new Date();
         const adminRow = await prisma.platformAdmin.findUnique({ where: { userId: admin.id } });
-        school = await prisma.school.create({ data: { ...SCHOOL, schoolCode: schoolCode() } });
+        // Its subdomain by the K9 rule, as an approval gives one (governing-body 02).
+        school = await prisma.school.create({
+            data: { ...SCHOOL, schoolCode: schoolCode(), subdomain: await freeSubdomainOf(prisma, SCHOOL) },
+        });
         await prisma.schoolRegistration.create({
             data: {
                 applicantUserId: principal.id,

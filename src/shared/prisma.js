@@ -19,6 +19,9 @@ const UNSCOPED_MODELS = new Set([
     'EmailVerificationToken',
     'PasswordResetToken',
     'RefreshToken',
+    // A code that carries a sign-in to another subdomain (governing-body ticket 02).
+    // Its schoolId names the target, as RefreshToken's names the Place: identity.
+    'HandoffCode',
     'PlatformAdmin',
     'SchoolRegistration',
     'School',

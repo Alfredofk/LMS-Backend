@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { SCHOOL_TYPES, SCHOOL_TYPE_NAMES, isValidDurationYears } from '../../shared/schoolType.js';
 import { TIME_ZONES } from '../../shared/timeZone.js';
+import { MAX_SUBDOMAIN_LENGTH, SUBDOMAIN_PATTERN } from '../../shared/subdomain.js';
 import { phone } from '../auth/auth.schema.js';
 
 // The registration arrives as multipart/form-data, because the KTP rides along
@@ -173,6 +174,27 @@ const appointPrincipalBody = z.strictObject({
     reason: z.string().trim().min(3, 'A reason is required').max(500, 'Reason is too long'),
 });
 
+// ---- subdomains (governing-body ticket 02) ---------------------------------
+
+// A host's label is not case-sensitive, so it is read in lowercase. Whether one is
+// known is the service's to say, with the same 404 for every miss.
+const subdomainParams = z.object({
+    subdomain: z.string().trim().toLowerCase().min(1).max(MAX_SUBDOMAIN_LENGTH),
+});
+
+// A subdomain a Platform Admin sets by hand: a DNS label. Whether it is reserved or
+// taken is the service's.
+const subdomainBody = z.strictObject({
+    subdomain: z
+        .string()
+        .trim()
+        .toLowerCase()
+        .regex(
+            SUBDOMAIN_PATTERN,
+            'Use 1 to 63 lowercase letters, digits or hyphens, not starting or ending with a hyphen'
+        ),
+});
+
 export {
     registrationBody,
     idParams,
@@ -184,4 +206,6 @@ export {
     locationBody,
     timeZoneBody,
     letterheadBody,
+    subdomainParams,
+    subdomainBody,
 };
