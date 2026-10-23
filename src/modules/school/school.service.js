@@ -36,12 +36,13 @@ const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const CODE_LENGTH = 8;
 const CODE_ATTEMPTS = 5;
 
+// One code of that shape. A Governing Body Code is one too (governing-body ticket 03).
+const randomCode = () =>
+    Array.from({ length: CODE_LENGTH }, () => CODE_ALPHABET[crypto.randomInt(CODE_ALPHABET.length)]).join('');
+
 async function generateSchoolCode() {
     for (let attempt = 0; attempt < CODE_ATTEMPTS; attempt += 1) {
-        const code = Array.from(
-            { length: CODE_LENGTH },
-            () => CODE_ALPHABET[crypto.randomInt(CODE_ALPHABET.length)]
-        ).join('');
+        const code = randomCode();
 
         const taken = await prisma.school.findUnique({
             where: { schoolCode: code },
@@ -64,6 +65,8 @@ const schoolView = (school) => ({
     name: school.name,
     schoolCode: school.schoolCode,
     subdomain: school.subdomain,
+    // The Governing Body above it, for the admin's list (governing-body ticket 03).
+    governingBody: school.governingBody ?? null,
     latitude: school.latitude ?? null,
     longitude: school.longitude ?? null,
     timeZone: school.timeZone ?? null,
@@ -128,6 +131,7 @@ const createdSchoolSelect = {
         name: true,
         schoolCode: true,
         subdomain: true,
+        governingBody: { select: { id: true, name: true } },
         latitude: true,
         longitude: true,
         timeZone: true,
@@ -837,6 +841,8 @@ async function appointPrincipal(id, { adminUserId, email, reason }) {
 export {
     CODE_ALPHABET,
     CODE_LENGTH,
+    CODE_ATTEMPTS,
+    randomCode,
     discardKtp,
     submitRegistration,
     listMine,

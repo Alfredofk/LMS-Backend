@@ -41,7 +41,7 @@ const verifyPassword = (plain, hash) => bcrypt.compare(plain, hash);
 const generateToken = () => crypto.randomBytes(32).toString('hex');
 const hashToken = (token) => crypto.createHash('sha256').update(token).digest('hex');
 
-function signAccessToken({ userId, membershipId, schoolId, schoolName, roles, rememberMe }) {
+function signAccessToken({ userId, membershipId, schoolId, schoolName, roles, governingBodyId, rememberMe }) {
     return jwt.sign(
         {
             sub: userId,
@@ -50,6 +50,9 @@ function signAccessToken({ userId, membershipId, schoolId, schoolName, roles, re
             // Carried so the logger can name the school's folder without a lookup.
             schoolName: schoolName ?? null,
             roles: roles ?? [],
+            // The Governing Body a seat's token is for (governing-body ticket 03), in
+            // place of a School: no school scope opens with it.
+            governingBodyId: governingBodyId ?? null,
             // Read by change-password, which re-issues this device's refresh token
             // holding only the access token, and must keep the device's choice.
             rem: rememberMe === true,
@@ -117,6 +120,7 @@ function requireAuth(req, res, next) {
         schoolId: payload.schoolId ?? null,
         schoolName: payload.schoolName ?? null,
         roles: payload.roles ?? [],
+        governingBodyId: payload.governingBodyId ?? null,
         rememberMe: payload.rem === true,
     };
 

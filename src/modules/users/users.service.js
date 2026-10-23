@@ -5,7 +5,7 @@ import { googleVerifier } from '../../shared/google.js';
 import { recordAudit } from '../../shared/approval.js';
 import { AppError, badRequest, conflict, notFound, unauthorized } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
-import { publicUser, placesOf, revokeAllRefreshTokens, signIn } from '../auth/auth.service.js';
+import { publicUser, placesOf, placeOfAuth, revokeAllRefreshTokens, signIn } from '../auth/auth.service.js';
 import { cancelPendingMembership, endMembership } from '../membership/membership.service.js';
 import { discardKtp } from '../school/school.service.js';
 import { letterheadView } from '../school/school.letterhead.js';
@@ -211,13 +211,17 @@ const liveFirst = (rows) => [
 //   applicant, a removed member and a deactivated school's member learn where
 //   they stand;
 // - the one School they may open, for a token minted before its approval;
-// - null while they may open several and have chosen none.
+// - null while they may open several Places and have chosen none.
+// A token for a Governing Body seat (ticket 03) names no School: null, its body being
+// `governingBody`'s.
 function currentOf(rows, auth, places) {
     if (auth.membershipId) return rows.find((row) => row.id === auth.membershipId) ?? null;
-    if (places.length > 1) return null;
-    if (places.length === 1) {
-        return rows.find((row) => row.school.id === places[0].id && row.status === 'ACTIVE') ?? null;
+    if (auth.governingBodyId || places.length > 1) return null;
+    const [only] = places;
+    if (only?.kind === 'SCHOOL') {
+        return rows.find((row) => row.school.id === only.id && row.status === 'ACTIVE') ?? null;
     }
+    if (only) return null;
     return liveFirst(rows)[0] ?? null;
 }
 
@@ -227,7 +231,7 @@ function currentOf(rows, auth, places) {
 // turned down or cancelled, an end with its reason, or that ACTIVE membership. Live
 // first, so a new request is not hidden behind an older outcome at its school.
 function otherSchoolsOf(rows, places) {
-    const shown = new Set(places.map((place) => place.id));
+    const shown = new Set(places.filter((place) => place.kind === 'SCHOOL').map((place) => place.id));
     const newest = [];
     for (const row of liveFirst(rows)) {
         if (shown.has(row.school.id)) continue;
@@ -266,6 +270,16 @@ async function loadUser(userId) {
     return user;
 }
 
+// The Governing Body a seat's token is for (governing-body ticket 03, owner
+// 2026-10-22): the counterpart of `membership`, whatever has become of it since -
+// `deactivatedAt` says when it was switched off.
+async function governingBodyOf(governingBodyId) {
+    return prisma.governingBody.findUnique({
+        where: { id: governingBodyId },
+        select: { id: true, name: true, kind: true, subdomain: true, deactivatedAt: true },
+    });
+}
+
 // The account, whether it is a Platform Admin - read from the table as
 // requirePlatformAdmin reads it, so the frontend knows to offer the admin's screens
 // (2026-10-03) - and the memberships: the token's (currentOf), the Places the
@@ -275,10 +289,11 @@ async function loadUser(userId) {
 // The phone number (ticket 23) is added here rather than to publicUser, so the
 // sign-in responses keep their shape, as they did for isPlatformAdmin.
 async function meOf(user, auth) {
-    const [admin, rows, places] = await Promise.all([
+    const [admin, rows, places, body] = await Promise.all([
         prisma.platformAdmin.findUnique({ where: { userId: user.id }, select: { id: true } }),
         membershipRowsOf(user.id),
         placesOf(user.id),
+        auth.governingBodyId ? governingBodyOf(auth.governingBodyId) : null,
     ]);
     const current = currentOf(rows, auth, places);
 
@@ -286,6 +301,7 @@ async function meOf(user, auth) {
         user: { ...publicUser(user), phone: user.phone },
         isPlatformAdmin: Boolean(admin),
         membership: current ? await membershipView(current) : null,
+        governingBody: body,
         places,
         otherSchools: await Promise.all(otherSchoolsOf(rows, places).map(membershipView)),
     };
@@ -317,9 +333,9 @@ async function updateMe(auth, { fullName, phone }) {
 // minutes - the accepted cost of a stateless access token, and why the tenant
 // guards in guards.js read status from the database rather than from claims.
 //
-// The new sign-in keeps this device's remember-me choice and its School, both
-// taken from the access token (`rem`, `schoolId`) because that is all this request
-// carries (governing-body ticket 01).
+// The new sign-in keeps this device's remember-me choice and its Place, both
+// taken from the access token (`rem`, and `schoolId` or `governingBodyId`) because
+// that is all this request carries (governing-body tickets 01 and 03).
 async function changePassword(auth, { currentPassword, newPassword }) {
     const { userId } = auth;
     const user = await loadUser(userId);
@@ -343,7 +359,7 @@ async function changePassword(auth, { currentPassword, newPassword }) {
     });
 
     await revokeAllRefreshTokens(userId);
-    const { answer } = await signIn(updated, { rememberMe: auth.rememberMe, schoolId: auth.schoolId });
+    const { answer } = await signIn(updated, { rememberMe: auth.rememberMe, place: placeOfAuth(auth) });
 
     log.success(`Password changed for ${user.email}`);
 

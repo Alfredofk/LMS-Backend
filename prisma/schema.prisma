@@ -166,6 +166,20 @@ enum ApprovalAction {
     /// A Platform Admin changing a School's subdomain (governing-body ticket 02). The old
     /// one stops resolving at once.
     UPDATE_SUBDOMAIN
+    /// A Platform Admin correcting a Governing Body's name, kind or SK number
+    /// (governing-body ticket 03).
+    UPDATE_GOVERNING_BODY
+}
+
+/// What a Governing Body is (governing-body spec, K1): UU Sisdiknas's *penyelenggara
+/// pendidikan*, the body that runs a school.
+enum GoverningBodyKind {
+    /// A yayasan.
+    FOUNDATION
+    /// A perkumpulan.
+    ASSOCIATION
+    /// A Dinas Pendidikan, of a kabupaten/kota (SD, SMP) or a province (SMA, SMK).
+    GOVERNMENT
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +212,8 @@ model User {
     passwordResetTokens    PasswordResetToken[]
     refreshTokens          RefreshToken[]
     handoffCodes           HandoffCode[]
+    governingBodyRegistrations GoverningBodyRegistration[] @relation("GoverningBodyRegistrationApplicant")
+    governingBodySeats     GoverningBodyAdmin[]
     schoolRegistrations    SchoolRegistration[]     @relation("RegistrationApplicant")
 
     @@index([deletedAt])
@@ -254,12 +270,18 @@ model RefreshToken {
     replacedByTokenId String?
     createdAt         DateTime  @default(now())
 
-    user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-    school School? @relation(fields: [schoolId], references: [id], onDelete: SetNull)
+    /// The Place when it is a Governing Body seat (governing-body ticket 03), in place of
+    /// schoolId: a row names one or the other, or neither.
+    governingBodyId   String?
+
+    user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+    school        School?        @relation(fields: [schoolId], references: [id], onDelete: SetNull)
+    governingBody GoverningBody? @relation(fields: [governingBodyId], references: [id], onDelete: SetNull)
 
     @@index([userId])
     @@index([userId, revokedAt])
     @@index([schoolId, revokedAt])
+    @@index([governingBodyId, revokedAt])
 }
 
 /// A single-use code that carries a sign-in to another of the person's Places, on
@@ -269,7 +291,10 @@ model RefreshToken {
 model HandoffCode {
     id               String    @id @default(cuid())
     userId           String
-    schoolId         String
+    /// The Place it opens: a School, or a Governing Body seat (governing-body ticket 03).
+    /// Exactly one of the two is set.
+    schoolId         String?
+    governingBodyId  String?
     /// The refresh token row of the sign-in that asked for it. The code redeems only
     /// while that sign-in lives - its rotations followed - so a sign-out, a password
     /// change or a deletion in between voids it.
@@ -282,8 +307,9 @@ model HandoffCode {
     usedAt           DateTime?
     createdAt        DateTime  @default(now())
 
-    user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-    school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+    school        School?        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    governingBody GoverningBody? @relation(fields: [governingBodyId], references: [id], onDelete: Cascade)
 
     @@index([userId])
 }
@@ -299,6 +325,116 @@ model PlatformAdmin {
     reviewedRequests  SchoolRegistration[] @relation("RegistrationReviewer")
     deactivatedSchools School[]            @relation("SchoolDeactivatedBy")
     confirmedHolidays NationalHoliday[]
+    reviewedGoverningBodyRegistrations GoverningBodyRegistration[] @relation("GoverningBodyRegistrationReviewer")
+    deactivatedGoverningBodies         GoverningBody[]             @relation("GoverningBodyDeactivatedBy")
+}
+
+// ---------------------------------------------------------------------------
+// Governing Bodies - a tier above the School (governing-body ticket 03, ADR-0010)
+// ---------------------------------------------------------------------------
+//
+// Above tenancy, as a User and a School Registration are: none of these carries a
+// tenant schoolId, and all are listed in UNSCOPED_MODELS. A Governing Body reads a
+// School only through runInSchool, one School at a time (the spec's invariant 1).
+
+/// A yayasan, perkumpulan or Dinas asking to be a Governing Body, checked by hand by
+/// a Platform Admin as a School Registration is. Both files go the moment a decision
+/// is made (UU PDP 27/2022); the numbers stay.
+model GoverningBodyRegistration {
+    id              String            @id @default(cuid())
+    applicantUserId String
+    kind            GoverningBodyKind
+    name            String
+    /// The Kemenkumham SK (pengesahan badan hukum), normalised: trimmed, uppercase,
+    /// spaces collapsed. A FOUNDATION's or an ASSOCIATION's; a GOVERNMENT has none.
+    skNumber        String?
+    /// The full address (K5). Every part required but the postal code (owner, 2026-10-22).
+    street          String
+    /// Kelurahan or desa.
+    village         String
+    /// Kecamatan.
+    district        String
+    /// Kota or kabupaten - the subdomain's tie-break (K13).
+    city            String
+    province        String
+    postalCode      String?
+    applicantPhone  String
+    ktpStoragePath  String?
+    /// The akta page listing the pengurus, or the Kepala Dinas's surat tugas.
+    proofStoragePath String?
+    status          RegistrationStatus @default(PENDING)
+    reviewedByAdminId String?
+    reviewedAt      DateTime?
+    rejectionReason String?
+    createdGoverningBodyId String?    @unique
+    createdAt       DateTime          @default(now())
+    updatedAt       DateTime          @updatedAt
+
+    applicant            User           @relation("GoverningBodyRegistrationApplicant", fields: [applicantUserId], references: [id])
+    reviewedBy           PlatformAdmin? @relation("GoverningBodyRegistrationReviewer", fields: [reviewedByAdminId], references: [id])
+    createdGoverningBody GoverningBody? @relation(fields: [createdGoverningBodyId], references: [id])
+
+    @@index([status])
+    @@index([applicantUserId])
+    @@index([skNumber])
+}
+
+/// A Governing Body: above its Schools, and a Place a sign-in can be for (ADR-0011).
+/// Its admins hold seats (GoverningBodyAdmin).
+model GoverningBody {
+    id         String            @id @default(cuid())
+    kind       GoverningBodyKind
+    name       String
+    /// Unique on the platform, as an NPSN is (K5). Null for a GOVERNMENT body.
+    skNumber   String?           @unique
+    street     String
+    village    String
+    district   String
+    city       String
+    province   String
+    postalCode String?
+    /// The Governing Body Code: the School Code's 8 characters and alphabet. Locates the
+    /// body; grants nothing (tickets 04 and 06 take applications through it).
+    code       String            @unique
+    /// Its label under the base domain (K13), unique across Schools and bodies.
+    subdomain  String            @unique
+    /// Switched off by a Platform Admin (K11): its admins lose it, its code and subdomain
+    /// stop resolving, the sign-ins bound to it end. Its Schools keep running.
+    deactivatedAt        DateTime?
+    deactivationReason   String?
+    deactivatedByAdminId String?
+    createdAt  DateTime          @default(now())
+    updatedAt  DateTime          @updatedAt
+
+    deactivatedBy PlatformAdmin?             @relation("GoverningBodyDeactivatedBy", fields: [deactivatedByAdminId], references: [id])
+    registration  GoverningBodyRegistration?
+    admins        GoverningBodyAdmin[]
+    schools       School[]
+    refreshTokens RefreshToken[]
+    handoffCodes  HandoffCode[]
+
+    @@index([deactivatedAt])
+}
+
+/// A person's seat as an admin of a Governing Body. The applicant gets the first, ACTIVE
+/// at approval (ticket 03); others ask through the code (ticket 04). The senior admin is
+/// the live one approved earliest (K6), so approvedAt is kept. One PENDING-or-ACTIVE seat
+/// per person per body, by a partial index in partial-indexes.sql.
+model GoverningBodyAdmin {
+    id              String           @id @default(cuid())
+    governingBodyId String
+    userId          String
+    status          MembershipStatus @default(PENDING)
+    approvedAt      DateTime?
+    endedAt         DateTime?
+    createdAt       DateTime         @default(now())
+    updatedAt       DateTime         @updatedAt
+
+    governingBody GoverningBody @relation(fields: [governingBodyId], references: [id], onDelete: Cascade)
+    user          User          @relation(fields: [userId], references: [id])
+
+    @@index([governingBodyId, status])
+    @@index([userId])
 }
 
 // ---------------------------------------------------------------------------
@@ -506,6 +642,9 @@ model School {
     /// only a Platform Admin changes it. Only the label is stored: the base domain is
     /// the frontend's configuration.
     subdomain     String     @unique
+    /// The Governing Body above it, null for an independent School (governing-body
+    /// ticket 03; set from ticket 05, when a body creates its Schools).
+    governingBodyId String?
     // Access withdrawn by a platform admin, with the data left where it is.
     //
     // Deactivation is never a delete: School has thirteen cascading relations, so
@@ -524,6 +663,7 @@ model School {
     updatedAt     DateTime   @updatedAt
 
     deactivatedBy  PlatformAdmin?      @relation("SchoolDeactivatedBy", fields: [deactivatedByAdminId], references: [id])
+    governingBody  GoverningBody?      @relation(fields: [governingBodyId], references: [id], onDelete: SetNull)
     registration   SchoolRegistration?
     memberships    SchoolMembership[]
     membershipRoles MembershipRole[]

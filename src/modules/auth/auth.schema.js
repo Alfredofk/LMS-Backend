@@ -88,12 +88,20 @@ const refreshBody = z.object({
     refreshToken: z.string().min(1, 'Missing refresh token'),
 });
 
-// Moving a sign-in to another of one's Schools (governing-body ticket 01): the
-// refresh token is the sign-in, so it is all that proves whose move this is.
-const placeBody = z.strictObject({
-    refreshToken: z.string().min(1, 'Missing refresh token'),
-    schoolId: z.string().min(1, 'Say which school'),
-});
+// Moving a sign-in to another of one's Places (governing-body ticket 01): the
+// refresh token is the sign-in, so it is all that proves whose move this is. The
+// Place is a School (`schoolId`) or, since ticket 03, a Governing Body seat
+// (`governingBodyId`): exactly one of the two.
+const placeBody = z
+    .strictObject({
+        refreshToken: z.string().min(1, 'Missing refresh token'),
+        schoolId: z.string().min(1).optional(),
+        governingBodyId: z.string().min(1).optional(),
+    })
+    .refine((body) => Boolean(body.schoolId) !== Boolean(body.governingBodyId), {
+        message: 'Say which school, or which governing body: one of the two',
+        path: ['schoolId'],
+    });
 
 // A handoff to another of one's Schools, on its subdomain (governing-body ticket 02,
 // K3): the same two fields. The refresh token is read, not spent - the sign-in that

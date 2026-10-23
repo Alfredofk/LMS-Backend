@@ -28,6 +28,11 @@ import contentRoutes from './modules/content/content.routes.js';
 import trackingRoutes from './modules/tracking/tracking.routes.js';
 import assessmentRoutes from './modules/assessment/assessment.routes.js';
 import gradingRoutes from './modules/grading/grading.routes.js';
+import governingBodyRegistrationRoutes, {
+    adminRegistrationRouter as adminGoverningBodyRegistrationRoutes,
+    adminBodyRouter as adminGoverningBodyRoutes,
+    seatRouter as governingBodyRoutes,
+} from './modules/governingBody/governingBody.routes.js';
 import { generalLimiter } from './shared/rateLimit.js';
 import { verifyTransport } from './shared/mailer.js';
 import { createLogger } from './lib/helpers.js';
@@ -89,6 +94,10 @@ app.use('/api/admin/school-registrations', adminSchoolRegistrationRoutes);
 app.use('/api/admin/schools', adminSchoolRoutes);
 app.use('/api/school', schoolRoutes);
 app.use('/api/places', placeRoutes);
+app.use('/api/governing-body-registrations', governingBodyRegistrationRoutes);
+app.use('/api/admin/governing-body-registrations', adminGoverningBodyRegistrationRoutes);
+app.use('/api/admin/governing-bodies', adminGoverningBodyRoutes);
+app.use('/api/governing-body', governingBodyRoutes);
 app.use('/api/memberships', membershipRoutes);
 app.use('/api/membership-requests', membershipReviewRoutes);
 app.use('/api/members', memberRoutes);

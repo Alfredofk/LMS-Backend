@@ -122,6 +122,22 @@ async function assertSchoolRegistrationAllowed({ applicantUserId }) {
     }
 }
 
+// The same durable ceiling on Governing Body registrations (governing-body ticket 03),
+// counted on their own table: a founder's school and yayasan are two budgets.
+async function assertGoverningBodyRegistrationAllowed({ applicantUserId }) {
+    const since = new Date(Date.now() - RETRY_WINDOW_MS);
+    const recent = await prisma.governingBodyRegistration.count({
+        where: { applicantUserId, createdAt: { gte: since } },
+    });
+
+    if (recent >= MAX_ATTEMPTS_PER_WINDOW) {
+        throw conflict(
+            'Too many governing body registration submissions today. Try again tomorrow.',
+            { attempts: recent, windowHours: RETRY_WINDOW_MS / 3_600_000 }
+        );
+    }
+}
+
 // Append-only. Never updated, never deleted - it is the record of who decided
 // what, and a mutable audit log is not an audit log.
 //
@@ -164,6 +180,7 @@ export {
     assertMembershipRetryAllowed,
     assertClassSubjectRetryAllowed,
     assertSchoolRegistrationAllowed,
+    assertGoverningBodyRegistrationAllowed,
     assertWithinRegistrationDeadline,
     recordAudit,
 };

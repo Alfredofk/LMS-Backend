@@ -95,3 +95,10 @@ CREATE UNIQUE INDEX "AssessmentException_one_live_per_student"
 CREATE UNIQUE INDEX "SlotFinalisation_one_live_per_slot"
     ON "SlotFinalisation" ("classId", "subjectId", "semesterId")
     WHERE "undoneAt" IS NULL;
+
+-- One PENDING-or-ACTIVE admin seat per person per Governing Body (governing-body ticket
+-- 03). A rejected, cancelled or ended seat must repeat, so one turned down or gone may
+-- ask again (ticket 04) - added in 20261021173931_add_governing_bodies.
+CREATE UNIQUE INDEX "GoverningBodyAdmin_one_live_per_user_per_body"
+    ON "GoverningBodyAdmin" ("userId", "governingBodyId")
+    WHERE "status" IN ('PENDING', 'ACTIVE');

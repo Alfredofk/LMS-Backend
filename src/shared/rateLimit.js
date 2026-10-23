@@ -167,6 +167,17 @@ const registrationLimiter = build({
     message: 'Too many school registration submissions today. Try again tomorrow.',
 });
 
+// A Governing Body's registration, by the same reasoning (governing-body ticket 03): a
+// human reviews each, per applicant. A budget of its own, so a founder registering
+// a yayasan and its first school does not spend one on the other.
+// assertGoverningBodyRegistrationAllowed() in ./approval.js is its durable version.
+const governingBodyRegistrationLimiter = build({
+    windowMs: 24 * 60 * 60 * 1000,
+    limit: 5,
+    keyGenerator: byUserThenIp,
+    message: 'Too many governing body registration submissions today. Try again tomorrow.',
+});
+
 // Two ceilings, one limiter - and, for three endpoints, the only one.
 //
 // A signed-in user will never approach 1000 requests in fifteen minutes through
@@ -200,5 +211,6 @@ export {
     emailDispatchLimiter,
     joinSchoolLimiter,
     registrationLimiter,
+    governingBodyRegistrationLimiter,
     generalLimiter,
 };

@@ -15,7 +15,7 @@ import { sendVerificationEmail, sendPasswordResetEmail } from '../../shared/mail
 import { googleVerifier } from '../../shared/google.js';
 import { AppError, badRequest, conflict, notFound, unauthorized } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
-import { loadSchoolBySubdomain } from '../school/school.subdomain.js';
+import { loadPlaceBySubdomain } from '../school/school.subdomain.js';
 
 const log = createLogger('Auth');
 
@@ -63,17 +63,37 @@ function deliver(context, send) {
 // ---------------------------------------------------------------------------
 
 // What a person may open (governing-body ticket 01, ADR-0011): an ACTIVE
-// membership at a school still active. A person may hold one at several schools,
-// and each is a Place a sign-in can be for.
+// membership at a school still active, and (ticket 03) an ACTIVE admin seat at a
+// Governing Body still active. A person may hold several, and each is a Place a
+// sign-in can be for. A Place is { kind: 'SCHOOL' | 'GOVERNING_BODY', id }.
 //
 // A deactivated school issues no claims, which is the whole mechanism behind
 // withdrawing its access (ticket 14): without a schoolId in the token there is no
 // ambient scope, so every tenant-owned query throws and requireActiveMembership
 // answers 403. The membership row itself is untouched - the school coming back
-// should find its people still in it.
+// should find its people still in it. A deactivated Governing Body likewise (K11).
 const OPENABLE = { status: 'ACTIVE', endedAt: null, school: { deactivatedAt: null } };
+const OPENABLE_SEAT = { status: 'ACTIVE', endedAt: null, governingBody: { deactivatedAt: null } };
 
-const NO_CLAIMS = { membershipId: null, schoolId: null, schoolName: null, roles: [] };
+const NO_CLAIMS = { membershipId: null, schoolId: null, schoolName: null, roles: [], governingBodyId: null };
+
+// The Place a refresh-token row or a handoff code names, and the columns that name
+// one: a row names a School, a Governing Body, or neither.
+function placeOfRow(row) {
+    if (row.schoolId) return { kind: 'SCHOOL', id: row.schoolId };
+    if (row.governingBodyId) return { kind: 'GOVERNING_BODY', id: row.governingBodyId };
+    return null;
+}
+
+const placeColumnsOf = (place) => ({
+    schoolId: place?.kind === 'SCHOOL' ? place.id : null,
+    governingBodyId: place?.kind === 'GOVERNING_BODY' ? place.id : null,
+});
+
+// The Place a request asks for: { schoolId } or { governingBodyId }, the schema
+// having let exactly one through. The access token's own, for a request that keeps it.
+const placeOfBody = ({ schoolId, governingBodyId }) => placeOfRow({ schoolId, governingBodyId });
+const placeOfAuth = (auth) => placeOfRow({ schoolId: auth.schoolId, governingBodyId: auth.governingBodyId });
 
 // The join between authentication and tenancy (ADR-0001), and the one place in
 // this module that must step outside the tenant scope.
@@ -81,62 +101,89 @@ const NO_CLAIMS = { membershipId: null, schoolId: null, schoolName: null, roles:
 // SchoolMembership and MembershipRole are tenant-owned, but this runs at login -
 // before any school is known, which is precisely what the lookup is trying to
 // find out. Scoped, the extension would throw (prisma.js:88). The same carve-out
-// seed.js:129 makes, for the same reason.
-async function openableMembershipsOf(userId) {
-    return runUnscoped('listing the schools a user may open, before any school scope exists', async () =>
-        await prisma.schoolMembership.findMany({
-            where: { userId, ...OPENABLE },
-            select: {
-                id: true,
-                schoolId: true,
-                school: { select: { name: true, subdomain: true } },
-                roles: { where: { status: 'ACTIVE' }, select: { role: true } },
-            },
-            orderBy: { school: { name: 'asc' } },
-        })
-    );
+// seed.js:129 makes, for the same reason. The seats are above tenancy.
+async function openablePlacesOf(userId) {
+    const [memberships, seats] = await Promise.all([
+        runUnscoped('listing the schools a user may open, before any school scope exists', async () =>
+            await prisma.schoolMembership.findMany({
+                where: { userId, ...OPENABLE },
+                select: {
+                    id: true,
+                    schoolId: true,
+                    school: { select: { name: true, subdomain: true } },
+                    roles: { where: { status: 'ACTIVE' }, select: { role: true } },
+                },
+                orderBy: { school: { name: 'asc' } },
+            })
+        ),
+        prisma.governingBodyAdmin.findMany({
+            where: { userId, ...OPENABLE_SEAT },
+            select: { governingBody: { select: { id: true, name: true, subdomain: true } } },
+            orderBy: { governingBody: { name: 'asc' } },
+        }),
+    ]);
+
+    return [
+        ...memberships.map((membership) => ({
+            kind: 'SCHOOL',
+            id: membership.schoolId,
+            name: membership.school.name,
+            subdomain: membership.school.subdomain,
+            roles: membership.roles.map((entry) => entry.role),
+            membershipId: membership.id,
+        })),
+        ...seats.map((seat) => ({
+            kind: 'GOVERNING_BODY',
+            id: seat.governingBody.id,
+            name: seat.governingBody.name,
+            subdomain: seat.governingBody.subdomain,
+            roles: ['ADMIN'],
+        })),
+    ];
 }
 
-// One entry of the dropdown that moves a person between their schools (K17), with
-// the subdomain a handoff lands on (ticket 02). A Governing Body seat joins it in
-// ticket 03.
-const placeView = (membership) => ({
-    kind: 'SCHOOL',
-    id: membership.schoolId,
-    name: membership.school.name,
-    subdomain: membership.school.subdomain,
-    roles: membership.roles.map((entry) => entry.role),
+// One entry of the dropdown that moves a person between their Places (K17): a School,
+// or a Governing Body seat (ticket 03), with the subdomain a handoff lands on (ticket 02).
+const placeView = (entry) => ({
+    kind: entry.kind,
+    id: entry.id,
+    name: entry.name,
+    subdomain: entry.subdomain,
+    roles: entry.roles,
 });
 
-const placesOf = async (userId) => (await openableMembershipsOf(userId)).map(placeView);
+const placesOf = async (userId) => (await openablePlacesOf(userId)).map(placeView);
 
-// Which membership a sign-in opens. Asked for a School, it is that School's while
-// the person may open it, and none otherwise: a token is for one Place, and never
-// falls to another by itself. Asked for none, it is the one School they may open,
-// and none when they may open several - they choose (owner, 2026-10-21).
-function chosenOf(openable, schoolId) {
-    if (schoolId) return openable.find((entry) => entry.schoolId === schoolId) ?? null;
+// Which Place a sign-in opens. Asked for one, it is that one while the person may
+// open it, and none otherwise: a token is for one Place, and never falls to another
+// by itself. Asked for none, it is the one Place they may open, and none when they
+// may open several - they choose (owner, 2026-10-21).
+function chosenOf(openable, place) {
+    if (place) return openable.find((entry) => entry.kind === place.kind && entry.id === place.id) ?? null;
     return openable.length === 1 ? openable[0] : null;
 }
 
-// Only an ACTIVE membership with ACTIVE roles produces claims. A PENDING member
-// gets a token carrying no school at all, so every tenant-owned query they could
-// reach throws rather than returning rows. The Places come back beside the claims,
-// read once.
-async function buildAuthClaims(userId, schoolId = null) {
-    const openable = await openableMembershipsOf(userId);
-    const membership = chosenOf(openable, schoolId);
+function claimsOf(entry) {
+    if (!entry) return NO_CLAIMS;
+    if (entry.kind === 'GOVERNING_BODY') return { ...NO_CLAIMS, governingBodyId: entry.id };
+    return {
+        membershipId: entry.membershipId,
+        schoolId: entry.id,
+        schoolName: entry.name,
+        roles: entry.roles,
+        governingBodyId: null,
+    };
+}
 
-    const claims = membership
-        ? {
-            membershipId: membership.id,
-            schoolId: membership.schoolId,
-            schoolName: membership.school.name,
-            roles: membership.roles.map((entry) => entry.role),
-        }
-        : NO_CLAIMS;
-
-    return { claims, places: openable.map(placeView) };
+// Only an ACTIVE membership with ACTIVE roles produces School claims. A PENDING
+// member gets a token carrying no school at all, so every tenant-owned query they
+// could reach throws rather than returning rows. A Governing Body seat's claims name
+// the body and no School (ticket 03): its token reaches no School's data. The Places
+// come back beside the claims, read once, and the entry opened.
+async function buildAuthClaims(userId, place = null) {
+    const openable = await openablePlacesOf(userId);
+    const opened = chosenOf(openable, place);
+    return { claims: claimsOf(opened), opened, places: openable.map(placeView) };
 }
 
 // ---------------------------------------------------------------------------
@@ -148,15 +195,15 @@ async function buildAuthClaims(userId, schoolId = null) {
 // there and the table follows, with no chance of a row outliving the token it
 // stands for.
 //
-// schoolId is the Place the row is for (governing-body ticket 01), null for none.
-async function issueRefreshToken(userId, { rememberMe = false, schoolId = null, expiresAt = null } = {}) {
+// place is the Place the row is for (governing-body tickets 01 and 03), null for none.
+async function issueRefreshToken(userId, { rememberMe = false, place = null, expiresAt = null } = {}) {
     const token = signRefreshToken({ userId, rememberMe, expiresAt });
     const { exp } = verifyRefreshToken(token);
 
     const row = await prisma.refreshToken.create({
         data: {
             userId,
-            schoolId,
+            ...placeColumnsOf(place),
             tokenHash: hashToken(token),
             expiresAt: new Date(exp * 1000),
         },
@@ -179,16 +226,19 @@ const revokeAllRefreshTokens = (userId) =>
 //
 // The Place asked for stays the row's even when it no longer opens - a member
 // removed from it gets a token with no school, as before, and moves through
-// choosePlace. Asked for none, the row is bound to the School it opened, if any:
+// choosePlace. Asked for none, the row is bound to the Place it opened, if any:
 // an applicant approved since, or a row issued before the ticket, from then on
-// refreshes into that School alone.
+// refreshes into that Place alone.
+//
+// `membership` is the token's School, `governingBody` its Governing Body seat
+// (ticket 03, owner 2026-10-22): at most one of the two is set.
 //
 // rememberMe must be the same choice the refresh token was signed with.
-async function signIn(user, { rememberMe = false, schoolId = null, expiresAt = null } = {}) {
-    const { claims, places } = await buildAuthClaims(user.id, schoolId);
+async function signIn(user, { rememberMe = false, place = null, expiresAt = null } = {}) {
+    const { claims, opened, places } = await buildAuthClaims(user.id, place);
     const issued = await issueRefreshToken(user.id, {
         rememberMe,
-        schoolId: schoolId ?? claims.schoolId,
+        place: place ?? (opened ? { kind: opened.kind, id: opened.id } : null),
         expiresAt,
     });
 
@@ -204,6 +254,13 @@ async function signIn(user, { rememberMe = false, schoolId = null, expiresAt = n
                     schoolId: claims.schoolId,
                     schoolName: claims.schoolName,
                     roles: claims.roles,
+                }
+                : null,
+            governingBody: claims.governingBodyId
+                ? {
+                    id: opened.id,
+                    name: opened.name,
+                    subdomain: opened.subdomain,
                 }
                 : null,
             places,
@@ -318,7 +375,7 @@ async function resendVerification(email) {
 // School is refused only after the password checks out (signInFor), so a guess
 // learns nothing of which schools an address belongs to.
 async function login({ email, password, rememberMe, subdomain }) {
-    const place = subdomain ? await loadSchoolBySubdomain(subdomain) : null;
+    const place = subdomain ? await loadPlaceBySubdomain(subdomain) : null;
     const user = await prisma.user.findUnique({ where: { email } });
     // No passwordHash means an account made through Google that has not set a
     // password yet. It fails exactly like an unknown address, dummy hash and all.
@@ -343,17 +400,22 @@ async function login({ email, password, rememberMe, subdomain }) {
     return signInFor(user, place, { rememberMe });
 }
 
-// The last step of a sign-in by password or by Google: for the School a subdomain
+// K14's refusal, at a School's subdomain and at a Governing Body's (ticket 03).
+const NOT_HERE = {
+    SCHOOL: 'This account is not registered at this school',
+    GOVERNING_BODY: 'This account is not an admin of this governing body',
+};
+
+// The last step of a sign-in by password or by Google: for the Place a subdomain
 // named, refused as K14 words it when the person may not open it; for none, the
 // main domain's default.
-async function signInFor(user, place, { rememberMe }) {
-    if (!place) return (await signIn(user, { rememberMe })).answer;
+async function signInFor(user, named, { rememberMe }) {
+    if (!named) return (await signIn(user, { rememberMe })).answer;
 
-    const { claims } = await buildAuthClaims(user.id, place.id);
-    if (!claims.schoolId) {
-        throw new AppError(403, 'NOT_REGISTERED_HERE', 'This account is not registered at this school');
-    }
-    return (await signIn(user, { rememberMe, schoolId: place.id })).answer;
+    const place = { kind: named.kind, id: named.id };
+    const { opened } = await buildAuthClaims(user.id, place);
+    if (!opened) throw new AppError(403, 'NOT_REGISTERED_HERE', NOT_HERE[place.kind]);
+    return (await signIn(user, { rememberMe, place })).answer;
 }
 
 // A refresh token presented for rotation: signed, on file, never used, not
@@ -428,28 +490,33 @@ const retireRefreshToken = (row, replacedByTokenId) =>
 async function refreshAuth(rawToken) {
     const { row, user, rememberMe } = await loadLiveRefreshToken(rawToken);
 
-    const { tokenId, answer } = await signIn(user, { rememberMe, schoolId: row.schoolId });
+    const { tokenId, answer } = await signIn(user, { rememberMe, place: placeOfRow(row) });
     await retireRefreshToken(row, tokenId);
 
     return answer;
 }
 
-// Moving a sign-in to another of the person's Schools, within one origin
+// One 404 for a Place the person may not open, whichever way it is not theirs.
+const PLACE_NOT_FOUND = { SCHOOL: 'School not found', GOVERNING_BODY: 'Governing body not found' };
+
+// Moving a sign-in to another of the person's Places, within one origin
 // (governing-body ticket 01, owner 2026-10-21; ticket 02 adds the move across
-// subdomains). The refresh token presented is rotated as a refresh rotates it,
-// bound to the School asked for, and ends when it would have: the move renews
-// nothing. A School they may not open - another's, one they left, one switched
-// off, an unknown id - is one 404, answered before the token is spent.
-async function choosePlace({ refreshToken, schoolId }) {
+// subdomains, ticket 03 a Governing Body seat as a Place). The refresh token
+// presented is rotated as a refresh rotates it, bound to the Place asked for -
+// `schoolId` or `governingBodyId` - and ends when it would have: the move renews
+// nothing. A Place they may not open - another's, one they left, one switched off,
+// an unknown id - is one 404, answered before the token is spent.
+async function choosePlace({ refreshToken, ...named }) {
     const { row, user, rememberMe } = await loadLiveRefreshToken(refreshToken);
 
-    const { claims } = await buildAuthClaims(user.id, schoolId);
-    if (!claims.schoolId) throw notFound('School not found');
+    const place = placeOfBody(named);
+    const { opened } = await buildAuthClaims(user.id, place);
+    if (!opened) throw notFound(PLACE_NOT_FOUND[place.kind]);
 
-    const { tokenId, answer } = await signIn(user, { rememberMe, schoolId, expiresAt: row.expiresAt });
+    const { tokenId, answer } = await signIn(user, { rememberMe, place, expiresAt: row.expiresAt });
     await retireRefreshToken(row, tokenId);
 
-    log.info(`A sign-in moved to ${claims.schoolName}`);
+    log.info(`A sign-in moved to ${opened.name}`);
     return answer;
 }
 
@@ -478,20 +545,22 @@ async function isSignInAlive(tokenId) {
 
 // POST /api/auth/handoff. The refresh token proves the sign-in and says when it
 // ends; it is read, not spent, since the sign-in that asks stays on its own
-// subdomain. A School the person may not open is the 404 choosePlace answers. The
-// code is handed out once and stored only as a hash, like a verification token.
-async function issueHandoff({ refreshToken, schoolId }) {
+// subdomain. A Place the person may not open - a School, or a Governing Body seat
+// since ticket 03 - is the 404 choosePlace answers. The code is handed out once and
+// stored only as a hash, like a verification token.
+async function issueHandoff({ refreshToken, ...named }) {
     const { row, user, rememberMe } = await loadLiveRefreshToken(refreshToken);
 
-    const { claims, places } = await buildAuthClaims(user.id, schoolId);
-    if (!claims.schoolId) throw notFound('School not found');
+    const place = placeOfBody(named);
+    const { opened } = await buildAuthClaims(user.id, place);
+    if (!opened) throw notFound(PLACE_NOT_FOUND[place.kind]);
 
     const code = generateToken();
     const expiresAt = expiresIn(HANDOFF_TTL_MS);
     await prisma.handoffCode.create({
         data: {
             userId: user.id,
-            schoolId,
+            ...placeColumnsOf(place),
             sourceTokenId: row.id,
             codeHash: hashToken(code),
             expiresAt,
@@ -500,8 +569,8 @@ async function issueHandoff({ refreshToken, schoolId }) {
         },
     });
 
-    log.info(`A handoff to ${claims.schoolName} issued`);
-    return { code, subdomain: places.find((place) => place.id === schoolId).subdomain, expiresAt };
+    log.info(`A handoff to ${opened.name} issued`);
+    return { code, subdomain: opened.subdomain, expiresAt };
 }
 
 // POST /api/auth/handoff/redeem, from the page the code opened. Public: the code
@@ -529,16 +598,17 @@ async function redeemHandoff({ code }) {
     const user = await prisma.user.findUnique({ where: { id: handoff.userId } });
     if (!user || user.deletedAt || !user.emailVerifiedAt) throw handoffRejected();
 
-    const { claims } = await buildAuthClaims(user.id, handoff.schoolId);
-    if (!claims.schoolId) throw handoffRejected();
+    const place = placeOfRow(handoff);
+    const { opened } = await buildAuthClaims(user.id, place);
+    if (!opened) throw handoffRejected();
 
     const { answer } = await signIn(user, {
         rememberMe: handoff.rememberMe,
-        schoolId: handoff.schoolId,
+        place,
         expiresAt: handoff.sessionExpiresAt,
     });
 
-    log.info(`A handoff to ${claims.schoolName} redeemed`);
+    log.info(`A handoff to ${opened.name} redeemed`);
     return answer;
 }
 
@@ -647,7 +717,7 @@ async function resolveGoogleUser({ sub, email, name }) {
 // An address Google itself has not verified proves nothing about who owns it,
 // so it is refused rather than trusted.
 async function googleSignIn({ idToken, rememberMe, subdomain }) {
-    const place = subdomain ? await loadSchoolBySubdomain(subdomain) : null;
+    const place = subdomain ? await loadPlaceBySubdomain(subdomain) : null;
     const google = await googleVerifier.verify(idToken);
     if (!google.emailVerified) throw googleRejected();
 
@@ -734,6 +804,7 @@ export {
     publicUser,
     buildAuthClaims,
     placesOf,
+    placeOfAuth,
     signIn,
     issueRefreshToken,
     revokeAllRefreshTokens,

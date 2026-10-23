@@ -57,22 +57,49 @@ function schoolSubdomainBaseOf({ schoolType, name }) {
     return `${type}${rest.replace(/ /g, '')}`.slice(0, MAX_LENGTH);
 }
 
+// The K13 base for a Governing Body (ticket 03): the kind's word, then the name with
+// that word stripped from its front - "Yayasan Penabur Malang" gives
+// yayasanpenaburmalang. A perkumpulan is written `asosiasi` (owner, 2026-10-22: "ganti
+// kata lain"), and either word is stripped from its name. A School's base always starts
+// sd, smp, sma or smk, so the two rarely meet; uniqueness is checked across both all
+// the same.
+const KIND_WORDS = {
+    FOUNDATION: { word: 'yayasan', stripped: ['yayasan'] },
+    ASSOCIATION: { word: 'asosiasi', stripped: ['perkumpulan', 'asosiasi'] },
+    GOVERNMENT: { word: 'dinas', stripped: ['dinas'] },
+};
+
+function governingBodySubdomainBaseOf({ kind, name }) {
+    const { word, stripped } = KIND_WORDS[kind];
+
+    let rest = wordsOf(name);
+    const leading = stripped.find((form) => rest === form || rest.startsWith(`${form} `));
+    if (leading) rest = rest.slice(leading.length);
+
+    return `${word}${rest.replace(/ /g, '')}`.slice(0, MAX_LENGTH);
+}
+
 // Each tie-break's suffix, cut from the base so the label stays within the limit.
 const fitted = (base, suffix) => `${base.slice(0, MAX_LENGTH - suffix.length)}${suffix}`;
 
 // The K9 candidates, in order: the base; taken, the city after a hyphen (a number
 // added straight on would misread - "smapenabur1" + "2" reads as Penabur 12); still
 // taken, a number after that. With no city, the number follows the base. Endless:
-// the caller stops at the first one free.
-function* schoolSubdomainCandidatesOf(school) {
-    const base = schoolSubdomainBaseOf(school);
-    const city = wordsOf(school.city).replace(/ /g, '').slice(0, 24);
+// the caller stops at the first one free. A Governing Body's take the same tie-breaks
+// (K13), with its address's kota or kabupaten as the city.
+function* candidatesFrom(base, cityName) {
+    const city = wordsOf(cityName).replace(/ /g, '').slice(0, 24);
     const stem = city ? `-${city}` : '';
 
     yield base;
     if (stem) yield fitted(base, stem);
     for (let n = 2; ; n += 1) yield fitted(base, `${stem}-${n}`);
 }
+
+const schoolSubdomainCandidatesOf = (school) => candidatesFrom(schoolSubdomainBaseOf(school), school.city);
+
+const governingBodySubdomainCandidatesOf = (body) =>
+    candidatesFrom(governingBodySubdomainBaseOf(body), body.city);
 
 // A School's subdomain: the first K9 candidate neither reserved nor taken.
 function schoolSubdomainOf(school, isTaken) {
@@ -90,4 +117,6 @@ export {
     schoolSubdomainBaseOf,
     schoolSubdomainCandidatesOf,
     schoolSubdomainOf,
+    governingBodySubdomainBaseOf,
+    governingBodySubdomainCandidatesOf,
 };

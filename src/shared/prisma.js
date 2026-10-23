@@ -23,6 +23,11 @@ const UNSCOPED_MODELS = new Set([
     // Its schoolId names the target, as RefreshToken's names the Place: identity.
     'HandoffCode',
     'PlatformAdmin',
+    // A tier above the School (governing-body ticket 03): a body, its registration and
+    // its admins' seats carry no tenant. A body reads a School only through runInSchool.
+    'GoverningBodyRegistration',
+    'GoverningBody',
+    'GoverningBodyAdmin',
     'SchoolRegistration',
     'School',
     'NationalHoliday',

@@ -91,4 +91,55 @@ function singleFile(field, { maxBytes, types }) {
     };
 }
 
-export { singleFile, detectType, MIME };
+const megabytesOf = (bytes) => bytes / (1024 * 1024);
+
+// Several required files in one request, one under each name, each with its own
+// `maxBytes` and `types` (governing-body ticket 03: a KTP and a proof of office). On
+// success req.files[name] is that file, with its `detectedType`. multer stops a file
+// past the largest limit; each one's own limit is checked after it, so the answer
+// names the file and the limit it broke.
+function fileFields(specs) {
+    const names = Object.keys(specs);
+    const largest = Math.max(...names.map((name) => specs[name].maxBytes));
+    const parse = multer({
+        storage: multer.memoryStorage(),
+        limits: { fileSize: largest, files: names.length },
+    }).fields(names.map((name) => ({ name, maxCount: 1 })));
+
+    return (req, res, next) => {
+        parse(req, res, (error) => {
+            if (error instanceof multer.MulterError) {
+                const spec = specs[error.field];
+                const message =
+                    error.code === 'LIMIT_FILE_SIZE' && spec
+                        ? `The ${error.field} file must be at most ${megabytesOf(spec.maxBytes)} MB`
+                        : `Invalid upload: ${error.message}`;
+                return next(badRequest(message, { field: error.field }));
+            }
+            if (error) return next(error);
+
+            const files = {};
+            for (const name of names) {
+                const { maxBytes, types } = specs[name];
+                const file = req.files?.[name]?.[0];
+                if (!file) return next(badRequest(`The ${name} file is required`, { field: name }));
+                if (file.size > maxBytes) {
+                    const message = `The ${name} file must be at most ${megabytesOf(maxBytes)} MB`;
+                    return next(badRequest(message, { field: name }));
+                }
+
+                const detected = detectType(file.buffer);
+                if (!detected || !types.includes(detected)) {
+                    const allowed = types.join(', ').toUpperCase();
+                    return next(badRequest(`The ${name} file must be one of: ${allowed}`, { field: name }));
+                }
+                files[name] = { ...file, detectedType: detected };
+            }
+
+            req.files = files;
+            return next();
+        });
+    };
+}
+
+export { singleFile, fileFields, detectType, MIME };

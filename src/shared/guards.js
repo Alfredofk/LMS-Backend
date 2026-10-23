@@ -193,6 +193,38 @@ async function requirePlatformAdmin(req, _res, next) {
     }
 }
 
+// An admin of the Governing Body the token is for (governing-body ticket 03), the
+// counterpart of requirePlatformAdmin. Mount after requireAuth.
+//
+// Read from the seat on every request, not from the claim alone: a seat ended, or a
+// body switched off (K11), must stop at once, as requireActiveMembership stops a
+// School's member. The seat and the body are above tenancy, so this reads without a
+// scope - a body's token carries none.
+async function requireGoverningBodyAdmin(req, _res, next) {
+    const governingBodyId = req.auth?.governingBodyId;
+    const refused = forbidden('You are not an admin of a governing body');
+    if (!req.auth?.userId || !governingBodyId) return next(refused);
+
+    try {
+        const seat = await prisma.governingBodyAdmin.findFirst({
+            where: {
+                governingBodyId,
+                userId: req.auth.userId,
+                status: 'ACTIVE',
+                endedAt: null,
+                governingBody: { deactivatedAt: null },
+            },
+            select: { id: true },
+        });
+        if (!seat) return next(refused);
+
+        req.governingBodySeatId = seat.id;
+        return next();
+    } catch (error) {
+        return next(error);
+    }
+}
+
 export {
     hasActiveRole,
     isPrincipal,
@@ -206,4 +238,5 @@ export {
     placementsOf,
     requireResource,
     requirePlatformAdmin,
+    requireGoverningBodyAdmin,
 };

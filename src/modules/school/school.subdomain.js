@@ -1,7 +1,11 @@
 import { prisma } from '../../shared/prisma.js';
 import { runUnscoped } from '../../shared/tenantContext.js';
 import { recordAudit } from '../../shared/approval.js';
-import { isReservedSubdomain, schoolSubdomainCandidatesOf } from '../../shared/subdomain.js';
+import {
+    isReservedSubdomain,
+    schoolSubdomainCandidatesOf,
+    governingBodySubdomainCandidatesOf,
+} from '../../shared/subdomain.js';
 import { badRequest, conflict, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
 
@@ -20,22 +24,35 @@ const log = createLogger('School');
 //   same 404 - to the public read and to a sign-in that names it.
 // - A subdomain is public (it is in the address bar), so reading one grants nothing
 //   and needs no limiter beyond generalLimiter.
+// - A Governing Body's subdomain (ticket 03, K13) lives in the same space: unique
+//   across both tables, resolved by the same route, named by a sign-in the same way.
 
 const SCHOOL_SUBJECT = 'School';
 
-// How many K9 candidates are checked against the table in one read.
+// How many candidates are checked against the tables in one read.
 const CANDIDATES_AT_ONCE = 20;
 
 const UNKNOWN = 'No school uses this address';
 
-const placeView = (school) => ({ kind: 'SCHOOL', name: school.name, schoolType: school.schoolType });
+const placeView = (place) =>
+    place.kind === 'SCHOOL'
+        ? { kind: place.kind, name: place.name, schoolType: place.schoolType }
+        : { kind: place.kind, name: place.name, governingBodyKind: place.governingBodyKind };
 
-// The first K9 candidate neither reserved nor held by another School. client is a
-// transaction's when the School is created in one. A School created at the same
-// moment with the same base can still take it first: the unique index refuses the
-// second, whose caller answers 409, as generateSchoolCode's would.
-async function freeSubdomainOf(client, school) {
-    const candidates = schoolSubdomainCandidatesOf(school);
+// Which of these labels a School or a Governing Body holds.
+async function heldOf(client, labels) {
+    const [schools, bodies] = await Promise.all([
+        client.school.findMany({ where: { subdomain: { in: labels } }, select: { subdomain: true } }),
+        client.governingBody.findMany({ where: { subdomain: { in: labels } }, select: { subdomain: true } }),
+    ]);
+    return new Set([...schools, ...bodies].map((row) => row.subdomain));
+}
+
+// The first candidate neither reserved nor held. client is a transaction's when the
+// Place is created in one. One created at the same moment with the same base can still
+// take it first: the unique index refuses the second, whose caller answers 409, as
+// generateSchoolCode's would.
+async function firstFreeOf(client, candidates) {
     for (;;) {
         const page = [];
         while (page.length < CANDIDATES_AT_ONCE) {
@@ -43,28 +60,49 @@ async function freeSubdomainOf(client, school) {
             if (!isReservedSubdomain(candidate)) page.push(candidate);
         }
 
-        const held = await client.school.findMany({ where: { subdomain: { in: page } }, select: { subdomain: true } });
-        const taken = new Set(held.map((row) => row.subdomain));
-        const free = page.find((candidate) => !taken.has(candidate));
+        const held = await heldOf(client, page);
+        const free = page.find((candidate) => !held.has(candidate));
         if (free) return free;
     }
 }
 
-// The School a subdomain names, while it runs. School is above tenancy, so this
-// reads with or without a scope; a sign-in calls it before any exists.
-async function loadSchoolBySubdomain(subdomain) {
-    const school = await prisma.school.findUnique({
-        where: { subdomain: subdomain.toLowerCase() },
-        select: { id: true, name: true, schoolType: true, subdomain: true, deactivatedAt: true },
-    });
-    if (!school || school.deactivatedAt) throw notFound(UNKNOWN);
-    return school;
+// A School's K9 subdomain, and a Governing Body's K13 one.
+const freeSubdomainOf = (client, school) => firstFreeOf(client, schoolSubdomainCandidatesOf(school));
+const freeGoverningBodySubdomainOf = (client, body) => firstFreeOf(client, governingBodySubdomainCandidatesOf(body));
+
+// The Place a subdomain names, while it runs: a School, or a Governing Body (ticket
+// 03). Both are above tenancy, so this reads with or without a scope; a sign-in calls
+// it before any exists.
+async function loadPlaceBySubdomain(subdomain) {
+    const label = subdomain.toLowerCase();
+    const [school, body] = await Promise.all([
+        prisma.school.findUnique({
+            where: { subdomain: label },
+            select: { id: true, name: true, schoolType: true, subdomain: true, deactivatedAt: true },
+        }),
+        prisma.governingBody.findUnique({
+            where: { subdomain: label },
+            select: { id: true, name: true, kind: true, subdomain: true, deactivatedAt: true },
+        }),
+    ]);
+
+    if (school && !school.deactivatedAt) return { kind: 'SCHOOL', ...school };
+    if (body && !body.deactivatedAt) {
+        return {
+            kind: 'GOVERNING_BODY',
+            id: body.id,
+            name: body.name,
+            governingBodyKind: body.kind,
+            subdomain: body.subdomain,
+        };
+    }
+    throw notFound(UNKNOWN);
 }
 
 // GET /api/places/:subdomain, for the page a subdomain opens: whose it is, before
-// anyone signs in. Ticket 03 adds a Governing Body's here.
+// anyone signs in.
 async function resolvePlace(subdomain) {
-    return placeView(await loadSchoolBySubdomain(subdomain));
+    return placeView(await loadPlaceBySubdomain(subdomain));
 }
 
 // A Platform Admin giving a School another subdomain. Its shape is the schema's to
@@ -80,6 +118,10 @@ async function changeSubdomain(adminUserId, schoolId, { subdomain }) {
         });
         if (!school) throw notFound('School not found');
         if (school.subdomain === subdomain) throw conflict(`${school.name} already uses "${subdomain}"`);
+        // A Governing Body's is in the same space, and no index spans the two tables.
+        if ((await heldOf(prisma, [subdomain])).has(subdomain)) {
+            throw conflict(`"${subdomain}" is taken by another school or governing body`);
+        }
 
         try {
             await prisma.$transaction(async (tx) => {
@@ -109,4 +151,4 @@ async function changeSubdomain(adminUserId, schoolId, { subdomain }) {
     });
 }
 
-export { freeSubdomainOf, loadSchoolBySubdomain, resolvePlace, changeSubdomain };
+export { freeSubdomainOf, freeGoverningBodySubdomainOf, loadPlaceBySubdomain, resolvePlace, changeSubdomain };

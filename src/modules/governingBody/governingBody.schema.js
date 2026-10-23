@@ -1,0 +1,107 @@
+import { z } from 'zod';
+
+import { phone } from '../auth/auth.schema.js';
+
+// Governing Bodies (governing-body ticket 03). A registration arrives as
+// multipart/form-data, because the KTP and the proof ride along with it, so every
+// field here starts life as a string.
+
+const KINDS = ['FOUNDATION', 'ASSOCIATION', 'GOVERNMENT'];
+
+// An empty form field means "not given".
+const blankToUndefined = (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value);
+
+const text = (label, max) =>
+    z.string().trim().min(2, `${label} is too short`).max(max, `${label} is too long`);
+
+// The Kemenkumham SK, written as it is on the letter ("AHU-0012345.AH.01.04.Tahun 2015"):
+// compared trimmed, in capitals, with its spaces collapsed, so one number is one number.
+const skNumber = z
+    .string()
+    .trim()
+    .min(5, 'The SK number is too short')
+    .max(100, 'The SK number is too long')
+    .transform((value) => value.replace(/\s+/g, ' ').toUpperCase());
+
+// The full address (K5): every part required but the postal code (owner, 2026-10-22).
+const address = {
+    street: text('The street', 200),
+    village: text('The kelurahan or desa', 100),
+    district: text('The kecamatan', 100),
+    city: text('The kota or kabupaten', 100),
+    province: text('The province', 100),
+    postalCode: z.preprocess(
+        blankToUndefined,
+        z.string().trim().regex(/^\d{5}$/, 'A postal code is five digits').optional()
+    ),
+};
+
+// A FOUNDATION or an ASSOCIATION is a legal entity, so it has an SK number; a
+// GOVERNMENT body is the state itself and has none, which is refused rather than kept.
+function checkSkNumber(value, ctx) {
+    const needsOne = value.kind !== 'GOVERNMENT';
+    if (needsOne && !value.skNumber) {
+        const message = 'A foundation or an association gives its Kemenkumham SK number';
+        ctx.addIssue({ code: 'custom', path: ['skNumber'], message });
+    }
+    if (!needsOne && value.skNumber) {
+        ctx.addIssue({ code: 'custom', path: ['skNumber'], message: 'A government body has no Kemenkumham SK number' });
+    }
+}
+
+const registrationBody = z
+    .strictObject({
+        kind: z.enum(KINDS),
+        name: text('The name', 150),
+        skNumber: z.preprocess(blankToUndefined, skNumber.optional()),
+        ...address,
+        applicantPhone: phone,
+    })
+    .superRefine(checkSkNumber);
+
+const idParams = z.object({ id: z.string().min(1) });
+
+// The Platform Admin's queue, filtered in the database, as the School queue's is.
+const listQuery = z
+    .object({
+        status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'ALL']).default('PENDING'),
+        // One needle over the name, the SK number, the city, and the applicant's name
+        // and email.
+        q: z.string().trim().min(1).max(100).optional(),
+        kind: z.enum(KINDS).optional(),
+        // Only an approved registration has a body, so this implies APPROVED.
+        deactivated: z
+            .enum(['true', 'false'])
+            .optional()
+            .transform((value) => (value === undefined ? undefined : value === 'true')),
+        submittedFrom: z.coerce.date().optional(),
+        submittedTo: z.coerce.date().optional(),
+        sort: z.enum(['oldest', 'newest']).default('oldest'),
+        limit: z.coerce.number().int().min(1).max(100).default(50),
+        offset: z.coerce.number().int().min(0).default(0),
+    })
+    .superRefine((value, ctx) => {
+        if (value.submittedFrom && value.submittedTo && value.submittedFrom > value.submittedTo) {
+            const message = 'The end of the range cannot be before its start';
+            ctx.addIssue({ code: 'custom', path: ['submittedTo'], message });
+        }
+    });
+
+// approval.js says whether a reason is required, so every refusal reads the same.
+const decisionBody = z
+    .strictObject({
+        reason: z.string().max(500, 'Reason is too long').optional(),
+    })
+    .default({});
+
+// A Platform Admin's correction of a body's name, kind or SK number. Whether the kind
+// and the SK number then agree is the service's to check, against what the body holds.
+const editBody = z
+    .strictObject({
+        name: text('The name', 150).optional(),
+        kind: z.enum(KINDS).optional(),
+        skNumber: skNumber.nullable().optional(),
+    })
+    .refine((patch) => Object.keys(patch).length > 0, { message: 'Change at least one of name, kind or skNumber' });
+
+export { KINDS, registrationBody, idParams, listQuery, decisionBody, editBody };
