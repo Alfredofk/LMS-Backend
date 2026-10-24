@@ -61,6 +61,41 @@ const registrationBody = z
 
 const idParams = z.object({ id: z.string().min(1) });
 
+// ---- the Governing Body Code (ticket 04) ----
+
+// The School Code's shape, typed from a WhatsApp message: trimmed, in capitals.
+const code = z
+    .string()
+    .trim()
+    .toUpperCase()
+    .regex(/^[A-Z2-9]{8}$/, 'A Governing Body Code is 8 letters and digits');
+
+// The lookup and an admin application send the code alone. Ticket 06's Principal
+// application adds the School and the KTP.
+const codeBody = z.strictObject({ code });
+
+// A removal's reason is required and shown to the admin removed (K6).
+const removeBody = z.strictObject({
+    reason: z.string().trim().min(3, 'Give the reason').max(500, 'Reason is too long'),
+});
+
+// An admin's change of the body's address and phone (the spec's defaults). The name,
+// the kind and the SK number are the Platform Admin's, so a key for them is refused
+// rather than ignored. The postal code and the phone clear to null.
+const profileBody = z
+    .strictObject({
+        street: address.street.optional(),
+        village: address.village.optional(),
+        district: address.district.optional(),
+        city: address.city.optional(),
+        province: address.province.optional(),
+        postalCode: z.string().trim().regex(/^\d{5}$/, 'A postal code is five digits').nullable().optional(),
+        phone: phone.nullable().optional(),
+    })
+    .refine((patch) => Object.keys(patch).length > 0, {
+        message: 'Change at least one part of the address or the phone',
+    });
+
 // The Platform Admin's queue, filtered in the database, as the School queue's is.
 const listQuery = z
     .object({
@@ -104,4 +139,4 @@ const editBody = z
     })
     .refine((patch) => Object.keys(patch).length > 0, { message: 'Change at least one of name, kind or skNumber' });
 
-export { KINDS, registrationBody, idParams, listQuery, decisionBody, editBody };
+export { KINDS, registrationBody, idParams, codeBody, removeBody, profileBody, listQuery, decisionBody, editBody };

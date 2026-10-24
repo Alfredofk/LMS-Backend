@@ -9,6 +9,8 @@ import { publicUser, placesOf, placeOfAuth, revokeAllRefreshTokens, signIn } fro
 import { cancelPendingMembership, endMembership } from '../membership/membership.service.js';
 import { discardKtp } from '../school/school.service.js';
 import { letterheadView } from '../school/school.letterhead.js';
+import { assertNotLastAdmin, endSeats } from '../governingBody/governingBody.admins.js';
+import { discardRegistrationFiles } from '../governingBody/governingBody.service.js';
 
 const log = createLogger('Users');
 
@@ -414,6 +416,12 @@ async function confirmIdentity(user, { password, googleIdToken }) {
 // - a school registration still under review is closed, and its KTP deleted.
 // One school holding them back refuses it all, and the refusal names every such
 // school in its details.
+//
+// And at the Governing Bodies (governing-body ticket 04, ADR-0007):
+// - the last admin of a live body is refused, every such body named;
+// - an admin application waiting is cancelled, a seat ends LEFT (endSeats);
+// - a Governing Body Registration under review is closed, and its KTP and proof
+//   deleted (owner, 2026-10-24: invariant 7 of the spec holds on a deletion too).
 async function deleteAccount(userId, body) {
     const user = await loadUser(userId);
     await confirmIdentity(user, body);
@@ -456,12 +464,21 @@ async function deleteAccount(userId, body) {
         );
     }
 
-    const registration = await prisma.schoolRegistration.findFirst({
-        where: { applicantUserId: userId, status: 'PENDING' },
-        select: { id: true, ktpStoragePath: true },
-    });
+    await assertNotLastAdmin(userId);
+
+    const [registration, bodyRegistration] = await Promise.all([
+        prisma.schoolRegistration.findFirst({
+            where: { applicantUserId: userId, status: 'PENDING' },
+            select: { id: true, ktpStoragePath: true },
+        }),
+        prisma.governingBodyRegistration.findFirst({
+            where: { applicantUserId: userId, status: 'PENDING' },
+            select: { id: true, ktpStoragePath: true, proofStoragePath: true },
+        }),
+    ]);
 
     const now = new Date();
+    let seats = [];
 
     await prisma.$transaction(async (tx) => {
         // Each inside its own school's scope: the tenant extension reads the scope
@@ -518,6 +535,37 @@ async function deleteAccount(userId, body) {
             });
         }
 
+        // The same for a Governing Body Registration, both its files with it, and then
+        // the seats - all above tenancy, their audit rows stamped with no school.
+        await runUnscoped('ending what an account being deleted holds at governing bodies', async () => {
+            if (bodyRegistration) {
+                const claimed = await tx.governingBodyRegistration.updateMany({
+                    where: { id: bodyRegistration.id, status: 'PENDING' },
+                    data: {
+                        status: 'REJECTED',
+                        rejectionReason: REGISTRATION_CLOSED,
+                        reviewedAt: now,
+                        ktpStoragePath: null,
+                        proofStoragePath: null,
+                    },
+                });
+                if (claimed.count === 0) {
+                    throw conflict('Your governing body registration was decided meanwhile. Try again.');
+                }
+
+                await recordAudit({
+                    subjectType: 'GoverningBodyRegistration',
+                    subjectId: bodyRegistration.id,
+                    action: 'CANCEL',
+                    actorUserId: userId,
+                    reason: REGISTRATION_CLOSED,
+                    client: tx,
+                });
+            }
+
+            seats = await endSeats(tx, { userId, now });
+        });
+
         // .invalid is a reserved TLD: the address can never receive mail, and
         // the id keeps it unique. The phone number goes with it (ticket 23):
         // nothing keeps a way to reach a person who asked to be deleted.
@@ -550,6 +598,7 @@ async function deleteAccount(userId, body) {
     // After the commit, as the admin's decision does it: a file that fails to go
     // is logged for a human, and cannot undo the deletion.
     if (registration) await discardKtp(registration.ktpStoragePath, registration.id);
+    if (bodyRegistration) await discardRegistrationFiles(bodyRegistration);
 
     log.info(`Account ${userId} deleted`);
 
@@ -565,6 +614,9 @@ async function deleteAccount(userId, body) {
         membership: ended.length === 1 ? ended[0] : null,
         memberships: ended,
         schoolRegistrationClosed: Boolean(registration),
+        // Governing-body ticket 04: each seat ended, and the body's registration closed.
+        governingBodies: seats,
+        governingBodyRegistrationClosed: Boolean(bodyRegistration),
     };
 }
 

@@ -145,12 +145,15 @@ const emailDispatchLimiter = build({
 // allows one PENDING or ACTIVE membership per user and
 // assertMembershipRetryAllowed() caps rejected retries. This only damps HTTP
 // spam, so only failed guesses count.
+//
+// The Governing Body Code's lookup and admin application share it (governing-body
+// ticket 04): guessing either code is the same act, so it draws on one budget.
 const joinSchoolLimiter = build({
     windowMs: 60 * 60 * 1000,
     limit: 10,
     keyGenerator: byUserThenIp,
     skipSuccessfulRequests: true,
-    message: 'Too many incorrect school codes. Try again later.',
+    message: 'Too many incorrect codes. Try again later.',
 });
 
 // School registration: a human reviews each one, so the ceiling is low.

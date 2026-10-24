@@ -10,8 +10,9 @@ import {
 } from '../../shared/approval.js';
 import { AppError, badRequest, conflict, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
+import { assertEligibleApplicant } from '../membership/membership.service.js';
 import { isStudentAnywhere } from '../membership/membership.eligibility.js';
-import { CODE_ATTEMPTS, randomCode } from '../school/school.service.js';
+import { freeCodeOf } from '../school/school.service.js';
 import { freeGoverningBodySubdomainOf } from '../school/school.subdomain.js';
 
 const log = createLogger('GoverningBody');
@@ -40,6 +41,17 @@ const log = createLogger('GoverningBody');
 //   sign-ins bound to it end, and its Schools keep running. Reversible.
 // - A Platform Admin corrects its name, kind and SK number. The subdomain does not
 //   follow a rename (K9).
+//
+// Its admins (governing-body ticket 04, owner 2026-10-18 and the plan of 2026-10-24),
+// beside the seats' lifecycle in governingBody.admins.js:
+// - The Governing Body Code locates the body and grants nothing. A signed-in, verified
+//   account that is no Student looks it up; an unknown or deactivated one is one 404.
+// - Any admin rotates it, audited: the old one stops at once, and the applications
+//   already waiting are untouched.
+// - Any admin changes its address and phone, audited with what they were. The name,
+//   the kind and the SK number stay the Platform Admin's.
+// - Account deletion closes a registration still under review, and both its files go
+//   (users.service.js, ADR-0007).
 //
 // Every table here is above tenancy (UNSCOPED_MODELS). ApprovalAudit is tenant-owned,
 // so every write that records one runs unscoped, as a School Registration's does.
@@ -72,6 +84,7 @@ const bodyView = (body) => ({
     name: body.name,
     skNumber: body.skNumber,
     address: addressOf(body),
+    phone: body.phone,
     code: body.code,
     subdomain: body.subdomain,
     deactivatedAt: body.deactivatedAt,
@@ -140,10 +153,10 @@ function typeOfKey(key) {
     return 'jpg';
 }
 
-// Both files go the moment a decision is made. By the time this runs the columns are
-// null and the decision committed, so a failure cannot undo it: it is logged loudly
-// with the key, for a human to remove the file by hand.
-async function discardFiles(registration) {
+// Both files go the moment a decision is made, an account's deletion included. By the
+// time this runs the columns are null and the decision committed, so a failure cannot
+// undo it: it is logged loudly with the key, for a human to remove the file by hand.
+async function discardRegistrationFiles(registration) {
     for (const key of [registration.ktpStoragePath, registration.proofStoragePath]) {
         if (!key) continue;
         try {
@@ -362,14 +375,11 @@ async function claimPending(tx, id, data) {
 }
 
 // Unique among bodies; a collision is rare and a retry is enough, as for School Codes.
-async function generateGoverningBodyCode() {
-    for (let attempt = 0; attempt < CODE_ATTEMPTS; attempt += 1) {
-        const code = randomCode();
-        const taken = await prisma.governingBody.findUnique({ where: { code }, select: { id: true } });
-        if (!taken) return code;
-    }
-    throw new Error(`Could not find a free governing body code in ${CODE_ATTEMPTS} attempts`);
-}
+const generateGoverningBodyCode = () =>
+    freeCodeOf(
+        async (code) => Boolean(await prisma.governingBody.findUnique({ where: { code }, select: { id: true } })),
+        'governing body code'
+    );
 
 // Approval creates the body. In one transaction: the decision, the body with its code
 // and K13 subdomain, the applicant's ACTIVE seat - nobody else could have approved the
@@ -451,7 +461,7 @@ async function approveRegistration(id, { adminId, adminUserId }) {
             return created;
         });
 
-        await discardFiles(registration);
+        await discardRegistrationFiles(registration);
         log.success(
             `Governing body founded: ${body.name} (${body.kind}), code ${body.code}, subdomain ${body.subdomain}`
         );
@@ -488,7 +498,7 @@ async function rejectRegistration(id, { adminId, adminUserId, reason }) {
             });
         });
 
-        await discardFiles(registration);
+        await discardRegistrationFiles(registration);
         log.info(`Governing body registration rejected: ${registration.name}`);
 
         return getRegistration(id);
@@ -640,6 +650,66 @@ async function reactivateGoverningBody(id, { adminUserId, reason }) {
 }
 
 // ---------------------------------------------------------------------------
+// The Governing Body Code
+// ---------------------------------------------------------------------------
+
+// The body a code locates. GoverningBody is above tenancy, so this reads without a
+// scope. An unknown code and a deactivated body's answer alike (K11): saying "this
+// body is switched off" would name it to somebody who is not in it.
+async function resolveGoverningBody(code) {
+    const body = await prisma.governingBody.findUnique({
+        where: { code },
+        select: { id: true, name: true, kind: true, deactivatedAt: true },
+    });
+    if (!body || body.deactivatedAt) throw notFound('No governing body uses that code');
+    return body;
+}
+
+// The public identity a code reveals, and nothing more: no admin, no School, no id. A
+// Principal applies through the School's own code instead (ticket 06, owner 2026-10-24).
+const publicBodyView = (body) => ({ name: body.name, kind: body.kind });
+
+// POST /api/governing-body-applications/lookup. A Student is refused here already:
+// they may ask for nothing this code leads to.
+async function lookupGoverningBody(userId, { code }) {
+    await assertEligibleApplicant(userId);
+    const body = await resolveGoverningBody(code);
+    if (await isStudentAnywhere(userId)) {
+        throw conflict('A student belongs to one school only, so cannot apply to a governing body');
+    }
+    return publicBodyView(body);
+}
+
+// Any admin replaces the code, as the Principal replaces a School Code (ticket 06 of
+// registration): the old one stops resolving at once, since resolveGoverningBody looks
+// it up by its unique value, and the applications already waiting name the body by id.
+async function rotateGoverningBodyCode(auth) {
+    const code = await generateGoverningBodyCode();
+
+    await runUnscoped('an admin replacing a governing body code', async () =>
+        await prisma.$transaction(async (tx) => {
+            const claimed = await tx.governingBody.updateMany({
+                where: { id: auth.governingBodyId, deactivatedAt: null },
+                data: { code },
+            });
+            if (claimed.count === 0) throw notFound('Governing body not found');
+
+            await recordAudit({
+                subjectType: BODY_SUBJECT,
+                subjectId: auth.governingBodyId,
+                action: 'REGENERATE_CODE',
+                actorUserId: auth.userId,
+                client: tx,
+            });
+        })
+    );
+
+    const body = await loadGoverningBody(auth.governingBodyId);
+    log.info(`Governing Body Code regenerated for ${body.name}`);
+    return bodyView(body);
+}
+
+// ---------------------------------------------------------------------------
 // The seat
 // ---------------------------------------------------------------------------
 
@@ -649,7 +719,51 @@ async function ownGoverningBody(auth) {
     return bodyView(await loadGoverningBody(auth.governingBodyId));
 }
 
+const PROFILE_FIELDS = ['street', 'village', 'district', 'city', 'province', 'postalCode', 'phone'];
+
+const shown = (value) => (value === null ? 'none' : `"${value}"`);
+
+// PATCH /api/governing-body: any admin changes the address and the phone (the spec's
+// defaults). The fields not sent stay; postalCode and phone clear to null. Audited
+// with what each changed field was, as the Platform Admin's correction is; a patch
+// that changes nothing writes nothing. The subdomain does not follow the city (K9).
+async function updateProfile(auth, patch) {
+    const body = await loadGoverningBody(auth.governingBodyId);
+    const changes = PROFILE_FIELDS.filter((key) => patch[key] !== undefined && patch[key] !== body[key]);
+    if (changes.length === 0) return bodyView(body);
+
+    const data = Object.fromEntries(changes.map((key) => [key, patch[key]]));
+    await runUnscoped('an admin changing a governing body address', async () =>
+        await prisma.$transaction(async (tx) => {
+            const claimed = await tx.governingBody.updateMany({
+                where: { id: body.id, updatedAt: body.updatedAt, deactivatedAt: null },
+                data,
+            });
+            if (claimed.count === 0) throw conflict('This governing body changed meanwhile');
+
+            await recordAudit({
+                subjectType: BODY_SUBJECT,
+                subjectId: body.id,
+                action: 'UPDATE_GOVERNING_BODY',
+                actorUserId: auth.userId,
+                reason: changes.map((key) => `${key} was ${shown(body[key])}`).join('; '),
+                client: tx,
+            });
+        })
+    );
+
+    log.info(`Governing body ${body.name}: ${changes.join(', ')} changed by an admin`);
+    return bodyView(await loadGoverningBody(body.id));
+}
+
 export {
+    BODY_SUBJECT,
+    discardRegistrationFiles,
+    resolveGoverningBody,
+    publicBodyView,
+    lookupGoverningBody,
+    rotateGoverningBodyCode,
+    updateProfile,
     submitRegistration,
     listMine,
     listRegistrations,
@@ -661,4 +775,5 @@ export {
     deactivateGoverningBody,
     reactivateGoverningBody,
     ownGoverningBody,
+    loadGoverningBody,
 };

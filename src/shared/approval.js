@@ -76,6 +76,23 @@ async function assertMembershipRetryAllowed({ userId, schoolId }) {
     }
 }
 
+// An admin application turned down three times at one Governing Body in a day waits
+// for tomorrow, as a join request does at a School (governing-body ticket 04). A
+// cancelled one, or a seat that ended, never counts.
+async function assertSeatRetryAllowed({ userId, governingBodyId }) {
+    const since = new Date(Date.now() - RETRY_WINDOW_MS);
+    const attempts = await prisma.governingBodyAdmin.count({
+        where: { userId, governingBodyId, status: 'REJECTED', updatedAt: { gte: since } },
+    });
+
+    if (attempts >= MAX_ATTEMPTS_PER_WINDOW) {
+        throw conflict(
+            'Too many rejected admin applications for this governing body recently. Try again tomorrow.',
+            { attempts, windowHours: RETRY_WINDOW_MS / 3_600_000 }
+        );
+    }
+}
+
 async function assertClassSubjectRetryAllowed({
     teacherMembershipId,
     classId,
@@ -178,6 +195,7 @@ export {
     assertDecidable,
     assertRejectionReason,
     assertMembershipRetryAllowed,
+    assertSeatRetryAllowed,
     assertClassSubjectRetryAllowed,
     assertSchoolRegistrationAllowed,
     assertGoverningBodyRegistrationAllowed,

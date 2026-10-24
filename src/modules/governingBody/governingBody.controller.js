@@ -1,8 +1,10 @@
 import { ok } from '../../shared/errors.js';
 import * as service from './governingBody.service.js';
+import * as admins from './governingBody.admins.js';
+import { changeGoverningBodySubdomain } from '../school/school.subdomain.js';
 
 // Thin by design, like school.controller.js: read what validation produced, call the
-// service, wrap the answer in the envelope (governing-body ticket 03).
+// service, wrap the answer in the envelope (governing-body tickets 03 and 04).
 
 // ---- applicant --------------------------------------------------------------
 
@@ -17,6 +19,26 @@ async function submit(req, res) {
 
 async function listMine(req, res) {
     return ok(res, { registrations: await service.listMine(req.auth.userId) });
+}
+
+// ---- applicant: the Governing Body Code (ticket 04) -------------------------
+
+async function lookup(req, res) {
+    return ok(res, { governingBody: await service.lookupGoverningBody(req.auth.userId, req.validated.body) });
+}
+
+async function applyAsAdmin(req, res) {
+    const seat = await admins.applyAsAdmin(req.auth.userId, req.validated.body);
+    return ok(res, { seat, message: 'Application sent. The senior admin will decide it.' }, 201);
+}
+
+async function listOwnSeats(req, res) {
+    return ok(res, { seats: await admins.listOwnSeats(req.auth.userId) });
+}
+
+async function cancelApplication(req, res) {
+    const seat = await admins.cancelApplication(req.auth.userId, req.validated.params.id);
+    return ok(res, { seat, message: 'Application cancelled.' });
 }
 
 // ---- platform admin: registrations -----------------------------------------
@@ -63,6 +85,15 @@ async function update(req, res) {
     return ok(res, { governingBody, message: 'Corrected.' });
 }
 
+async function changeSubdomain(req, res) {
+    const { params, body } = req.validated;
+    const governingBody = await changeGoverningBodySubdomain(req.auth.userId, params.id, body);
+    return ok(res, {
+        governingBody,
+        message: `${governingBody.name} is at "${governingBody.subdomain}" now. The old address no longer opens it.`,
+    });
+}
+
 async function deactivate(req, res) {
     const governingBody = await service.deactivateGoverningBody(req.validated.params.id, {
         ...reviewer(req),
@@ -88,4 +119,64 @@ async function own(req, res) {
     return ok(res, { governingBody: await service.ownGoverningBody(req.auth) });
 }
 
-export { submit, listMine, list, get, ktp, proof, approve, reject, update, deactivate, reactivate, own };
+async function updateProfile(req, res) {
+    const governingBody = await service.updateProfile(req.auth, req.validated.body);
+    return ok(res, { governingBody, message: 'Saved.' });
+}
+
+async function rotateCode(req, res) {
+    const governingBody = await service.rotateGoverningBodyCode(req.auth);
+    return ok(res, { governingBody, message: 'A new Governing Body Code. The old one no longer works.' });
+}
+
+// The admins, the senior first, and the applications waiting: shaped by the service.
+async function listAdmins(req, res) {
+    return ok(res, await admins.listAdmins(req.auth));
+}
+
+async function approveApplication(req, res) {
+    const application = await admins.approveApplication(req.auth, req.validated.params.id);
+    return ok(res, { application, message: 'Approved. They are an admin now.' });
+}
+
+async function rejectApplication(req, res) {
+    const application = await admins.rejectApplication(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, { application, message: 'Rejected.' });
+}
+
+async function removeAdmin(req, res) {
+    const seat = await admins.removeAdmin(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, { seat, message: 'Removed. They no longer reach the governing body.' });
+}
+
+async function leave(req, res) {
+    const seat = await admins.leaveGoverningBody(req.auth);
+    return ok(res, { seat, message: 'You have left the governing body.' });
+}
+
+export {
+    submit,
+    listMine,
+    lookup,
+    applyAsAdmin,
+    listOwnSeats,
+    cancelApplication,
+    list,
+    get,
+    ktp,
+    proof,
+    approve,
+    reject,
+    update,
+    changeSubdomain,
+    deactivate,
+    reactivate,
+    own,
+    updateProfile,
+    rotateCode,
+    listAdmins,
+    approveApplication,
+    rejectApplication,
+    removeAdmin,
+    leave,
+};

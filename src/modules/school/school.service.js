@@ -36,22 +36,25 @@ const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const CODE_LENGTH = 8;
 const CODE_ATTEMPTS = 5;
 
-// One code of that shape. A Governing Body Code is one too (governing-body ticket 03).
 const randomCode = () =>
     Array.from({ length: CODE_LENGTH }, () => CODE_ALPHABET[crypto.randomInt(CODE_ALPHABET.length)]).join('');
 
-async function generateSchoolCode() {
+// A code of that shape nobody holds yet, isTaken saying who would. The one generator of
+// the School Code and the Governing Body Code (governing-body ticket 04), each unique in
+// its own table: a code locates one thing, never which kind.
+async function freeCodeOf(isTaken, what) {
     for (let attempt = 0; attempt < CODE_ATTEMPTS; attempt += 1) {
         const code = randomCode();
-
-        const taken = await prisma.school.findUnique({
-            where: { schoolCode: code },
-            select: { id: true },
-        });
-        if (!taken) return code;
+        if (!(await isTaken(code))) return code;
     }
-    throw new Error(`Could not find a free school code in ${CODE_ATTEMPTS} attempts`);
+    throw new Error(`Could not find a free ${what} in ${CODE_ATTEMPTS} attempts`);
 }
+
+const generateSchoolCode = () =>
+    freeCodeOf(
+        async (code) => Boolean(await prisma.school.findUnique({ where: { schoolCode: code }, select: { id: true } })),
+        'school code'
+    );
 
 // ---------------------------------------------------------------------------
 // Views - what each side is allowed to see of a registration
@@ -841,8 +844,7 @@ async function appointPrincipal(id, { adminUserId, email, reason }) {
 export {
     CODE_ALPHABET,
     CODE_LENGTH,
-    CODE_ATTEMPTS,
-    randomCode,
+    freeCodeOf,
     discardKtp,
     submitRegistration,
     listMine,

@@ -2591,6 +2591,7 @@ async function bulkApprove(auth, { ids, classId, roles }) {
 export {
     CHILD_NO_MATCH,
     normalizeName,
+    assertEligibleApplicant,
     lookupSchool,
     requestJoin,
     addRoles,

@@ -19,7 +19,8 @@ const log = createLogger('School');
 //   rename. Every School has one: the column is required, and the Schools from before
 //   the ticket got theirs from prisma/backfill-school-subdomains.js.
 // - Only a Platform Admin changes it, keyed by the School, audited UPDATE_SUBDOMAIN
-//   with what it was. The old one stops resolving at once.
+//   with what it was. The old one stops resolving at once. A Governing Body's too,
+//   by the same rules (ticket 04, owner 2026-10-24).
 // - A subdomain that is unknown, or a deactivated School's, answers as unknown - the
 //   same 404 - to the public read and to a sign-in that names it.
 // - A subdomain is public (it is in the address bar), so reading one grants nothing
@@ -105,50 +106,89 @@ async function resolvePlace(subdomain) {
     return placeView(await loadPlaceBySubdomain(subdomain));
 }
 
-// A Platform Admin giving a School another subdomain. Its shape is the schema's to
-// check; a reserved word is refused here (400), one another School holds by the
-// claim's unique index (409). Setting the one it has is not a change, and refused.
-async function changeSubdomain(adminUserId, schoolId, { subdomain }) {
+// What differs between relabelling a School and a Governing Body: the table, the audit
+// row's subject - a School's row carries its schoolId, a body's none - and the words.
+const RELABELLED = {
+    SCHOOL: {
+        model: 'school',
+        subjectType: SCHOOL_SUBJECT,
+        tenantOf: (row) => row.id,
+        missing: 'School not found',
+        meanwhile: 'This school’s subdomain changed meanwhile',
+        raced: 'another school',
+        why: 'a platform admin changing a school subdomain',
+    },
+    GOVERNING_BODY: {
+        model: 'governingBody',
+        subjectType: 'GoverningBody',
+        tenantOf: () => null,
+        missing: 'Governing body not found',
+        meanwhile: 'This governing body’s subdomain changed meanwhile',
+        raced: 'another governing body',
+        why: 'a platform admin changing a governing body subdomain',
+    },
+};
+
+// A Platform Admin giving a Place another subdomain: a School (ticket 02), or a
+// Governing Body (ticket 04, owner 2026-10-24 - a name that did not start with its
+// kind's word gave a long one, as "[Uji] Yayasan Coba" gave yayasanujiyayasancoba).
+// Its shape is the schema's to check; a reserved word is refused here (400), one
+// another School or body holds with 409. Setting the one it has is not a change, and
+// refused. Audited UPDATE_SUBDOMAIN with what it was; the old one stops resolving at once.
+async function relabel(kind, adminUserId, id, subdomain) {
+    const place = RELABELLED[kind];
     if (isReservedSubdomain(subdomain)) throw badRequest(`"${subdomain}" is reserved for the platform`);
 
-    return runUnscoped('a platform admin changing a school subdomain', async () => {
-        const school = await prisma.school.findUnique({
-            where: { id: schoolId },
+    return runUnscoped(place.why, async () => {
+        const row = await prisma[place.model].findUnique({
+            where: { id },
             select: { id: true, name: true, subdomain: true },
         });
-        if (!school) throw notFound('School not found');
-        if (school.subdomain === subdomain) throw conflict(`${school.name} already uses "${subdomain}"`);
-        // A Governing Body's is in the same space, and no index spans the two tables.
+        if (!row) throw notFound(place.missing);
+        if (row.subdomain === subdomain) throw conflict(`${row.name} already uses "${subdomain}"`);
+        // Schools and bodies share one space, and no index spans the two tables.
         if ((await heldOf(prisma, [subdomain])).has(subdomain)) {
             throw conflict(`"${subdomain}" is taken by another school or governing body`);
         }
 
         try {
             await prisma.$transaction(async (tx) => {
-                const claimed = await tx.school.updateMany({
-                    where: { id: school.id, subdomain: school.subdomain },
+                const claimed = await tx[place.model].updateMany({
+                    where: { id: row.id, subdomain: row.subdomain },
                     data: { subdomain },
                 });
-                if (claimed.count === 0) throw conflict('This school’s subdomain changed meanwhile');
+                if (claimed.count === 0) throw conflict(place.meanwhile);
 
                 await recordAudit({
-                    schoolId: school.id,
-                    subjectType: SCHOOL_SUBJECT,
-                    subjectId: school.id,
+                    schoolId: place.tenantOf(row),
+                    subjectType: place.subjectType,
+                    subjectId: row.id,
                     action: 'UPDATE_SUBDOMAIN',
                     actorUserId: adminUserId,
-                    reason: `Was "${school.subdomain}"`,
+                    reason: `Was "${row.subdomain}"`,
                     client: tx,
                 });
             });
         } catch (error) {
-            if (error?.code === 'P2002') throw conflict(`"${subdomain}" is taken by another school`);
+            if (error?.code === 'P2002') throw conflict(`"${subdomain}" is taken by ${place.raced}`);
             throw error;
         }
 
-        log.info(`Subdomain of ${school.name} changed to ${subdomain}`);
-        return { id: school.id, name: school.name, subdomain };
+        log.info(`Subdomain of ${row.name} changed to ${subdomain}`);
+        return { id: row.id, name: row.name, subdomain };
     });
 }
 
-export { freeSubdomainOf, freeGoverningBodySubdomainOf, loadPlaceBySubdomain, resolvePlace, changeSubdomain };
+const changeSubdomain = (adminUserId, schoolId, { subdomain }) => relabel('SCHOOL', adminUserId, schoolId, subdomain);
+
+const changeGoverningBodySubdomain = (adminUserId, governingBodyId, { subdomain }) =>
+    relabel('GOVERNING_BODY', adminUserId, governingBodyId, subdomain);
+
+export {
+    freeSubdomainOf,
+    freeGoverningBodySubdomainOf,
+    loadPlaceBySubdomain,
+    resolvePlace,
+    changeSubdomain,
+    changeGoverningBodySubdomain,
+};

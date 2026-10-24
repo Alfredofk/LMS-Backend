@@ -393,8 +393,13 @@ model GoverningBody {
     city       String
     province   String
     postalCode String?
+    /// The body's own number, set by its admins with the address (governing-body ticket 04).
+    /// The founding applicant's stays on the registration.
+    phone      String?
     /// The Governing Body Code: the School Code's 8 characters and alphabet. Locates the
-    /// body; grants nothing (tickets 04 and 06 take applications through it).
+    /// body; grants nothing (ticket 04 takes admin applications through it; a Principal
+    /// applies through the School's own code, ticket 06). Any admin rotates it; the old one
+    /// stops at once.
     code       String            @unique
     /// Its label under the base domain (K13), unique across Schools and bodies.
     subdomain  String            @unique
@@ -420,6 +425,9 @@ model GoverningBody {
 /// at approval (ticket 03); others ask through the code (ticket 04). The senior admin is
 /// the live one approved earliest (K6), so approvedAt is kept. One PENDING-or-ACTIVE seat
 /// per person per body, by a partial index in partial-indexes.sql.
+///
+/// Its statuses are a membership's: PENDING, then ACTIVE or REJECTED, or CANCELLED by the
+/// applicant; an ACTIVE seat ends LEFT, by leaving or by the senior's removal.
 model GoverningBodyAdmin {
     id              String           @id @default(cuid())
     governingBodyId String
@@ -427,6 +435,11 @@ model GoverningBodyAdmin {
     status          MembershipStatus @default(PENDING)
     approvedAt      DateTime?
     endedAt         DateTime?
+    /// Why the senior turned the application down, shown to the applicant (ticket 04).
+    rejectionReason String?
+    /// Why a LEFT seat ended: the senior's reason for a removal, or an account's deletion.
+    /// Null for a plain leave, as SchoolMembership.endReason is.
+    endReason       String?
     createdAt       DateTime         @default(now())
     updatedAt       DateTime         @updatedAt
 
