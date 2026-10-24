@@ -180,7 +180,7 @@ const createSchoolsBody = z
         });
     });
 
-// A fix of one of its Schools while it has no Principal (K10): the name, the NPSN, the
+// A fix of one of its Schools while it has never had a Principal (K10): the name, the NPSN, the
 // type and an SMK's duration, each by the registration's rule. Whether the type and the
 // duration then agree is the service's to check, against what the School holds.
 const schoolPatchBody = z

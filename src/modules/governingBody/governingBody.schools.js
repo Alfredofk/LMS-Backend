@@ -22,18 +22,26 @@ const log = createLogger('GoverningBody');
 //   submission's one transaction, and is audited CREATE.
 // - The admins read the School Code: since K8's change the body hands it to the person
 //   it wants as Principal (ticket 06).
-// - Any admin fixes a School's name, NPSN, type and an SMK's duration while it has no
-//   ACTIVE Principal; with one, 409. The subdomain does not follow. Audited
-//   UPDATE_SCHOOL with what it was.
+// - Any admin fixes a School's name, NPSN, type and an SMK's duration while it has
+//   never had a Principal; with one now or before, 409 (owner, 2026-10-25: ticket 08
+//   ends a Principal's role, and a School left so keeps its Classes and grades, which a
+//   change of type would strand). The subdomain does not follow. Audited UPDATE_SCHOOL
+//   with what it was.
 // - A School of another body answers 404, as a missing one does. Whether a School has
 //   a Principal is read in its own scope, one School at a time (the spec's invariant 1).
 
 const SCHOOL_SUBJECT = 'School';
 const MISSING = 'School not found';
-const HAS_PRINCIPAL = 'This school has a Principal, so its name, NPSN and type are theirs to keep now';
+const HAD_PRINCIPAL = 'This school has had a Principal, so its governing body can no longer fix its name, NPSN or type';
 
-// The role that makes a School's data its Principal's: ACTIVE, on an ACTIVE membership.
+// A Principal sitting now: the role ACTIVE, on an ACTIVE membership.
 const ACTIVE_PRINCIPAL = { role: 'PRINCIPAL', status: 'ACTIVE', membership: { status: 'ACTIVE' } };
+
+// A Principal now or before, whatever became of them: ENDED by a handover (ADR-0008) or
+// by the Governing Body (ticket 08), or ACTIVE on a membership that has ended, which
+// keeps its roles as history (ApprovalStatus in schema.prisma). An application still
+// waiting, refused or taken back never held the office.
+const EVER_PRINCIPAL = { role: 'PRINCIPAL', status: { in: ['ACTIVE', 'ENDED'] } };
 
 const ownSchoolSelect = {
     id: true,
@@ -72,11 +80,15 @@ const ownSchoolView = (school, hasPrincipal) => ({
 // "Row 2" or "Rows 2, 4": counted from 1, for the person who filled the form.
 const rowsLabel = (rows) => (rows.length === 1 ? `Row ${rows[0]}` : `Rows ${rows.join(', ')}`);
 
-const principalOf = (client) => client.membershipRole.findFirst({ where: ACTIVE_PRINCIPAL, select: { id: true } });
+const principalOf = (client, where) => client.membershipRole.findFirst({ where, select: { id: true } });
 
-// Whether a School has a Principal, read in its own scope.
+// Whether a School has a Principal now, read in its own scope.
 const hasPrincipalAt = (school) =>
-    runInSchool(school.id, school.name, async () => Boolean(await principalOf(prisma)));
+    runInSchool(school.id, school.name, async () => Boolean(await principalOf(prisma, ACTIVE_PRINCIPAL)));
+
+// Whether a School has ever had one, read in its own scope.
+const hasHadPrincipalAt = (school) =>
+    runInSchool(school.id, school.name, async () => Boolean(await principalOf(prisma, EVER_PRINCIPAL)));
 
 // One of the body's own Schools. Another body's, or none, is the same 404.
 async function loadOwnSchool(auth, id) {
@@ -195,11 +207,12 @@ function durationAfter(school, patch) {
 }
 
 // PATCH /api/governing-body/schools/:id, for any admin of the body, while the School has
-// no ACTIVE Principal (409 once it has). An NPSN taken gets the vague answer; nothing
-// changing writes nothing. The subdomain stays (K9). Audited UPDATE_SCHOOL.
+// never had a Principal (409 once it has, even after they are gone). An NPSN taken gets
+// the vague answer; nothing changing writes nothing. The subdomain stays (K9). Audited
+// UPDATE_SCHOOL.
 async function fixSchool(auth, id, patch) {
     const school = await loadOwnSchool(auth, id);
-    if (await hasPrincipalAt(school)) throw conflict(HAS_PRINCIPAL);
+    if (await hasHadPrincipalAt(school)) throw conflict(HAD_PRINCIPAL);
 
     const next = {
         name: patch.schoolName ?? school.name,
@@ -225,7 +238,7 @@ async function fixSchool(auth, id, patch) {
                     data: next,
                 });
                 if (claimed.count === 0) throw conflict('This school changed meanwhile');
-                if (await principalOf(tx)) throw conflict(HAS_PRINCIPAL);
+                if (await principalOf(tx, EVER_PRINCIPAL)) throw conflict(HAD_PRINCIPAL);
 
                 await recordAudit({
                     schoolId: school.id,

@@ -46,7 +46,8 @@ import { subdomainBody } from '../school/school.schema.js';
 // admins, rotates the code, changes the address and phone, and leaves unless the last;
 // the service lets only the senior admin approve, reject and remove (403 for the rest).
 // Since ticket 05 every admin also creates, reads and fixes the body's Schools; the
-// service answers another body's School with 404 and a fix after its Principal with 409.
+// service answers another body's School with 404, and a fix of one that has ever had a
+// Principal with 409.
 
 // The KTP: JPG or PNG, at most 2 MB, as a School Registration's. The proof of office -
 // the akta page or the surat tugas - PDF, JPG or PNG, at most 5 MB (owner, 2026-10-22).
