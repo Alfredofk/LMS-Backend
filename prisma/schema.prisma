@@ -166,8 +166,9 @@ enum ApprovalAction {
     /// A Platform Admin changing a School's subdomain (governing-body ticket 02). The old
     /// one stops resolving at once.
     UPDATE_SUBDOMAIN
-    /// A Platform Admin correcting a Governing Body's name, kind or SK number
-    /// (governing-body ticket 03).
+    /// A Platform Admin correcting a Governing Body's name, kind, NPYP or SK number
+    /// (governing-body tickets 03 and 04b), or its admins changing its address and phone
+    /// (ticket 04).
     UPDATE_GOVERNING_BODY
 }
 
@@ -345,8 +346,13 @@ model GoverningBodyRegistration {
     applicantUserId String
     kind            GoverningBodyKind
     name            String
+    /// The NPYP (Nomor Pokok Yayasan Pendidikan), Dapodik's number for an education yayasan:
+    /// six letters and digits, in capitals. Required of a FOUNDATION or an ASSOCIATION; a
+    /// GOVERNMENT has none (governing-body ticket 04b, owner 2026-10-24).
+    npyp            String?
     /// The Kemenkumham SK (pengesahan badan hukum), normalised: trimmed, uppercase,
-    /// spaces collapsed. A FOUNDATION's or an ASSOCIATION's; a GOVERNMENT has none.
+    /// spaces collapsed. Optional for a FOUNDATION or an ASSOCIATION since ticket 04b,
+    /// since downloading the SK costs money; a GOVERNMENT has none.
     skNumber        String?
     /// The full address (K5). Every part required but the postal code (owner, 2026-10-22).
     street          String
@@ -376,6 +382,7 @@ model GoverningBodyRegistration {
 
     @@index([status])
     @@index([applicantUserId])
+    @@index([npyp])
     @@index([skNumber])
 }
 
@@ -385,7 +392,12 @@ model GoverningBody {
     id         String            @id @default(cuid())
     kind       GoverningBodyKind
     name       String
-    /// Unique on the platform, as an NPSN is (K5). Null for a GOVERNMENT body.
+    /// Unique on the platform, as an NPSN is (K5). A FOUNDATION's or an ASSOCIATION's, and
+    /// required for them; null for a GOVERNMENT body, and for a body from before
+    /// governing-body ticket 04b, until a Platform Admin adds it.
+    npyp       String?           @unique
+    /// Unique on the platform, as an NPSN is (K5). Optional since ticket 04b; null for a
+    /// GOVERNMENT body.
     skNumber   String?           @unique
     street     String
     village    String

@@ -26,8 +26,8 @@ const log = createLogger('GoverningBody');
 // - A registration gives the name, the kind, the full address (every part but the
 //   postal code required), the applicant's phone, their KTP and a proof of office: the
 //   akta page listing the pengurus, or the Kepala Dinas's surat tugas. A FOUNDATION or
-//   an ASSOCIATION gives its Kemenkumham SK number, unique on the platform; a GOVERNMENT
-//   body has none.
+//   an ASSOCIATION gives its Kemenkumham SK number, unique on the platform (optional
+//   since ticket 04b, below); a GOVERNMENT body has none.
 // - The KTP is a JPG or PNG of at most 2 MB, the proof a PDF, JPG or PNG of at most
 //   5 MB. Both are discarded the moment a decision is made (UU PDP 27/2022); the
 //   numbers stay.
@@ -42,6 +42,14 @@ const log = createLogger('GoverningBody');
 // - A Platform Admin corrects its name, kind and SK number. The subdomain does not
 //   follow a rename (K9).
 //
+// The NPYP (governing-body ticket 04b, owner 2026-10-24, from the supervisor's sheet):
+// - A FOUNDATION or an ASSOCIATION gives its NPYP, Dapodik's number for an education
+//   yayasan, unique on the platform. Its SK number becomes optional: downloading the SK
+//   costs money. A GOVERNMENT body gives neither.
+// - A body from before the ticket has no NPYP and keeps working; a Platform Admin's
+//   correction adds it. Once there it is never cleared, and a GOVERNMENT body turned
+//   into a FOUNDATION or an ASSOCIATION brings one in the same correction.
+//
 // Its admins (governing-body ticket 04, owner 2026-10-18 and the plan of 2026-10-24),
 // beside the seats' lifecycle in governingBody.admins.js:
 // - The Governing Body Code locates the body and grants nothing. A signed-in, verified
@@ -49,7 +57,7 @@ const log = createLogger('GoverningBody');
 // - Any admin rotates it, audited: the old one stops at once, and the applications
 //   already waiting are untouched.
 // - Any admin changes its address and phone, audited with what they were. The name,
-//   the kind and the SK number stay the Platform Admin's.
+//   the kind, the NPYP and the SK number stay the Platform Admin's.
 // - Account deletion closes a registration still under review, and both its files go
 //   (users.service.js, ADR-0007).
 //
@@ -63,6 +71,7 @@ const PROOF_FOLDER = 'governing-body-proof';
 
 // One answer whether a body holds the number or a registration waits on it, and never
 // which body: the same answer the NPSN check gives (ticket 04 of registration).
+const NPYP_TAKEN = 'This NPYP is already registered or under review';
 const SK_TAKEN = 'This SK number is already registered or under review';
 
 // ---------------------------------------------------------------------------
@@ -82,6 +91,7 @@ const bodyView = (body) => ({
     id: body.id,
     kind: body.kind,
     name: body.name,
+    npyp: body.npyp,
     skNumber: body.skNumber,
     address: addressOf(body),
     phone: body.phone,
@@ -97,6 +107,7 @@ const adminView = (registration) => ({
     id: registration.id,
     kind: registration.kind,
     name: registration.name,
+    npyp: registration.npyp,
     skNumber: registration.skNumber,
     address: addressOf(registration),
     applicantPhone: registration.applicantPhone,
@@ -122,6 +133,7 @@ const applicantView = (registration) => ({
     id: registration.id,
     kind: registration.kind,
     name: registration.name,
+    npyp: registration.npyp,
     skNumber: registration.skNumber,
     address: addressOf(registration),
     applicantPhone: registration.applicantPhone,
@@ -175,15 +187,18 @@ async function discardRegistrationFiles(registration) {
 // Applicant
 // ---------------------------------------------------------------------------
 
-// A number some body holds, or a registration still waits on - the applicant's own
-// waiting one aside, for a correction.
-async function isSkNumberTaken(skNumber, { exceptBodyId = null } = {}) {
+// A number - `field` is 'npyp' or 'skNumber' - some body holds, or a registration still
+// waits on. A correction leaves the body's own aside.
+async function isNumberTaken(field, value, { exceptBodyId = null } = {}) {
     const [body, waiting] = await Promise.all([
         prisma.governingBody.findFirst({
-            where: { skNumber, ...(exceptBodyId ? { id: { not: exceptBodyId } } : {}) },
+            where: { [field]: value, ...(exceptBodyId ? { id: { not: exceptBodyId } } : {}) },
             select: { id: true },
         }),
-        prisma.governingBodyRegistration.findFirst({ where: { skNumber, status: 'PENDING' }, select: { id: true } }),
+        prisma.governingBodyRegistration.findFirst({
+            where: { [field]: value, status: 'PENDING' },
+            select: { id: true },
+        }),
     ]);
     return Boolean(body || waiting);
 }
@@ -211,7 +226,8 @@ async function submitRegistration(userId, body, files) {
     if (await isStudentAnywhere(userId)) {
         throw conflict('A student belongs to one school only, so cannot register a governing body');
     }
-    if (body.skNumber && (await isSkNumberTaken(body.skNumber))) throw conflict(SK_TAKEN);
+    if (body.npyp && (await isNumberTaken('npyp', body.npyp))) throw conflict(NPYP_TAKEN);
+    if (body.skNumber && (await isNumberTaken('skNumber', body.skNumber))) throw conflict(SK_TAKEN);
 
     const storage = getStorage();
     const ktpKey = await storage.save(files.ktp.buffer, {
@@ -233,6 +249,7 @@ async function submitRegistration(userId, body, files) {
                         applicantUserId: userId,
                         kind: body.kind,
                         name: body.name,
+                        npyp: body.npyp ?? null,
                         skNumber: body.skNumber ?? null,
                         street: body.street,
                         village: body.village,
@@ -286,7 +303,9 @@ async function listMine(userId) {
 // ---------------------------------------------------------------------------
 
 // The filters, as one where clause - the School queue's, with the kind for the type and
-// the SK number for the NPSN. `contains` is a sequential scan by design, at this scale.
+// the NPYP and the SK number for the NPSN. `contains` is a sequential scan by design, at
+// this scale. The NPYP is matched on the body too, so one a Platform Admin added to a
+// body from before ticket 04b, or corrected, is found by what it is now.
 function buildRegistrationWhere({ status, q, kind, deactivated, submittedFrom, submittedTo }) {
     const where = {};
 
@@ -296,6 +315,8 @@ function buildRegistrationWhere({ status, q, kind, deactivated, submittedFrom, s
     if (q) {
         where.OR = [
             { name: { contains: q, mode: 'insensitive' } },
+            { npyp: { contains: q, mode: 'insensitive' } },
+            { createdGoverningBody: { npyp: { contains: q, mode: 'insensitive' } } },
             { skNumber: { contains: q, mode: 'insensitive' } },
             { city: { contains: q, mode: 'insensitive' } },
             { applicant: { fullName: { contains: q, mode: 'insensitive' } } },
@@ -400,6 +421,13 @@ async function approveRegistration(id, { adminId, adminUserId }) {
                     'one school only'
             );
         }
+        if (registration.npyp) {
+            const held = await prisma.governingBody.findFirst({
+                where: { npyp: registration.npyp },
+                select: { id: true },
+            });
+            if (held) throw conflict('This NPYP is already registered');
+        }
         if (registration.skNumber) {
             const held = await prisma.governingBody.findFirst({
                 where: { skNumber: registration.skNumber },
@@ -424,6 +452,7 @@ async function approveRegistration(id, { adminId, adminUserId }) {
                 data: {
                     kind: registration.kind,
                     name: registration.name,
+                    npyp: registration.npyp,
                     skNumber: registration.skNumber,
                     street: registration.street,
                     village: registration.village,
@@ -515,26 +544,35 @@ async function loadGoverningBody(id) {
     return body;
 }
 
-// Correcting the name, the kind or the SK number (the spec's defaults: they are the
-// Platform Admin's). The kind and the number must still agree: a GOVERNMENT body has
-// no SK number, the others one. The subdomain stays (K9). Audited with what it was.
+// Correcting the name, the kind, the NPYP or the SK number (the spec's defaults: they
+// are the Platform Admin's). The kind and the numbers must still agree: a GOVERNMENT body
+// has neither, a FOUNDATION or an ASSOCIATION an NPYP and the SK number if it has one
+// (ticket 04b). A body from before 04b with no NPYP keeps working, so an NPYP is required
+// only of a body that held one or was a GOVERNMENT one. The subdomain stays (K9).
+// Audited with what it was.
 async function updateGoverningBody(adminUserId, id, patch) {
     return runUnscoped('a platform admin correcting a governing body', async () => {
         const body = await loadGoverningBody(id);
         const next = {
             name: patch.name ?? body.name,
             kind: patch.kind ?? body.kind,
+            npyp: patch.npyp === undefined ? body.npyp : patch.npyp,
             skNumber: patch.skNumber === undefined ? body.skNumber : patch.skNumber,
         };
 
-        if (next.kind !== 'GOVERNMENT' && !next.skNumber) {
-            throw badRequest('A foundation or an association has a Kemenkumham SK number');
-        }
+        if (next.kind === 'GOVERNMENT' && next.npyp) throw badRequest('A government body has no NPYP');
         if (next.kind === 'GOVERNMENT' && next.skNumber) {
             throw badRequest('A government body has no Kemenkumham SK number');
         }
+        if (next.kind !== 'GOVERNMENT' && !next.npyp && (body.npyp || body.kind === 'GOVERNMENT')) {
+            throw badRequest('A foundation or an association has an NPYP');
+        }
+        const changedNpyp = next.npyp && next.npyp !== body.npyp;
+        if (changedNpyp && (await isNumberTaken('npyp', next.npyp, { exceptBodyId: id }))) {
+            throw conflict(NPYP_TAKEN);
+        }
         const changedSk = next.skNumber && next.skNumber !== body.skNumber;
-        if (changedSk && (await isSkNumberTaken(next.skNumber, { exceptBodyId: id }))) {
+        if (changedSk && (await isNumberTaken('skNumber', next.skNumber, { exceptBodyId: id }))) {
             throw conflict(SK_TAKEN);
         }
 
@@ -551,12 +589,18 @@ async function updateGoverningBody(adminUserId, id, patch) {
                     subjectId: id,
                     action: 'UPDATE_GOVERNING_BODY',
                     actorUserId: adminUserId,
-                    reason: `Was "${body.name}", ${body.kind}, SK ${body.skNumber ?? 'none'}`,
+                    reason:
+                        `Was "${body.name}", ${body.kind}, NPYP ${body.npyp ?? 'none'}, ` +
+                        `SK ${body.skNumber ?? 'none'}`,
                     client: tx,
                 });
             });
         } catch (error) {
-            if (error?.code === 'P2002') throw conflict(SK_TAKEN);
+            // A body taking the same number between the check and the write: the unique
+            // index names which one.
+            if (error?.code === 'P2002') {
+                throw conflict(String(error.meta?.target ?? '').includes('npyp') ? NPYP_TAKEN : SK_TAKEN);
+            }
             throw error;
         }
 

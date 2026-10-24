@@ -23,6 +23,15 @@ const skNumber = z
     .max(100, 'The SK number is too long')
     .transform((value) => value.replace(/\s+/g, ' ').toUpperCase());
 
+// The NPYP, the Nomor Pokok Yayasan Pendidikan: Dapodik's number for an education yayasan,
+// six letters and digits (governing-body ticket 04b, owner 2026-10-24). Compared trimmed
+// and in capitals; a space inside it is refused rather than dropped.
+const npyp = z
+    .string()
+    .trim()
+    .toUpperCase()
+    .regex(/^[A-Z0-9]{6}$/, 'An NPYP is six letters and digits');
+
 // The full address (K5): every part required but the postal code (owner, 2026-10-22).
 const address = {
     street: text('The street', 200),
@@ -36,15 +45,21 @@ const address = {
     ),
 };
 
-// A FOUNDATION or an ASSOCIATION is a legal entity, so it has an SK number; a
-// GOVERNMENT body is the state itself and has none, which is refused rather than kept.
-function checkSkNumber(value, ctx) {
-    const needsOne = value.kind !== 'GOVERNMENT';
-    if (needsOne && !value.skNumber) {
-        const message = 'A foundation or an association gives its Kemenkumham SK number';
-        ctx.addIssue({ code: 'custom', path: ['skNumber'], message });
+// A FOUNDATION or an ASSOCIATION is an education yayasan in Dapodik, so it has an NPYP; its
+// Kemenkumham SK number is optional, since downloading the SK costs money (ticket 04b,
+// owner 2026-10-24). A GOVERNMENT body is the state itself and has neither, which is
+// refused rather than kept.
+function checkNumbers(value, ctx) {
+    if (value.kind !== 'GOVERNMENT') {
+        if (!value.npyp) {
+            ctx.addIssue({ code: 'custom', path: ['npyp'], message: 'A foundation or an association gives its NPYP' });
+        }
+        return;
     }
-    if (!needsOne && value.skNumber) {
+    if (value.npyp) {
+        ctx.addIssue({ code: 'custom', path: ['npyp'], message: 'A government body has no NPYP' });
+    }
+    if (value.skNumber) {
         ctx.addIssue({ code: 'custom', path: ['skNumber'], message: 'A government body has no Kemenkumham SK number' });
     }
 }
@@ -53,11 +68,12 @@ const registrationBody = z
     .strictObject({
         kind: z.enum(KINDS),
         name: text('The name', 150),
+        npyp: z.preprocess(blankToUndefined, npyp.optional()),
         skNumber: z.preprocess(blankToUndefined, skNumber.optional()),
         ...address,
         applicantPhone: phone,
     })
-    .superRefine(checkSkNumber);
+    .superRefine(checkNumbers);
 
 const idParams = z.object({ id: z.string().min(1) });
 
@@ -84,8 +100,8 @@ const removeBody = z.strictObject({
 });
 
 // An admin's change of the body's address and phone (the spec's defaults). The name,
-// the kind and the SK number are the Platform Admin's, so a key for them is refused
-// rather than ignored. The postal code and the phone clear to null.
+// the kind, the NPYP and the SK number are the Platform Admin's, so a key for them is
+// refused rather than ignored. The postal code and the phone clear to null.
 const profileBody = z
     .strictObject({
         street: address.street.optional(),
@@ -104,8 +120,8 @@ const profileBody = z
 const listQuery = z
     .object({
         status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'ALL']).default('PENDING'),
-        // One needle over the name, the SK number, the city, and the applicant's name
-        // and email.
+        // One needle over the name, the NPYP (the registration's or its body's), the SK
+        // number, the city, and the applicant's name and email.
         q: z.string().trim().min(1).max(100).optional(),
         kind: z.enum(KINDS).optional(),
         // Only an approved registration has a body, so this implies APPROVED.
@@ -133,15 +149,18 @@ const decisionBody = z
     })
     .default({});
 
-// A Platform Admin's correction of a body's name, kind or SK number. Whether the kind
-// and the SK number then agree is the service's to check, against what the body holds.
+// A Platform Admin's correction of a body's name, kind, NPYP or SK number. Whether the
+// kind and the numbers then agree is the service's to check, against what the body holds.
 const editBody = z
     .strictObject({
         name: text('The name', 150).optional(),
         kind: z.enum(KINDS).optional(),
+        npyp: npyp.nullable().optional(),
         skNumber: skNumber.nullable().optional(),
     })
-    .refine((patch) => Object.keys(patch).length > 0, { message: 'Change at least one of name, kind or skNumber' });
+    .refine((patch) => Object.keys(patch).length > 0, {
+        message: 'Change at least one of name, kind, npyp or skNumber',
+    });
 
 export {
     KINDS,
