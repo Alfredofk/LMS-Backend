@@ -9,6 +9,7 @@ import * as controller from './governingBody.controller.js';
 import {
     registrationBody,
     idParams,
+    seatParams,
     codeBody,
     removeBody,
     profileBody,
@@ -34,7 +35,8 @@ import { subdomainBody } from '../school/school.schema.js';
 //
 // The Platform Admin's, mounted at /api/admin/governing-body-registrations (the queue
 // and its decisions) and /api/admin/governing-bodies (a body: its correction, its
-// deactivation), keyed by the body as a School's subdomain change is (owner,
+// subdomain, its deactivation, and since ticket 04 the admin applications of a body
+// left with none), keyed by the body as a School's subdomain change is (owner,
 // 2026-10-22). requirePlatformAdmin guards each whole router.
 //
 // The seat's, mounted at /api/governing-body: the body the token's seat is for,
@@ -98,6 +100,27 @@ adminBodyRouter.post(
     '/:id/reactivate',
     validate({ params: idParams, body: decisionBody }),
     controller.reactivate
+);
+// A body left with no admin (ticket 04, owner 2026-10-24): its admins and applications,
+// with its code to hand on, and the Platform Admin's decision in the senior's place -
+// refused (409) once anyone sits.
+adminBodyRouter.get('/:id/admins', validate({ params: idParams }), controller.listBodyAdmins);
+adminBodyRouter.post(
+    '/:id/admins/:seatId/approve',
+    validate({ params: seatParams }),
+    controller.approveWithoutAdmin
+);
+adminBodyRouter.post(
+    '/:id/admins/:seatId/reject',
+    validate({ params: seatParams, body: decisionBody }),
+    controller.rejectWithoutAdmin
+);
+// The brake on a stalled body (owner, 2026-10-24): any sitting admin removed with a
+// reason, its senior or its last included.
+adminBodyRouter.post(
+    '/:id/admins/:seatId/remove',
+    validate({ params: seatParams, body: removeBody }),
+    controller.removeAsPlatformAdmin
 );
 
 const applicationRouter = Router();

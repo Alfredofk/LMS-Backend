@@ -32,6 +32,9 @@ const log = createLogger('GoverningBody');
 //   as a Principal sees a join request.
 // - An admin leaves unless they are the last. Account deletion is refused for the last
 //   admin of a live body (ADR-0007), and ends every other seat.
+// - The Platform Admin is the brake (owner, 2026-10-24): it removes any admin with a
+//   reason, the senior or the last included, and decides the applications of a body
+//   left with no admin, only until someone sits (option A: never by an email typed in).
 // - Audited against `GoverningBodyAdmin`, `schoolId` null.
 //
 // The seat and the body are above tenancy. ApprovalAudit is tenant-owned, so every
@@ -74,13 +77,14 @@ const ownSeatView = (seat) => ({
     governingBody: publicBodyView(seat.governingBody),
 });
 
-// A sitting admin as their colleagues see them, the senior first.
-const sittingView = (auth) => (seat, index) => ({
+// A sitting admin as their colleagues see them, the senior first. viewerId is the
+// caller's user, null for a Platform Admin, who sits nowhere.
+const sittingView = (viewerId) => (seat, index) => ({
     id: seat.id,
     user: personOf(seat.user),
     approvedAt: seat.approvedAt,
     senior: index === 0,
-    you: seat.userId === auth.userId,
+    you: seat.userId === viewerId,
 });
 
 // An application as every admin sees it (K2, owner 2026-10-24): the name and the
@@ -231,24 +235,27 @@ async function cancelApplication(userId, seatId) {
 // The admins
 // ---------------------------------------------------------------------------
 
-// GET /api/governing-body/admins, for every admin: the sitting admins, the senior
-// first, and the applications waiting, oldest first. youAreSenior says whether the
-// caller may decide them.
-async function listAdmins(auth) {
-    const [sitting, waiting] = await Promise.all([
+// A body's sitting admins, the senior first, and its applications waiting, oldest
+// first.
+const seatsOf = (governingBodyId) =>
+    Promise.all([
         prisma.governingBodyAdmin.findMany({
-            where: { governingBodyId: auth.governingBodyId, ...SITTING },
+            where: { governingBodyId, ...SITTING },
             include: { user: personSelect },
             orderBy: SENIORITY,
         }),
         prisma.governingBodyAdmin.findMany({
-            where: { governingBodyId: auth.governingBodyId, status: 'PENDING' },
+            where: { governingBodyId, status: 'PENDING' },
             include: { user: personSelect },
             orderBy: { createdAt: 'asc' },
         }),
     ]);
 
-    const admins = sitting.map(sittingView(auth));
+// GET /api/governing-body/admins, for every admin. youAreSenior says whether the
+// caller may decide the applications.
+async function listAdmins(auth) {
+    const [sitting, waiting] = await seatsOf(auth.governingBodyId);
+    const admins = sitting.map(sittingView(auth.userId));
     return {
         admins,
         applications: waiting.map(applicationView),
@@ -257,28 +264,30 @@ async function listAdmins(auth) {
 }
 
 // One seat of this body; another body's, or none, is one 404.
-async function loadSeat(auth, seatId, where = {}) {
+async function loadSeat(governingBodyId, seatId, where = {}) {
     const seat = await prisma.governingBodyAdmin.findFirst({
-        where: { id: seatId, governingBodyId: auth.governingBodyId, ...where },
+        where: { id: seatId, governingBodyId, ...where },
         include: { user: { select: { id: true, fullName: true, email: true, deletedAt: true } } },
     });
     if (!seat) throw notFound(where.status ? 'Admin not found' : 'Admin application not found');
     return seat;
 }
 
-// Approve or reject, the senior's alone. In one transaction under the body's lock: the
-// senior read again, the seat claimed out of PENDING - two clicks decide once - and the
-// audit row. An approval needs the applicant's account still live and still no
-// Student, as a registration's approval checks again.
-async function decideApplication(auth, seatId, { action, reason }) {
+// Approve or reject. mayDecide is who may: the senior (decideApplication), or a
+// Platform Admin while the body has no admin (decideWithoutAdmin). It is asked once
+// before the work and again in one transaction under the body's lock, with the seat
+// claimed out of PENDING - two clicks decide once - and the audit row. An approval
+// needs the applicant's account still live and still no Student, as a registration's
+// approval checks again.
+async function decide({ governingBodyId, seatId, action, reason, actorUserId, mayDecide, decider }) {
     let trimmed = null;
     if (action === 'REJECT') {
         assertRejectionReason('REJECT', reason);
         trimmed = reason.trim();
     }
 
-    const seat = await loadSeat(auth, seatId);
-    await assertSenior(prisma, auth);
+    const seat = await loadSeat(governingBodyId, seatId);
+    await mayDecide(prisma);
     assertDecidable(seat.status, 'admin application');
 
     if (action === 'APPROVE') {
@@ -297,10 +306,10 @@ async function decideApplication(auth, seatId, { action, reason }) {
             ? { status: 'ACTIVE', approvedAt: now }
             : { status: 'REJECTED', rejectionReason: trimmed };
 
-    await runUnscoped('the senior admin deciding an admin application', async () =>
+    await runUnscoped(`${decider} deciding an admin application`, async () =>
         await prisma.$transaction(async (tx) => {
-            await lockGoverningBody(tx, auth.governingBodyId, now);
-            await assertSenior(tx, auth);
+            await lockGoverningBody(tx, governingBodyId, now);
+            await mayDecide(tx);
 
             const claimed = await tx.governingBodyAdmin.updateMany({
                 where: { id: seat.id, status: 'PENDING' },
@@ -312,38 +321,50 @@ async function decideApplication(auth, seatId, { action, reason }) {
                 subjectType: SEAT_SUBJECT,
                 subjectId: seat.id,
                 action,
-                actorUserId: auth.userId,
+                actorUserId,
                 reason: trimmed,
                 client: tx,
             });
         })
     );
 
-    log.info(`Admin application ${action === 'APPROVE' ? 'approved' : 'rejected'} by the senior admin`);
-    return applicationView(await loadSeat(auth, seat.id));
+    log.info(`Admin application ${action === 'APPROVE' ? 'approved' : 'rejected'} by ${decider}`);
+    return applicationView(await loadSeat(governingBodyId, seat.id));
 }
+
+// The senior's decision, through the body's own routes.
+const decideApplication = (auth, seatId, { action, reason }) =>
+    decide({
+        governingBodyId: auth.governingBodyId,
+        seatId,
+        action,
+        reason,
+        actorUserId: auth.userId,
+        mayDecide: (client) => assertSenior(client, auth),
+        decider: 'the senior admin',
+    });
 
 const approveApplication = (auth, seatId) => decideApplication(auth, seatId, { action: 'APPROVE' });
 
 const rejectApplication = (auth, seatId, { reason } = {}) =>
     decideApplication(auth, seatId, { action: 'REJECT', reason });
 
-// The senior taking another admin off the body, with a reason the one removed reads on
-// their own seats (K6). The seat ends LEFT: requireGoverningBodyAdmin refuses them at
-// once, and their next refresh opens no Place, as a removed Teacher's does. Not
-// oneself - the senior leaves instead - so a removal never leaves the body empty.
-async function removeAdmin(auth, seatId, { reason }) {
-    const seat = await loadSeat(auth, seatId, SITTING);
-    await assertSenior(prisma, auth);
-    if (seat.userId === auth.userId) throw conflict('To step down yourself, leave the governing body instead');
+// A sitting admin taken off the body, with a reason the one removed reads on their own
+// seats. The seat ends LEFT: requireGoverningBodyAdmin refuses them at once, and their
+// next refresh opens no Place, as a removed Teacher's does. mayRemove is who may - the
+// senior (removeAdmin), or a Platform Admin (removeAsPlatformAdmin) - asked once before
+// the work and again under the body's lock, as decide() asks.
+async function removeSeat({ governingBodyId, seatId, reason, actorUserId, mayRemove, remover }) {
+    const seat = await loadSeat(governingBodyId, seatId, SITTING);
+    await mayRemove(prisma, seat);
 
     const trimmed = reason.trim();
     const now = new Date();
 
-    await runUnscoped('the senior admin removing an admin', async () =>
+    await runUnscoped(`${remover} removing an admin`, async () =>
         await prisma.$transaction(async (tx) => {
-            await lockGoverningBody(tx, auth.governingBodyId, now);
-            await assertSenior(tx, auth);
+            await lockGoverningBody(tx, governingBodyId, now);
+            await mayRemove(tx, seat);
 
             const claimed = await tx.governingBodyAdmin.updateMany({
                 where: { id: seat.id, ...SITTING },
@@ -355,16 +376,33 @@ async function removeAdmin(auth, seatId, { reason }) {
                 subjectType: SEAT_SUBJECT,
                 subjectId: seat.id,
                 action: 'REMOVE',
-                actorUserId: auth.userId,
+                actorUserId,
                 reason: trimmed,
                 client: tx,
             });
         })
     );
 
-    log.info('An admin was removed by the senior admin');
+    log.info(`An admin was removed by ${remover}`);
     return { id: seat.id, status: 'LEFT', endReason: trimmed };
 }
+
+// The senior's removal (K6). Not oneself - the senior leaves instead - so their removal
+// never leaves the body empty.
+const removeAdmin = (auth, seatId, { reason }) =>
+    removeSeat({
+        governingBodyId: auth.governingBodyId,
+        seatId,
+        reason,
+        actorUserId: auth.userId,
+        mayRemove: async (client, seat) => {
+            await assertSenior(client, auth);
+            if (seat.userId === auth.userId) {
+                throw conflict('To step down yourself, leave the governing body instead');
+            }
+        },
+        remover: 'the senior admin',
+    });
 
 // Any admin leaves, unless they are the last (K6): a body without an admin decides
 // nothing, and nobody could become one. Counted under the lock, so two admins leaving
@@ -406,6 +444,73 @@ async function leaveGoverningBody(auth) {
 
     log.info(`An admin left ${body.name}`);
     return { id: seatId, status: 'LEFT' };
+}
+
+// ---------------------------------------------------------------------------
+// The Platform Admin's brake (owner, 2026-10-24)
+// ---------------------------------------------------------------------------
+//
+// Two ways a body can stall, and the Platform Admin's answer to each:
+// - Its senior vanished without leaving. Nobody else decides an application or removes
+//   anyone, so the body is stuck though others sit. The Platform Admin removes an admin
+//   with a reason, the senior or the last one included (the spec's K10': it is the
+//   emergency brake); seniority is counted again at once.
+// - It has no admin left: its last deleted their account while it was deactivated, or
+//   the Platform Admin removed them. The Platform Admin then decides its admin
+//   applications in the senior's place, and only then: once someone sits, they are
+//   senior and decide.
+// Nobody is made an admin by having their email typed in (the spec's invariant 6, as
+// ADR-0008 appoints only a teacher already at the School): the person applies with
+// the code, which the Platform Admin reads on the body's admins.
+
+// 409 while the body has a sitting admin: its senior decides. Read again under the
+// lock, so the Platform Admin and a senior just approved never both decide.
+async function assertNoSittingAdmin(client, governingBodyId) {
+    const sitting = await client.governingBodyAdmin.count({ where: { governingBodyId, ...SITTING } });
+    if (sitting > 0) throw conflict('This governing body has an admin; its senior admin decides its applications');
+}
+
+// GET /api/admin/governing-bodies/:id/admins: the body with its code - to hand to
+// whoever should apply - its sitting admins and its applications waiting.
+async function listAdminsOf(governingBodyId) {
+    const body = await loadGoverningBody(governingBodyId);
+    const [sitting, waiting] = await seatsOf(body.id);
+    return {
+        governingBody: { id: body.id, name: body.name, code: body.code, deactivatedAt: body.deactivatedAt },
+        admins: sitting.map(sittingView(null)),
+        applications: waiting.map(applicationView),
+    };
+}
+
+// The Platform Admin's decision on a body with no admin. Allowed while it is
+// deactivated too, as appointPrincipal is at a School: one restored without an admin
+// needs it before anyone can run it.
+async function decideWithoutAdmin(adminUserId, governingBodyId, seatId, { action, reason }) {
+    await loadGoverningBody(governingBodyId);
+    return decide({
+        governingBodyId,
+        seatId,
+        action,
+        reason,
+        actorUserId: adminUserId,
+        mayDecide: (client) => assertNoSittingAdmin(client, governingBodyId),
+        decider: 'a platform admin',
+    });
+}
+
+// The Platform Admin removing any sitting admin of a body, with a reason: nothing but
+// requirePlatformAdmin stands in the way. Removing the last empties the body, whose
+// applications the Platform Admin then decides (decideWithoutAdmin).
+async function removeAsPlatformAdmin(adminUserId, governingBodyId, seatId, { reason }) {
+    await loadGoverningBody(governingBodyId);
+    return removeSeat({
+        governingBodyId,
+        seatId,
+        reason,
+        actorUserId: adminUserId,
+        mayRemove: async () => {},
+        remover: 'a platform admin',
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -505,4 +610,7 @@ export {
     leaveGoverningBody,
     assertNotLastAdmin,
     endSeats,
+    listAdminsOf,
+    decideWithoutAdmin,
+    removeAsPlatformAdmin,
 };

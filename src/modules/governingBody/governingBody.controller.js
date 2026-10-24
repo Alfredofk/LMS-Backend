@@ -113,6 +113,33 @@ async function reactivate(req, res) {
     return ok(res, { governingBody, message: 'Reactivated. Its admins sign in again.' });
 }
 
+// A body left with no admin (ticket 04): its admins and applications, shaped by the
+// service, and the Platform Admin's decision in the senior's place.
+async function listBodyAdmins(req, res) {
+    return ok(res, await admins.listAdminsOf(req.validated.params.id));
+}
+
+async function approveWithoutAdmin(req, res) {
+    const { id, seatId } = req.validated.params;
+    const application = await admins.decideWithoutAdmin(req.auth.userId, id, seatId, { action: 'APPROVE' });
+    return ok(res, { application, message: 'Approved. They are its admin now, and its senior.' });
+}
+
+async function rejectWithoutAdmin(req, res) {
+    const { id, seatId } = req.validated.params;
+    const application = await admins.decideWithoutAdmin(req.auth.userId, id, seatId, {
+        action: 'REJECT',
+        reason: req.validated.body.reason,
+    });
+    return ok(res, { application, message: 'Rejected.' });
+}
+
+async function removeAsPlatformAdmin(req, res) {
+    const { id, seatId } = req.validated.params;
+    const seat = await admins.removeAsPlatformAdmin(req.auth.userId, id, seatId, req.validated.body);
+    return ok(res, { seat, message: 'Removed. They no longer reach the governing body.' });
+}
+
 // ---- the seat ---------------------------------------------------------------
 
 async function own(req, res) {
@@ -171,6 +198,10 @@ export {
     changeSubdomain,
     deactivate,
     reactivate,
+    listBodyAdmins,
+    approveWithoutAdmin,
+    rejectWithoutAdmin,
+    removeAsPlatformAdmin,
     own,
     updateProfile,
     rotateCode,

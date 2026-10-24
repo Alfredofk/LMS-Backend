@@ -61,6 +61,10 @@ const registrationBody = z
 
 const idParams = z.object({ id: z.string().min(1) });
 
+// A body and one of its seats, for the Platform Admin's decision on a body left with no
+// admin (ticket 04).
+const seatParams = z.object({ id: z.string().min(1), seatId: z.string().min(1) });
+
 // ---- the Governing Body Code (ticket 04) ----
 
 // The School Code's shape, typed from a WhatsApp message: trimmed, in capitals.
@@ -139,4 +143,15 @@ const editBody = z
     })
     .refine((patch) => Object.keys(patch).length > 0, { message: 'Change at least one of name, kind or skNumber' });
 
-export { KINDS, registrationBody, idParams, codeBody, removeBody, profileBody, listQuery, decisionBody, editBody };
+export {
+    KINDS,
+    registrationBody,
+    idParams,
+    seatParams,
+    codeBody,
+    removeBody,
+    profileBody,
+    listQuery,
+    decisionBody,
+    editBody,
+};
