@@ -10,6 +10,7 @@ import {
     registrationBody,
     idParams,
     listQuery,
+    schoolListQuery,
     rejectBody,
     deactivateBody,
     reactivateBody,
@@ -114,7 +115,8 @@ memberRouter.delete('/logo', controller.removeLogo);
 // and generalLimiter is its ceiling. Ticket 03 answers a Governing Body's here too.
 //
 // The Platform Admin's, mounted at /api/admin/schools: keyed by the School, not
-// the registration, since a Governing Body's Schools (ticket 05) have none.
+// the registration, since a Governing Body's Schools (ticket 05) have none. Ticket 05
+// adds the list of every School, independent or a body's.
 const placesRouter = Router();
 
 placesRouter.get('/:subdomain', validate({ params: subdomainParams }), controller.resolvePlace);
@@ -123,6 +125,7 @@ const adminSchoolRouter = Router();
 
 adminSchoolRouter.use(requireAuth, requirePlatformAdmin);
 
+adminSchoolRouter.get('/', validate({ query: schoolListQuery }), controller.listSchools);
 adminSchoolRouter.patch(
     '/:id/subdomain',
     validate({ params: idParams, body: subdomainBody }),

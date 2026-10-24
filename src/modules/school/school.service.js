@@ -50,11 +50,46 @@ async function freeCodeOf(isTaken, what) {
     throw new Error(`Could not find a free ${what} in ${CODE_ATTEMPTS} attempts`);
 }
 
-const generateSchoolCode = () =>
+// client is a transaction's when the School is created in one, so Schools created
+// together see each other's codes.
+const generateSchoolCode = (client = prisma) =>
     freeCodeOf(
-        async (code) => Boolean(await prisma.school.findUnique({ where: { schoolCode: code }, select: { id: true } })),
+        async (code) => Boolean(await client.school.findUnique({ where: { schoolCode: code }, select: { id: true } })),
         'school code'
     );
+
+// One School created, by the approval of its registration or by its Governing Body
+// (governing-body ticket 05): its School Code and its K9 subdomain, both read inside
+// the caller's transaction, so the Schools a body creates together see each other. The
+// rest of the row is the caller's. One created at the same moment with the same NPSN,
+// code or subdomain is refused by the unique index, and the caller's transaction with it.
+async function createSchool(tx, fields) {
+    const schoolCode = await generateSchoolCode(tx);
+    const { schoolType, name, city } = fields;
+    const subdomain = await freeSubdomainOf(tx, { schoolType, name, city });
+    return tx.school.create({ data: { ...fields, schoolCode, subdomain } });
+}
+
+// One answer whether a School holds the NPSN or a registration waits on it, and never
+// which school: the ticket forbids revealing it (ticket 04 of registration).
+const NPSN_TAKEN = 'This NPSN is already registered or under review';
+
+// The NPSNs among these that a School holds or an independent registration waits on,
+// for a Governing Body's Schools (governing-body ticket 05). A fix leaves its own School
+// aside.
+async function npsnsTakenOf(npsns, { exceptSchoolId = null } = {}) {
+    const [schools, waiting] = await Promise.all([
+        prisma.school.findMany({
+            where: { npsn: { in: npsns }, ...(exceptSchoolId ? { id: { not: exceptSchoolId } } : {}) },
+            select: { npsn: true },
+        }),
+        prisma.schoolRegistration.findMany({
+            where: { npsn: { in: npsns }, status: 'PENDING' },
+            select: { npsn: true },
+        }),
+    ]);
+    return new Set([...schools, ...waiting].map((row) => row.npsn));
+}
 
 // ---------------------------------------------------------------------------
 // Views - what each side is allowed to see of a registration
@@ -206,14 +241,29 @@ async function submitRegistration(userId, body, file) {
         );
 
         // One answer whether a School holds the NPSN or another registration is
-        // waiting on it, and never which school: the ticket forbids revealing it.
+        // waiting on it, and never which school: the ticket forbids revealing it. A
+        // Governing Body's School is the exception (governing-body ticket 05, K6c): the
+        // applicant is told whose it is, and to ask it for the school's code (K8, owner
+        // 2026-10-24). A private school's yayasan is printed on its SK operasional, so
+        // the name discloses little.
+        const holder = await prisma.school.findUnique({
+            where: { npsn: body.npsn },
+            select: { id: true, governingBody: { select: { name: true } } },
+        });
+        if (holder?.governingBody) {
+            const { name } = holder.governingBody;
+            const message =
+                `This NPSN is registered by ${name}. ` +
+                `Ask it for the school's code to apply as its Principal`;
+            throw conflict(message, { governingBody: { name } });
+        }
         const npsnTaken =
-            (await prisma.school.findUnique({ where: { npsn: body.npsn }, select: { id: true } })) ??
+            holder ??
             (await prisma.schoolRegistration.findFirst({
                 where: { npsn: body.npsn, status: 'PENDING' },
                 select: { id: true },
             }));
-        if (npsnTaken) throw conflict('This NPSN is already registered or under review');
+        if (npsnTaken) throw conflict(NPSN_TAKEN);
 
         // Ticket 13: the Kemdikbud NPSN lookup belongs here, and its result is
         // information for the admin only - it never refuses a registration.
@@ -426,7 +476,6 @@ async function approveRegistration(id, { adminId, adminUserId }) {
             'The applicant is a student at a school, or has asked to be one, and a student belongs to one school only'
         );
 
-        const schoolCode = await generateSchoolCode();
         const now = new Date();
 
         const school = await prisma.$transaction(async (tx) => {
@@ -438,26 +487,16 @@ async function approveRegistration(id, { adminId, adminUserId }) {
                 ktpStoragePath: null,
             });
 
-            const created = await tx.school.create({
-                data: {
-                    npsn: registration.npsn,
-                    name: registration.schoolName,
-                    schoolType: registration.schoolType,
-                    durationYears:
-                        registration.durationYears ??
-                        SCHOOL_TYPES[registration.schoolType].defaultDurationYears,
-                    city: registration.city,
-                    latitude: registration.latitude,
-                    longitude: registration.longitude,
-                    timeZone: registration.timeZone,
-                    schoolCode,
-                    // The K9 subdomain, read inside the transaction (governing-body 02).
-                    subdomain: await freeSubdomainOf(tx, {
-                        schoolType: registration.schoolType,
-                        name: registration.schoolName,
-                        city: registration.city,
-                    }),
-                },
+            const created = await createSchool(tx, {
+                npsn: registration.npsn,
+                name: registration.schoolName,
+                schoolType: registration.schoolType,
+                durationYears:
+                    registration.durationYears ?? SCHOOL_TYPES[registration.schoolType].defaultDurationYears,
+                city: registration.city,
+                latitude: registration.latitude,
+                longitude: registration.longitude,
+                timeZone: registration.timeZone,
             });
 
             const membership = await tx.schoolMembership.create({
@@ -540,6 +579,84 @@ async function rejectRegistration(id, { adminId, adminUserId, reason }) {
 
         return getRegistration(id);
     });
+}
+
+// ---------------------------------------------------------------------------
+// Platform admin - every School
+// ---------------------------------------------------------------------------
+
+// The Platform Admin's list of Schools (governing-body ticket 05, owner 2026-10-24). It
+// reads Schools, not registrations: a Governing Body's School has none, so the queue
+// never shows it. Each row names its body (K11) and its registration, null for a body's,
+// since today's deactivation and appointment are keyed by the registration.
+const schoolListSelect = {
+    id: true,
+    npsn: true,
+    name: true,
+    schoolType: true,
+    durationYears: true,
+    city: true,
+    subdomain: true,
+    schoolCode: true,
+    timeZone: true,
+    governingBody: { select: { id: true, name: true } },
+    registration: { select: { id: true } },
+    deactivatedAt: true,
+    deactivationReason: true,
+    createdAt: true,
+};
+
+const schoolListView = ({ governingBody, registration, ...school }) => ({
+    ...school,
+    governingBody: governingBody ?? null,
+    registrationId: registration?.id ?? null,
+});
+
+const SCHOOL_ORDER = {
+    name: [{ name: 'asc' }, { id: 'asc' }],
+    newest: [{ createdAt: 'desc' }, { id: 'asc' }],
+    oldest: [{ createdAt: 'asc' }, { id: 'asc' }],
+};
+
+// The filters, as one where clause. `contains` is a sequential scan by design, as the
+// queue's is.
+function buildSchoolWhere({ q, governingBodyId, governed, deactivated }) {
+    const all = [];
+
+    if (governingBodyId) all.push({ governingBodyId });
+    if (governed !== undefined) all.push({ governingBodyId: governed ? { not: null } : null });
+    if (deactivated !== undefined) all.push({ deactivatedAt: deactivated ? { not: null } : null });
+    if (q) {
+        all.push({
+            OR: [
+                { name: { contains: q, mode: 'insensitive' } },
+                { npsn: { contains: q } },
+                { city: { contains: q, mode: 'insensitive' } },
+                { subdomain: { contains: q, mode: 'insensitive' } },
+            ],
+        });
+    }
+
+    return all.length ? { AND: all } : {};
+}
+
+// One page of Schools and the number behind it.
+async function listSchools(filters) {
+    const { sort, limit, offset } = filters;
+    const where = buildSchoolWhere(filters);
+
+    const [schools, total] = await Promise.all([
+        prisma.school.findMany({
+            where,
+            select: schoolListSelect,
+            orderBy: SCHOOL_ORDER[sort],
+            take: limit,
+            skip: offset,
+        }),
+        prisma.school.count({ where }),
+    ]);
+
+    return { schools: schools.map(schoolListView), total, page: { limit, offset, returned: schools.length } };
 }
 
 // ---------------------------------------------------------------------------
@@ -845,10 +962,14 @@ export {
     CODE_ALPHABET,
     CODE_LENGTH,
     freeCodeOf,
+    createSchool,
+    NPSN_TAKEN,
+    npsnsTakenOf,
     discardKtp,
     submitRegistration,
     listMine,
     listRegistrations,
+    listSchools,
     getRegistration,
     readKtp,
     approveRegistration,

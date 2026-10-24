@@ -41,50 +41,69 @@ const longitude = coordinate('Longitude', 95, 141);
 // a meridian (West and Central Kalimantan are WIB, South and East are WITA).
 const timeZone = z.enum(TIME_ZONES, 'Choose WIB, WITA or WIT');
 
+// A School's own fields, as its founder registers them and as a Governing Body creates
+// one (governing-body ticket 05, K7): one shape, so the two never drift apart.
+const schoolFields = {
+    npsn,
+    schoolName: z.string().trim().min(3, 'School name is too short').max(150),
+    schoolType: z.enum(SCHOOL_TYPE_NAMES),
+    city: z.string().trim().min(2, 'City is required').max(100),
+    latitude,
+    longitude,
+    timeZone,
+    durationYears: z.preprocess(blankToUndefined, z.coerce.number().int().optional()),
+};
+
+// Only an SMK chooses its length, and it must. Every other type has exactly one legal
+// value (shared/schoolType.js), so it is filled in rather than asked for - and refused
+// if someone sends a different one.
+function checkDuration(value, ctx) {
+    const { schoolType, durationYears } = value;
+
+    if (schoolType === 'SMK' && durationYears === undefined) {
+        ctx.addIssue({
+            code: 'custom',
+            path: ['durationYears'],
+            message: 'An SMK must state its duration: 3 or 4 years',
+        });
+        return;
+    }
+
+    if (durationYears !== undefined && !isValidDurationYears(schoolType, durationYears)) {
+        ctx.addIssue({
+            code: 'custom',
+            path: ['durationYears'],
+            message:
+                schoolType === 'SMK'
+                    ? 'An SMK runs 3 or 4 years'
+                    : `A ${schoolType} runs ${SCHOOL_TYPES[schoolType].defaultDurationYears} years`,
+        });
+    }
+}
+
+const withDuration = (value) => ({
+    ...value,
+    durationYears: value.durationYears ?? SCHOOL_TYPES[value.schoolType].defaultDurationYears,
+});
+
 const registrationBody = z
-    .object({
-        npsn,
-        schoolName: z.string().trim().min(3, 'School name is too short').max(150),
-        schoolType: z.enum(SCHOOL_TYPE_NAMES),
-        city: z.string().trim().min(2, 'City is required').max(100),
-        latitude,
-        longitude,
-        timeZone,
-        applicantPhone,
-        durationYears: z.preprocess(blankToUndefined, z.coerce.number().int().optional()),
-    })
-    // Only an SMK chooses its length, and it must. Every other type has exactly
-    // one legal value (shared/schoolType.js), so it is filled in rather than asked
-    // for - and refused if someone sends a different one.
-    .superRefine((value, ctx) => {
-        const { schoolType, durationYears } = value;
+    .object({ ...schoolFields, applicantPhone })
+    .superRefine(checkDuration)
+    .transform(withDuration);
 
-        if (schoolType === 'SMK' && durationYears === undefined) {
-            ctx.addIssue({
-                code: 'custom',
-                path: ['durationYears'],
-                message: 'An SMK must state its duration: 3 or 4 years',
-            });
-            return;
-        }
-
-        if (durationYears !== undefined && !isValidDurationYears(schoolType, durationYears)) {
-            ctx.addIssue({
-                code: 'custom',
-                path: ['durationYears'],
-                message:
-                    schoolType === 'SMK'
-                        ? 'An SMK runs 3 or 4 years'
-                        : `A ${schoolType} runs ${SCHOOL_TYPES[schoolType].defaultDurationYears} years`,
-            });
-        }
-    })
-    .transform((value) => ({
-        ...value,
-        durationYears: value.durationYears ?? SCHOOL_TYPES[value.schoolType].defaultDurationYears,
-    }));
+// One School a Governing Body creates (governing-body ticket 05): the registration's
+// fields and rules, without the phone and the KTP. It arrives as JSON, so a stray key
+// is refused rather than ignored.
+const schoolRow = z.strictObject(schoolFields).superRefine(checkDuration).transform(withDuration);
 
 const idParams = z.object({ id: z.string().min(1) });
+
+// A yes-or-no filter, written as text because a query string carries text:
+// `z.coerce.boolean()` reads the string "false" as true, silently.
+const trueOrFalse = z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((value) => (value === undefined ? undefined : value === 'true'));
 
 // The platform admin's queue, searched and filtered in the database.
 //
@@ -93,8 +112,7 @@ const idParams = z.object({ id: z.string().min(1) });
 // below is optional, so the old call - `?status=PENDING` and nothing else - still
 // means exactly what it meant.
 //
-// `deactivated` is an enum rather than a boolean because a query string carries
-// text: `z.coerce.boolean()` reads the string "false" as true, silently.
+// `deactivated` is an enum rather than a boolean (trueOrFalse, above).
 const listQuery = z
     .object({
         // ALL is for one search box across every tab at once.
@@ -106,10 +124,7 @@ const listQuery = z
         schoolType: z.enum(SCHOOL_TYPE_NAMES).optional(),
         city: z.string().trim().min(1).max(100).optional(),
         // Only an approved registration has a school, so this implies APPROVED.
-        deactivated: z
-            .enum(['true', 'false'])
-            .optional()
-            .transform((value) => (value === undefined ? undefined : value === 'true')),
+        deactivated: trueOrFalse,
         submittedFrom: z.coerce.date().optional(),
         submittedTo: z.coerce.date().optional(),
         // A queue is worked from the front; a decided list reads better newest first.
@@ -127,6 +142,21 @@ const listQuery = z
             });
         }
     });
+
+// The Platform Admin's list of every School (governing-body ticket 05, owner
+// 2026-10-24): independent ones and a Governing Body's alike, since a body's School has
+// no registration to reach it through the queue.
+const schoolListQuery = z.object({
+    // One needle over the name, NPSN, city and subdomain.
+    q: z.string().trim().min(1).max(100).optional(),
+    // One Governing Body's Schools; `governed` false is the independent ones.
+    governingBodyId: z.string().min(1).optional(),
+    governed: trueOrFalse,
+    deactivated: trueOrFalse,
+    sort: z.enum(['name', 'newest', 'oldest']).default('name'),
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    offset: z.coerce.number().int().min(0).default(0),
+});
 
 // Left loose on purpose: approval.js owns the "at least 3 characters" rule, so the
 // message is the same everywhere a decision has to be explained.
@@ -196,9 +226,12 @@ const subdomainBody = z.strictObject({
 });
 
 export {
+    schoolFields,
     registrationBody,
+    schoolRow,
     idParams,
     listQuery,
+    schoolListQuery,
     rejectBody,
     deactivateBody,
     reactivateBody,

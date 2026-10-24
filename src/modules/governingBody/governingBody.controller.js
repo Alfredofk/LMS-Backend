@@ -1,6 +1,7 @@
 import { ok } from '../../shared/errors.js';
 import * as service from './governingBody.service.js';
 import * as admins from './governingBody.admins.js';
+import * as schools from './governingBody.schools.js';
 import { changeGoverningBodySubdomain } from '../school/school.subdomain.js';
 
 // Thin by design, like school.controller.js: read what validation produced, call the
@@ -181,6 +182,26 @@ async function leave(req, res) {
     return ok(res, { seat, message: 'You have left the governing body.' });
 }
 
+// ---- the seat: its Schools (ticket 05) --------------------------------------
+
+async function createSchools(req, res) {
+    const created = await schools.createSchools(req.auth, req.validated.body);
+    return ok(
+        res,
+        { schools: created, message: 'Created. Each school is live, with its code, and waits for its Principal.' },
+        201
+    );
+}
+
+async function listSchools(req, res) {
+    return ok(res, { schools: await schools.listOwnSchools(req.auth) });
+}
+
+async function fixSchool(req, res) {
+    const school = await schools.fixSchool(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, { school, message: 'Saved.' });
+}
+
 export {
     submit,
     listMine,
@@ -210,4 +231,7 @@ export {
     rejectApplication,
     removeAdmin,
     leave,
+    createSchools,
+    listSchools,
+    fixSchool,
 };

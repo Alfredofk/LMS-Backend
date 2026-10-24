@@ -167,9 +167,17 @@ async function changeSubdomain(req, res) {
     });
 }
 
+// ---- platform admin: every School (governing-body ticket 05) ---------------
+
+// The page, the filtered total and the paging, shaped by the service.
+async function listSchools(req, res) {
+    return ok(res, await service.listSchools(req.validated.query));
+}
+
 export {
     resolvePlace,
     changeSubdomain,
+    listSchools,
     submit,
     listMine,
     list,

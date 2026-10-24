@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { phone } from '../auth/auth.schema.js';
+import { schoolFields, schoolRow } from '../school/school.schema.js';
 
 // Governing Bodies (governing-body ticket 03). A registration arrives as
 // multipart/form-data, because the KTP and the proof ride along with it, so every
@@ -149,6 +150,50 @@ const decisionBody = z
     })
     .default({});
 
+// ---- its Schools (ticket 05) ----
+
+// One submission creates at most this many Schools, all or none (K7).
+const MAX_SCHOOLS_AT_ONCE = 10;
+
+// The Schools a body creates at once, each row a School Registration's fields without
+// the phone and the KTP. Two rows naming one NPSN are refused here, naming both; one a
+// School holds or a registration waits on is the service's to find.
+const createSchoolsBody = z
+    .strictObject({
+        schools: z
+            .array(schoolRow)
+            .min(1, 'Send at least one school')
+            .max(MAX_SCHOOLS_AT_ONCE, `At most ${MAX_SCHOOLS_AT_ONCE} schools in one submission`),
+    })
+    .superRefine(({ schools }, ctx) => {
+        // Zod may run this over a body whose list failed its own shape.
+        if (!Array.isArray(schools)) return;
+        const firstRowOf = new Map();
+        schools.forEach((row, index) => {
+            const first = firstRowOf.get(row.npsn);
+            if (first === undefined) {
+                firstRowOf.set(row.npsn, index);
+                return;
+            }
+            const message = `Row ${index + 1} repeats the NPSN of row ${first + 1}`;
+            ctx.addIssue({ code: 'custom', path: ['schools', index, 'npsn'], message });
+        });
+    });
+
+// A fix of one of its Schools while it has no Principal (K10): the name, the NPSN, the
+// type and an SMK's duration, each by the registration's rule. Whether the type and the
+// duration then agree is the service's to check, against what the School holds.
+const schoolPatchBody = z
+    .strictObject({
+        schoolName: schoolFields.schoolName.optional(),
+        npsn: schoolFields.npsn.optional(),
+        schoolType: schoolFields.schoolType.optional(),
+        durationYears: schoolFields.durationYears,
+    })
+    .refine((patch) => Object.values(patch).some((value) => value !== undefined), {
+        message: 'Change at least one of schoolName, npsn, schoolType or durationYears',
+    });
+
 // A Platform Admin's correction of a body's name, kind, NPYP or SK number. Whether the
 // kind and the numbers then agree is the service's to check, against what the body holds.
 const editBody = z
@@ -173,4 +218,6 @@ export {
     listQuery,
     decisionBody,
     editBody,
+    createSchoolsBody,
+    schoolPatchBody,
 };

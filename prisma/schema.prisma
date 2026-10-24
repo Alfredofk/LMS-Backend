@@ -170,6 +170,12 @@ enum ApprovalAction {
     /// (governing-body tickets 03 and 04b), or its admins changing its address and phone
     /// (ticket 04).
     UPDATE_GOVERNING_BODY
+    /// A Governing Body's admin creating one of its Schools, live at once with no Principal
+    /// (governing-body ticket 05, K7). One row per School, the School as its subject.
+    CREATE
+    /// A Governing Body's admin fixing its School's name, NPSN or type while the School has
+    /// no Principal (governing-body ticket 05, K10), with what they were.
+    UPDATE_SCHOOL
 }
 
 /// What a Governing Body is (governing-body spec, K1): UU Sisdiknas's *penyelenggara

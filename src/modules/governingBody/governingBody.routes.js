@@ -16,6 +16,8 @@ import {
     listQuery,
     decisionBody,
     editBody,
+    createSchoolsBody,
+    schoolPatchBody,
 } from './governingBody.schema.js';
 import { subdomainBody } from '../school/school.schema.js';
 
@@ -43,6 +45,8 @@ import { subdomainBody } from '../school/school.schema.js';
 // requireGoverningBodyAdmin reading the seat on every request. Every admin reads the
 // admins, rotates the code, changes the address and phone, and leaves unless the last;
 // the service lets only the senior admin approve, reject and remove (403 for the rest).
+// Since ticket 05 every admin also creates, reads and fixes the body's Schools; the
+// service answers another body's School with 404 and a fix after its Principal with 409.
 
 // The KTP: JPG or PNG, at most 2 MB, as a School Registration's. The proof of office -
 // the akta page or the surat tugas - PDF, JPG or PNG, at most 5 MB (owner, 2026-10-22).
@@ -152,6 +156,9 @@ seatRouter.post(
     controller.removeAdmin
 );
 seatRouter.post('/leave', controller.leave);
+seatRouter.get('/schools', controller.listSchools);
+seatRouter.post('/schools', validate({ body: createSchoolsBody }), controller.createSchools);
+seatRouter.patch('/schools/:id', validate({ params: idParams, body: schoolPatchBody }), controller.fixSchool);
 
 export default router;
 export { adminRegistrationRouter, adminBodyRouter, applicationRouter, seatRouter };
