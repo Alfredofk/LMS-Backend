@@ -11,6 +11,7 @@ import { discardKtp } from '../school/school.service.js';
 import { letterheadView } from '../school/school.letterhead.js';
 import { assertNotLastAdmin, endSeats } from '../governingBody/governingBody.admins.js';
 import { discardRegistrationFiles } from '../governingBody/governingBody.service.js';
+import { cancelOnDeletion, discardKtps } from '../governingBody/governingBody.principals.js';
 
 const log = createLogger('Users');
 
@@ -421,7 +422,9 @@ async function confirmIdentity(user, { password, googleIdToken }) {
 // - the last admin of a live body is refused, every such body named;
 // - an admin application waiting is cancelled, a seat ends LEFT (endSeats);
 // - a Governing Body Registration under review is closed, and its KTP and proof
-//   deleted (owner, 2026-10-24: invariant 7 of the spec holds on a deletion too).
+//   deleted (owner, 2026-10-24: invariant 7 of the spec holds on a deletion too);
+// - a Principal application waiting is cancelled, and its KTP deleted (governing-body
+//   ticket 06).
 async function deleteAccount(userId, body) {
     const user = await loadUser(userId);
     await confirmIdentity(user, body);
@@ -479,6 +482,7 @@ async function deleteAccount(userId, body) {
 
     const now = new Date();
     let seats = [];
+    let principalApplications = { schools: [], ktpKeys: [] };
 
     await prisma.$transaction(async (tx) => {
         // Each inside its own school's scope: the tenant extension reads the scope
@@ -535,8 +539,9 @@ async function deleteAccount(userId, body) {
             });
         }
 
-        // The same for a Governing Body Registration, both its files with it, and then
-        // the seats - all above tenancy, their audit rows stamped with no school.
+        // The same for a Governing Body Registration, both its files with it, then the
+        // seats - all above tenancy, their audit rows stamped with no school - and the
+        // Principal applications waiting, whose audit rows name their School (ticket 06).
         await runUnscoped('ending what an account being deleted holds at governing bodies', async () => {
             if (bodyRegistration) {
                 const claimed = await tx.governingBodyRegistration.updateMany({
@@ -564,6 +569,7 @@ async function deleteAccount(userId, body) {
             }
 
             seats = await endSeats(tx, { userId, now });
+            principalApplications = await cancelOnDeletion(tx, { userId, now });
         });
 
         // .invalid is a reserved TLD: the address can never receive mail, and
@@ -599,6 +605,7 @@ async function deleteAccount(userId, body) {
     // is logged for a human, and cannot undo the deletion.
     if (registration) await discardKtp(registration.ktpStoragePath, registration.id);
     if (bodyRegistration) await discardRegistrationFiles(bodyRegistration);
+    await discardKtps(principalApplications.ktpKeys);
 
     log.info(`Account ${userId} deleted`);
 
@@ -617,6 +624,8 @@ async function deleteAccount(userId, body) {
         // Governing-body ticket 04: each seat ended, and the body's registration closed.
         governingBodies: seats,
         governingBodyRegistrationClosed: Boolean(bodyRegistration),
+        // Governing-body ticket 06: the Schools whose waiting Principal application closed.
+        principalApplicationsCancelled: principalApplications.schools,
     };
 }
 

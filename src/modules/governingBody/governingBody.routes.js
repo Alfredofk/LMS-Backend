@@ -3,7 +3,7 @@ import { Router } from 'express';
 import { requireAuth } from '../../shared/auth.js';
 import { requireGoverningBodyAdmin, requirePlatformAdmin } from '../../shared/guards.js';
 import { governingBodyRegistrationLimiter, joinSchoolLimiter } from '../../shared/rateLimit.js';
-import { fileFields } from '../../shared/upload.js';
+import { fileFields, singleFile } from '../../shared/upload.js';
 import { validate } from '../../shared/validate.js';
 import * as controller from './governingBody.controller.js';
 import {
@@ -11,6 +11,8 @@ import {
     idParams,
     seatParams,
     codeBody,
+    principalApplicationBody,
+    principalApplicationsQuery,
     removeBody,
     profileBody,
     listQuery,
@@ -47,7 +49,15 @@ import { subdomainBody } from '../school/school.schema.js';
 // the service lets only the senior admin approve, reject and remove (403 for the rest).
 // Since ticket 05 every admin also creates, reads and fixes the body's Schools; the
 // service answers another body's School with 404, and a fix of one that has ever had a
-// Principal with 409.
+// Principal with 409. Since ticket 06 every admin, not only the senior, reads and
+// decides the Principal applications to the body's Schools, their own included; the
+// service answers another body's application with 404.
+//
+// The Principal applicant's, mounted at /api/principal-applications (ticket 06): any
+// signed-in account applies through a School's own code, with a KTP; the service refuses
+// an unverified account, a School that takes no application, a member of it and a
+// Student. The submission shares joinSchoolLimiter, after requireAuth and before the
+// upload: guessing a School Code costs the same here as at the lookup.
 
 // The KTP: JPG or PNG, at most 2 MB, as a School Registration's. The proof of office -
 // the akta page or the surat tugas - PDF, JPG or PNG, at most 5 MB (owner, 2026-10-22).
@@ -55,6 +65,9 @@ const registrationFiles = fileFields({
     ktp: { maxBytes: 2 * 1024 * 1024, types: ['jpg', 'png'] },
     proof: { maxBytes: 5 * 1024 * 1024, types: ['pdf', 'jpg', 'png'] },
 });
+
+// A Principal applicant's KTP, as a School Registration's (ticket 06).
+const ktpUpload = singleFile('ktp', { maxBytes: 2 * 1024 * 1024, types: ['jpg', 'png'] });
 
 const router = Router();
 
@@ -137,6 +150,24 @@ applicationRouter.post('/admins', joinSchoolLimiter, validate({ body: codeBody }
 applicationRouter.post('/admins/:id/cancel', validate({ params: idParams }), controller.cancelApplication);
 applicationRouter.get('/mine', controller.listOwnSeats);
 
+const principalApplicationRouter = Router();
+
+principalApplicationRouter.use(requireAuth);
+
+principalApplicationRouter.post(
+    '/',
+    joinSchoolLimiter,
+    ktpUpload,
+    validate({ body: principalApplicationBody }),
+    controller.applyAsPrincipal
+);
+principalApplicationRouter.get('/mine', controller.listOwnPrincipalApplications);
+principalApplicationRouter.post(
+    '/:id/cancel',
+    validate({ params: idParams }),
+    controller.cancelPrincipalApplication
+);
+
 const seatRouter = Router();
 
 seatRouter.use(requireAuth, requireGoverningBodyAdmin);
@@ -160,6 +191,27 @@ seatRouter.post('/leave', controller.leave);
 seatRouter.get('/schools', controller.listSchools);
 seatRouter.post('/schools', validate({ body: createSchoolsBody }), controller.createSchools);
 seatRouter.patch('/schools/:id', validate({ params: idParams, body: schoolPatchBody }), controller.fixSchool);
+seatRouter.get(
+    '/schools/:id/principal-applications',
+    validate({ params: idParams, query: principalApplicationsQuery }),
+    controller.listPrincipalApplications
+);
+seatRouter.get('/principal-applications/:id', validate({ params: idParams }), controller.getPrincipalApplication);
+seatRouter.get(
+    '/principal-applications/:id/ktp',
+    validate({ params: idParams }),
+    controller.principalApplicationKtp
+);
+seatRouter.post(
+    '/principal-applications/:id/approve',
+    validate({ params: idParams }),
+    controller.approvePrincipalApplication
+);
+seatRouter.post(
+    '/principal-applications/:id/reject',
+    validate({ params: idParams, body: decisionBody }),
+    controller.rejectPrincipalApplication
+);
 
 export default router;
-export { adminRegistrationRouter, adminBodyRouter, applicationRouter, seatRouter };
+export { adminRegistrationRouter, adminBodyRouter, applicationRouter, principalApplicationRouter, seatRouter };

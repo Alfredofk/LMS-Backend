@@ -240,6 +240,7 @@ const bulkApproveBody = z.object({
 
 export {
     REQUESTABLE_ROLES,
+    schoolCode,
     lookupBody,
     requestBody,
     addRolesBody,

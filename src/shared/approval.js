@@ -93,6 +93,34 @@ async function assertSeatRetryAllowed({ userId, governingBodyId }) {
     }
 }
 
+// Why a Principal application closes on its own when another applicant for its School is
+// approved (governing-body ticket 06, K8). Named here because the cap below leaves it out.
+const SCHOOL_HAS_PRINCIPAL = 'The school has a Principal now';
+
+// A Principal application turned down three times at one School in a day waits for
+// tomorrow, as a join request does (governing-body ticket 06). Only an admin's own
+// rejection counts: one closed because another applicant was approved lost a race, and
+// was not turned down for itself. A cancelled one never counts.
+async function assertPrincipalApplicationRetryAllowed({ userId, schoolId }) {
+    const since = new Date(Date.now() - RETRY_WINDOW_MS);
+    const attempts = await prisma.principalApplication.count({
+        where: {
+            userId,
+            schoolId,
+            status: 'REJECTED',
+            rejectionReason: { not: SCHOOL_HAS_PRINCIPAL },
+            decidedAt: { gte: since },
+        },
+    });
+
+    if (attempts >= MAX_ATTEMPTS_PER_WINDOW) {
+        throw conflict(
+            'Too many rejected Principal applications for this school recently. Try again tomorrow.',
+            { attempts, windowHours: RETRY_WINDOW_MS / 3_600_000 }
+        );
+    }
+}
+
 async function assertClassSubjectRetryAllowed({
     teacherMembershipId,
     classId,
@@ -196,6 +224,8 @@ export {
     assertRejectionReason,
     assertMembershipRetryAllowed,
     assertSeatRetryAllowed,
+    SCHOOL_HAS_PRINCIPAL,
+    assertPrincipalApplicationRetryAllowed,
     assertClassSubjectRetryAllowed,
     assertSchoolRegistrationAllowed,
     assertGoverningBodyRegistrationAllowed,

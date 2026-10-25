@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { phone } from '../auth/auth.schema.js';
+import { schoolCode } from '../membership/membership.schema.js';
 import { schoolFields, schoolRow } from '../school/school.schema.js';
 
 // Governing Bodies (governing-body ticket 03). A registration arrives as
@@ -91,9 +92,20 @@ const code = z
     .toUpperCase()
     .regex(/^[A-Z2-9]{8}$/, 'A Governing Body Code is 8 letters and digits');
 
-// The lookup and an admin application send the code alone. Ticket 06's Principal
-// application adds the School and the KTP.
+// The lookup and an admin application send the code alone. A Principal applies through the
+// School's own code instead (ticket 06, owner 2026-10-24), below.
 const codeBody = z.strictObject({ code });
+
+// ---- Principal applications (ticket 06) ----
+
+// Multipart, beside the KTP: the School Code the body handed out, and the applicant's phone,
+// named as both registrations name theirs.
+const principalApplicationBody = z.strictObject({ schoolCode, applicantPhone: phone });
+
+// A School's applications for its body's admins: the waiting ones unless asked otherwise.
+const principalApplicationsQuery = z.object({
+    status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'CANCELLED', 'ALL']).default('PENDING'),
+});
 
 // A removal's reason is required and shown to the admin removed (K6).
 const removeBody = z.strictObject({
@@ -213,6 +225,8 @@ export {
     idParams,
     seatParams,
     codeBody,
+    principalApplicationBody,
+    principalApplicationsQuery,
     removeBody,
     profileBody,
     listQuery,

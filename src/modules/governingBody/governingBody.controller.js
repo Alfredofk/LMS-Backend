@@ -2,6 +2,7 @@ import { ok } from '../../shared/errors.js';
 import * as service from './governingBody.service.js';
 import * as admins from './governingBody.admins.js';
 import * as schools from './governingBody.schools.js';
+import * as principals from './governingBody.principals.js';
 import { changeGoverningBodySubdomain } from '../school/school.subdomain.js';
 
 // Thin by design, like school.controller.js: read what validation produced, call the
@@ -40,6 +41,26 @@ async function listOwnSeats(req, res) {
 async function cancelApplication(req, res) {
     const seat = await admins.cancelApplication(req.auth.userId, req.validated.params.id);
     return ok(res, { seat, message: 'Application cancelled.' });
+}
+
+// ---- applicant: Principal applications (ticket 06) --------------------------
+
+async function applyAsPrincipal(req, res) {
+    const application = await principals.submitApplication(req.auth.userId, req.validated.body, req.file);
+    return ok(
+        res,
+        { application, message: 'Application sent. An admin of the school’s governing body will decide it.' },
+        201
+    );
+}
+
+async function listOwnPrincipalApplications(req, res) {
+    return ok(res, { applications: await principals.listOwnApplications(req.auth.userId) });
+}
+
+async function cancelPrincipalApplication(req, res) {
+    const application = await principals.cancelApplication(req.auth.userId, req.validated.params.id);
+    return ok(res, { application, message: 'Application cancelled. Your KTP was discarded.' });
 }
 
 // ---- platform admin: registrations -----------------------------------------
@@ -202,6 +223,37 @@ async function fixSchool(req, res) {
     return ok(res, { school, message: 'Saved.' });
 }
 
+// ---- the seat: Principal applications (ticket 06) ---------------------------
+
+async function listPrincipalApplications(req, res) {
+    const { params, query } = req.validated;
+    return ok(res, { applications: await principals.listForSchool(req.auth, params.id, query) });
+}
+
+async function getPrincipalApplication(req, res) {
+    return ok(res, { application: await principals.getApplication(req.auth, req.validated.params.id) });
+}
+
+// File bytes, the one answer outside the envelope.
+async function principalApplicationKtp(req, res) {
+    const { buffer, contentType } = await principals.readKtp(req.auth, req.validated.params.id);
+    res.set({ 'Content-Type': contentType, 'Content-Disposition': 'inline', 'Cache-Control': 'no-store' });
+    return res.send(buffer);
+}
+
+async function approvePrincipalApplication(req, res) {
+    const application = await principals.approveApplication(req.auth, req.validated.params.id);
+    return ok(res, {
+        application,
+        message: 'Approved. They are the school’s Principal now; the others waiting were declined.',
+    });
+}
+
+async function rejectPrincipalApplication(req, res) {
+    const application = await principals.rejectApplication(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, { application, message: 'Rejected. The KTP was discarded.' });
+}
+
 export {
     submit,
     listMine,
@@ -209,6 +261,9 @@ export {
     applyAsAdmin,
     listOwnSeats,
     cancelApplication,
+    applyAsPrincipal,
+    listOwnPrincipalApplications,
+    cancelPrincipalApplication,
     list,
     get,
     ktp,
@@ -234,4 +289,9 @@ export {
     createSchools,
     listSchools,
     fixSchool,
+    listPrincipalApplications,
+    getPrincipalApplication,
+    principalApplicationKtp,
+    approvePrincipalApplication,
+    rejectPrincipalApplication,
 };

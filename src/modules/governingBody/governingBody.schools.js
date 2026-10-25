@@ -5,6 +5,7 @@ import { SCHOOL_TYPES, isValidDurationYears } from '../../shared/schoolType.js';
 import { badRequest, conflict, notFound } from '../../shared/errors.js';
 import { createLogger } from '../../lib/helpers.js';
 import { NPSN_TAKEN, createSchool, npsnsTakenOf } from '../school/school.service.js';
+import { SITTING_PRINCIPAL } from '../membership/membership.service.js';
 
 const log = createLogger('GoverningBody');
 
@@ -33,9 +34,6 @@ const log = createLogger('GoverningBody');
 const SCHOOL_SUBJECT = 'School';
 const MISSING = 'School not found';
 const HAD_PRINCIPAL = 'This school has had a Principal, so its governing body can no longer fix its name, NPSN or type';
-
-// A Principal sitting now: the role ACTIVE, on an ACTIVE membership.
-const ACTIVE_PRINCIPAL = { role: 'PRINCIPAL', status: 'ACTIVE', membership: { status: 'ACTIVE' } };
 
 // A Principal now or before, whatever became of them: ENDED by a handover (ADR-0008) or
 // by the Governing Body (ticket 08), or ACTIVE on a membership that has ended, which
@@ -84,7 +82,7 @@ const principalOf = (client, where) => client.membershipRole.findFirst({ where, 
 
 // Whether a School has a Principal now, read in its own scope.
 const hasPrincipalAt = (school) =>
-    runInSchool(school.id, school.name, async () => Boolean(await principalOf(prisma, ACTIVE_PRINCIPAL)));
+    runInSchool(school.id, school.name, async () => Boolean(await principalOf(prisma, SITTING_PRINCIPAL)));
 
 // Whether a School has ever had one, read in its own scope.
 const hasHadPrincipalAt = (school) =>
@@ -231,8 +229,9 @@ async function fixSchool(auth, id, patch) {
         try {
             await prisma.$transaction(async (tx) => {
                 // A claim on the row as it was read, which also holds it until the commit.
-                // A fix made meanwhile moved updatedAt, and so will a Principal's approval:
-                // ticket 06 takes the School row as its lock (lockSchool in membership).
+                // A fix made meanwhile moved updatedAt, and so will a Principal application or
+                // its approval: ticket 06 takes the School row as its lock (lockSchool in
+                // membership).
                 const claimed = await tx.school.updateMany({
                     where: { id: school.id, governingBodyId: auth.governingBodyId, updatedAt: school.updatedAt },
                     data: next,

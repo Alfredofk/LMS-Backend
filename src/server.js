@@ -32,6 +32,7 @@ import governingBodyRegistrationRoutes, {
     adminRegistrationRouter as adminGoverningBodyRegistrationRoutes,
     adminBodyRouter as adminGoverningBodyRoutes,
     applicationRouter as governingBodyApplicationRoutes,
+    principalApplicationRouter as principalApplicationRoutes,
     seatRouter as governingBodyRoutes,
 } from './modules/governingBody/governingBody.routes.js';
 import { generalLimiter } from './shared/rateLimit.js';
@@ -99,6 +100,7 @@ app.use('/api/governing-body-registrations', governingBodyRegistrationRoutes);
 app.use('/api/admin/governing-body-registrations', adminGoverningBodyRegistrationRoutes);
 app.use('/api/admin/governing-bodies', adminGoverningBodyRoutes);
 app.use('/api/governing-body-applications', governingBodyApplicationRoutes);
+app.use('/api/principal-applications', principalApplicationRoutes);
 app.use('/api/governing-body', governingBodyRoutes);
 app.use('/api/memberships', membershipRoutes);
 app.use('/api/membership-requests', membershipReviewRoutes);

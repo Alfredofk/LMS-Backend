@@ -46,6 +46,37 @@ async function hasLiveSeat(client, userId) {
     return Boolean(seat);
 }
 
+// Whether a person has asked to head a Governing Body's School and waits for the answer
+// (governing-body ticket 06). An application counts as asking for a membership: its
+// approval makes one. Above tenancy too.
+async function hasWaitingPrincipalApplication(client, userId) {
+    const application = await client.principalApplication.findFirst({
+        where: { userId, status: 'PENDING' },
+        select: { id: true },
+    });
+    return Boolean(application);
+}
+
+// What a STUDENT request is refused for beyond the memberships: holding or asking for
+// something above the Schools. Worded for the applicant (you) and for the reviewer
+// (they), never naming where.
+const ABOVE_SCHOOLS = {
+    seat: {
+        you: 'You are an admin of a governing body, or have asked to be one',
+        they: 'This applicant is an admin of a governing body, or has asked to be one',
+    },
+    application: {
+        you: 'You have applied to be the Principal of a school',
+        they: 'This applicant has applied to be the Principal of a school',
+    },
+};
+
+async function standingAboveSchoolsOf(client, userId) {
+    if (await hasLiveSeat(client, userId)) return ABOVE_SCHOOLS.seat;
+    if (await hasWaitingPrincipalApplication(client, userId)) return ABOVE_SCHOOLS.application;
+    return null;
+}
+
 // Whether a person is a Student anywhere, or has asked to be. A School Registration
 // is refused to them (school.service.js): founding a school makes its founder its
 // Principal.
@@ -74,11 +105,9 @@ async function assertMayJoin(userId, schoolId, roles = []) {
             'A student belongs to one school only. You already belong to a school, or have asked to join one'
         );
     }
-    if (roles.includes('STUDENT') && (await hasLiveSeat(prisma, userId))) {
-        throw conflict(
-            'A student belongs to one school only. You are an admin of a governing body, or have asked to be one'
-        );
-    }
+    if (!roles.includes('STUDENT')) return;
+    const above = await standingAboveSchoolsOf(prisma, userId);
+    if (above) throw conflict(`A student belongs to one school only. ${above.you}`);
 }
 
 // The Student rule again at approval, inside the decision's transaction. Two
@@ -91,12 +120,8 @@ async function assertMayJoin(userId, schoolId, roles = []) {
 async function assertStudentAlone(tx, { userId, membershipId, releasing }) {
     const others = (await liveMembershipsOf(tx, userId)).filter((membership) => membership.id !== membershipId);
     const asStudent = releasing.includes('STUDENT');
-    if (asStudent && (await hasLiveSeat(tx, userId))) {
-        throw conflict(
-            'This applicant is an admin of a governing body, or has asked to be one, and a student ' +
-                'belongs to one school only'
-        );
-    }
+    const above = asStudent ? await standingAboveSchoolsOf(tx, userId) : null;
+    if (above) throw conflict(`${above.they}, and a student belongs to one school only`);
     const clash = asStudent ? others.length > 0 : others.some(holdsStudent);
     if (!clash) return;
 

@@ -178,6 +178,17 @@ enum ApprovalAction {
     UPDATE_SCHOOL
 }
 
+/// Where an application stands (governing-body ticket 06): a one-shot request, decided once
+/// or taken back. Not RegistrationStatus, which has no CANCELLED, and not MembershipStatus,
+/// whose ACTIVE and LEFT belong to something that lives on after its approval.
+enum ApplicationStatus {
+    PENDING
+    APPROVED
+    REJECTED
+    /// Taken back by the applicant before a decision, or closed by their account's deletion.
+    CANCELLED
+}
+
 /// What a Governing Body is (governing-body spec, K1): UU Sisdiknas's *penyelenggara
 /// pendidikan*, the body that runs a school.
 enum GoverningBodyKind {
@@ -222,6 +233,8 @@ model User {
     governingBodyRegistrations GoverningBodyRegistration[] @relation("GoverningBodyRegistrationApplicant")
     governingBodySeats     GoverningBodyAdmin[]
     schoolRegistrations    SchoolRegistration[]     @relation("RegistrationApplicant")
+    principalApplications  PrincipalApplication[]   @relation("PrincipalApplicant")
+    principalApplicationsDecided PrincipalApplication[] @relation("PrincipalApplicationDecider")
 
     @@index([deletedAt])
 }
@@ -637,6 +650,41 @@ model SchoolRegistration {
     @@index([applicantUserId])
 }
 
+/// A person asking to head a Governing Body's School that has no Principal (governing-body
+/// ticket 06, K8). They enter the School's own code, which the body handed them, with their
+/// KTP and phone, and any admin of the body decides. Approval makes them its ACTIVE Principal
+/// and rejects the others still pending for that School.
+///
+/// Above tenancy, as a School Registration is (owner, 2026-10-25): the applicant holds no
+/// membership there, and the body's admins read it through their own seat. schoolId is a plain
+/// column, as HandoffCode's is, never the tenant filter. One PENDING per person per School, by
+/// a partial index in partial-indexes.sql.
+///
+/// ktpStoragePath is nulled and the file deleted on every decision, an automatic rejection and
+/// a cancel included (UU PDP 27/2022).
+model PrincipalApplication {
+    id              String            @id @default(cuid())
+    schoolId        String
+    userId          String
+    applicantPhone  String
+    ktpStoragePath  String?
+    status          ApplicationStatus @default(PENDING)
+    /// The admin who approved or rejected it - for an automatic rejection, the one whose
+    /// approval of another applicant closed it. Null while pending and for a cancel.
+    decidedByUserId String?
+    decidedAt       DateTime?
+    rejectionReason String?
+    createdAt       DateTime          @default(now())
+    updatedAt       DateTime          @updatedAt
+
+    school    School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    applicant User   @relation("PrincipalApplicant", fields: [userId], references: [id])
+    decidedBy User?  @relation("PrincipalApplicationDecider", fields: [decidedByUserId], references: [id])
+
+    @@index([schoolId, status])
+    @@index([userId])
+}
+
 /// The tenancy boundary. Cannot be filtered by schoolId because it defines it.
 model School {
     id            String     @id @default(cuid())
@@ -696,6 +744,7 @@ model School {
     deactivatedBy  PlatformAdmin?      @relation("SchoolDeactivatedBy", fields: [deactivatedByAdminId], references: [id])
     governingBody  GoverningBody?      @relation(fields: [governingBodyId], references: [id], onDelete: SetNull)
     registration   SchoolRegistration?
+    principalApplications PrincipalApplication[]
     memberships    SchoolMembership[]
     membershipRoles MembershipRole[]
     studentProfiles StudentProfile[]

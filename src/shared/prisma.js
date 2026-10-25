@@ -28,6 +28,10 @@ const UNSCOPED_MODELS = new Set([
     'GoverningBodyRegistration',
     'GoverningBody',
     'GoverningBodyAdmin',
+    // A Principal's application to a body's School (governing-body ticket 06): the
+    // applicant holds no membership there, as a School Registration's holds none. Its
+    // schoolId names the School applied to; the body's admins read it by their seat.
+    'PrincipalApplication',
     'SchoolRegistration',
     'School',
     'NationalHoliday',

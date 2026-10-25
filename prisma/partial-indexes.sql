@@ -102,3 +102,10 @@ CREATE UNIQUE INDEX "SlotFinalisation_one_live_per_slot"
 CREATE UNIQUE INDEX "GoverningBodyAdmin_one_live_per_user_per_body"
     ON "GoverningBodyAdmin" ("userId", "governingBodyId")
     WHERE "status" IN ('PENDING', 'ACTIVE');
+
+-- One Principal application waiting per person per School (governing-body ticket 06). A
+-- decided or cancelled one must repeat, so one turned down may ask again under the cap of
+-- three a day - added in 20261024182655_add_principal_applications.
+CREATE UNIQUE INDEX "PrincipalApplication_one_pending_per_user_per_school"
+    ON "PrincipalApplication" ("userId", "schoolId")
+    WHERE "status" = 'PENDING';

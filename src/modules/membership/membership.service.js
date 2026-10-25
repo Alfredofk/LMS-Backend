@@ -169,6 +169,7 @@ function requestView(membership, releasable = [], links = []) {
 // School is exempt from the tenant extension (it defines the tenant), so this
 // reads without any scope. A code that resolves to nothing is a 404 with the same
 // wording whatever went wrong - a code either locates a school or it does not.
+// governingBody's application route reads it too (governing-body ticket 06).
 async function resolveSchool(schoolCode) {
     const school = await prisma.school.findUnique({
         where: { schoolCode },
@@ -178,6 +179,8 @@ async function resolveSchool(schoolCode) {
             schoolType: true,
             durationYears: true,
             city: true,
+            governingBodyId: true,
+            governingBody: { select: { name: true } },
             deactivatedAt: true,
         },
     });
@@ -206,11 +209,37 @@ async function assertEligibleApplicant(userId) {
     return user;
 }
 
+// A Principal sitting now: the role ACTIVE, on an ACTIVE membership. A LEFT
+// membership keeps its roles as history (ApprovalStatus in schema.prisma).
+const SITTING_PRINCIPAL = { role: 'PRINCIPAL', status: 'ACTIVE', membership: { status: 'ACTIVE' } };
+
+// A Governing Body's School with no Principal sitting (governing-body ticket 06, K8 as
+// changed 2026-10-24). Its code takes an application to head it, and nothing else: a
+// Teacher's or a Student's request would have nobody to release it. An independent
+// School keeps today's path, its Principal coming from its registration or a Platform
+// Admin's appointment. Read in the School's own scope.
+async function isAwaitingPrincipal(school) {
+    if (!school.governingBodyId) return false;
+    return runInSchool(school.id, school.name, async () =>
+        !(await prisma.membershipRole.findFirst({ where: SITTING_PRINCIPAL, select: { id: true } }))
+    );
+}
+
+const NO_PRINCIPAL_YET =
+    'This school has no Principal yet, so its code takes only an application to be its Principal';
+
+// What the code shows, and since governing-body ticket 06 which form it opens:
+// principalWanted is true where only a Principal's application is taken, and
+// governingBody names the body above the School, which handed out the code.
 async function lookupSchool(userId, { schoolCode }) {
     await assertEligibleApplicant(userId);
     const school = await resolveSchool(schoolCode);
     await assertMayJoin(userId, school.id);
-    return publicSchoolView(school);
+    return {
+        ...publicSchoolView(school),
+        principalWanted: await isAwaitingPrincipal(school),
+        governingBody: school.governingBody ? { name: school.governingBody.name } : null,
+    };
 }
 
 // A guardian gives a phone number the school can reach them on (ticket 23, owner
@@ -282,6 +311,7 @@ async function requestJoin(userId, body) {
     const school = await resolveSchool(body.schoolCode);
     const roles = assertRoleCombinationAllowed(body.roles);
     await assertMayJoin(userId, school.id, roles);
+    if (await isAwaitingPrincipal(school)) throw conflict(NO_PRINCIPAL_YET);
     assertGuardianPhone(roles, body.guardian, account);
 
     // The grade has to exist at this type of school: there is no grade 7 at an SD.
@@ -1306,7 +1336,11 @@ const HANDED_OVER = 'Handed the school over to a new Principal';
 const NO_SUCH_TEACHER = 'No active teacher of this school uses that email';
 
 // Only one appointment at a time per school: the School row is the lock, so two
-// hand-overs or two admins cannot each leave a Principal behind.
+// hand-overs or two admins cannot each leave a Principal behind. A Governing Body's
+// approval of a Principal application takes it too (governing-body ticket 06), and so
+// does a submission, so none is left waiting behind an approval (owner, 2026-10-25).
+// Moving updatedAt is what makes the body's fix of the School's data (ticket 05),
+// claimed by the updatedAt it read, lose to either.
 const lockSchool = (tx, schoolId, now) =>
     tx.school.updateMany({ where: { id: schoolId }, data: { updatedAt: now } });
 
@@ -2592,6 +2626,10 @@ export {
     CHILD_NO_MATCH,
     normalizeName,
     assertEligibleApplicant,
+    resolveSchool,
+    SITTING_PRINCIPAL,
+    isAwaitingPrincipal,
+    lockSchool,
     lookupSchool,
     requestJoin,
     addRoles,
