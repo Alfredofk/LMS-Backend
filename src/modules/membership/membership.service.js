@@ -1624,7 +1624,11 @@ async function handOverPrincipal(auth, membershipId, { stay, teacher }) {
 // caller opens it). For a Principal who cannot hand over - unreachable, gone, or
 // a school restored without one. Whoever held PRINCIPAL loses it; one holding
 // another role stays, one holding nothing else is removed with the admin's reason.
-async function appointPrincipal({ schoolId, email, reason, adminUserId }) {
+// alongside, when given, is the caller's own work that must land in this transaction,
+// under the School's lock, given the transaction and the time: since governing-body
+// ticket 06b, closing the Principal Applications waiting there. Taking it as a
+// parameter keeps this module from importing the one that owns them.
+async function appointPrincipal({ schoolId, email, reason, adminUserId, alongside }) {
     // User is above tenancy; the membership lookup below is this school's alone.
     const user = await prisma.user.findUnique({
         where: { email },
@@ -1672,6 +1676,7 @@ async function appointPrincipal({ schoolId, email, reason, adminUserId }) {
             reason,
             client: tx,
         });
+        if (alongside) await alongside(tx, now);
     });
 
     return { principal: { membershipId: successor.id, fullName: successor.user.fullName }, previous };

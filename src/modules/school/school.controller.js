@@ -174,10 +174,42 @@ async function listSchools(req, res) {
     return ok(res, await service.listSchools(req.validated.query));
 }
 
+// ---- platform admin: a School by its own id (governing-body ticket 06b) -------
+
+async function deactivateById(req, res) {
+    const school = await service.deactivateSchoolById(req.validated.params.id, {
+        ...reviewer(req),
+        reason: req.validated.body.reason,
+    });
+    return ok(res, { school, message: 'Deactivated. Every member has lost access; nothing was deleted.' });
+}
+
+async function reactivateById(req, res) {
+    const school = await service.reactivateSchoolById(req.validated.params.id, {
+        ...reviewer(req),
+        reason: req.validated.body.reason,
+    });
+    return ok(res, { school, message: 'Reactivated. Members have to sign in again.' });
+}
+
+async function appointPrincipalById(req, res) {
+    const result = await service.appointPrincipalById(req.validated.params.id, {
+        ...reviewer(req),
+        ...req.validated.body,
+    });
+    return ok(res, {
+        ...result,
+        message: `${result.principal.fullName} is the Principal of ${result.school.name} now.`,
+    });
+}
+
 export {
     resolvePlace,
     changeSubdomain,
     listSchools,
+    deactivateById,
+    reactivateById,
+    appointPrincipalById,
     submit,
     listMine,
     list,

@@ -67,9 +67,9 @@ adminRouter.post(
     controller.reject
 );
 // Keyed on the registration, not the school, because that is the row the admin
-// screen is holding - and because a school founded any other way has no
-// registration to reach it through. If schools ever arrive by another route, this
-// needs a sibling at /api/admin/schools/:id.
+// screen is holding. A school founded any other way has no registration to reach
+// it through: a Governing Body's (ticket 05) is reached by its siblings at
+// /api/admin/schools/:id, below (governing-body ticket 06b).
 adminRouter.post(
     '/:id/deactivate',
     validate({ params: idParams, body: deactivateBody }),
@@ -116,7 +116,10 @@ memberRouter.delete('/logo', controller.removeLogo);
 //
 // The Platform Admin's, mounted at /api/admin/schools: keyed by the School, not
 // the registration, since a Governing Body's Schools (ticket 05) have none. Ticket 05
-// adds the list of every School, independent or a body's.
+// adds the list of every School, independent or a body's. Ticket 06b adds the brake
+// on any School (the spec's K10'): deactivating, reactivating, and appointing a
+// Principal - at a Governing Body's School only while its body is deactivated, which
+// the service answers with 409 otherwise.
 const placesRouter = Router();
 
 placesRouter.get('/:subdomain', validate({ params: subdomainParams }), controller.resolvePlace);
@@ -130,6 +133,21 @@ adminSchoolRouter.patch(
     '/:id/subdomain',
     validate({ params: idParams, body: subdomainBody }),
     controller.changeSubdomain
+);
+adminSchoolRouter.post(
+    '/:id/deactivate',
+    validate({ params: idParams, body: deactivateBody }),
+    controller.deactivateById
+);
+adminSchoolRouter.post(
+    '/:id/reactivate',
+    validate({ params: idParams, body: reactivateBody }),
+    controller.reactivateById
+);
+adminSchoolRouter.post(
+    '/:id/principal',
+    validate({ params: idParams, body: appointPrincipalBody }),
+    controller.appointPrincipalById
 );
 
 export default router;

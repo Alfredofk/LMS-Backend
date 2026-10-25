@@ -42,6 +42,9 @@ const log = createLogger('GoverningBody');
 //   approval gives its founder; teaching is asked for afterwards. The others waiting for
 //   that School are rejected on their own (SCHOOL_HAS_PRINCIPAL). One Principal per School
 //   (ADR-0008) holds under lockSchool, so of two approvals at once the second gets 409.
+// - A Platform Admin's appointment at a body's School, allowed while the body is
+//   deactivated (ticket 06b, K10'), closes the applications waiting there too, in its
+//   own transaction (closeWaitingApplications, shared with the approval).
 // - A submission takes the same lock (owner, 2026-10-25, option A). Without it, one sent
 //   while another applicant was approved was left waiting at a School that has its
 //   Principal: 7 of 10 rounds in the probe. Now it lands before the approval, which closes
@@ -325,6 +328,46 @@ async function readKtp(auth, id) {
     return { buffer, contentType: MIME[key.endsWith('.png') ? 'png' : 'jpg'] };
 }
 
+// The applications still waiting for a School that has its Principal now, in the
+// transaction that made them one and under the School's lock: an admin's approval here,
+// or a Platform Admin's appointment (governing-body ticket 06b). Each is claimed on its
+// own out of PENDING and rejected with SCHOOL_HAS_PRINCIPAL, decided and audited by the
+// one who made the Principal. One its applicant cancelled a moment ago is left as it is,
+// unaudited here. Returns the KTPs it closed, for the caller to discard after the commit.
+async function closeWaitingApplications(tx, { schoolId, actorUserId, now }) {
+    const waiting = await tx.principalApplication.findMany({
+        where: { schoolId, status: 'PENDING' },
+        select: { id: true, ktpStoragePath: true },
+    });
+
+    const keys = [];
+    for (const application of waiting) {
+        const closed = await tx.principalApplication.updateMany({
+            where: { id: application.id, status: 'PENDING' },
+            data: {
+                status: 'REJECTED',
+                rejectionReason: SCHOOL_HAS_PRINCIPAL,
+                decidedByUserId: actorUserId,
+                decidedAt: now,
+                ktpStoragePath: null,
+            },
+        });
+        if (closed.count === 0) continue;
+
+        await recordAudit({
+            schoolId,
+            subjectType: SUBJECT,
+            subjectId: application.id,
+            action: 'REJECT',
+            actorUserId,
+            reason: SCHOOL_HAS_PRINCIPAL,
+            client: tx,
+        });
+        keys.push(application.ktpStoragePath);
+    }
+    return keys;
+}
+
 // POST /api/governing-body/principal-applications/:id/approve, for any admin. In one
 // transaction in the School's scope, under the School's lock: no Principal sitting (409),
 // the claim out of PENDING, the applicant's ACTIVE membership with PRINCIPAL alone, the
@@ -387,39 +430,13 @@ async function approveApplication(auth, id) {
                     client: tx,
                 });
 
-                // The others waiting for this School, each claimed on its own: one its
-                // applicant cancelled a moment ago is left as it is, unaudited here.
-                const others = await tx.principalApplication.findMany({
-                    where: { schoolId: school.id, status: 'PENDING', id: { not: application.id } },
-                    select: { id: true, ktpStoragePath: true },
+                // The others waiting for this School; the approved one is out of PENDING.
+                const others = await closeWaitingApplications(tx, {
+                    schoolId: school.id,
+                    actorUserId: auth.userId,
+                    now,
                 });
-                const keys = [application.ktpStoragePath];
-                for (const other of others) {
-                    const closed = await tx.principalApplication.updateMany({
-                        where: { id: other.id, status: 'PENDING' },
-                        data: {
-                            status: 'REJECTED',
-                            rejectionReason: SCHOOL_HAS_PRINCIPAL,
-                            decidedByUserId: auth.userId,
-                            decidedAt: now,
-                            ktpStoragePath: null,
-                        },
-                    });
-                    if (closed.count === 0) continue;
-
-                    await recordAudit({
-                        schoolId: school.id,
-                        subjectType: SUBJECT,
-                        subjectId: other.id,
-                        action: 'REJECT',
-                        actorUserId: auth.userId,
-                        reason: SCHOOL_HAS_PRINCIPAL,
-                        client: tx,
-                    });
-                    keys.push(other.ktpStoragePath);
-                }
-
-                return keys;
+                return [application.ktpStoragePath, ...others];
             })
         );
     } catch (error) {
@@ -526,6 +543,7 @@ export {
     readKtp,
     approveApplication,
     rejectApplication,
+    closeWaitingApplications,
     cancelOnDeletion,
     discardKtps,
 };

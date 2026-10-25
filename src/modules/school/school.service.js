@@ -16,6 +16,7 @@ import { AppError, conflict, forbidden, notFound } from '../../shared/errors.js'
 import { createLogger } from '../../lib/helpers.js';
 import * as membershipService from '../membership/membership.service.js';
 import { isStudentAnywhere } from '../membership/membership.eligibility.js';
+import { closeWaitingApplications, discardKtps } from '../governingBody/governingBody.principals.js';
 import { freeSubdomainOf } from './school.subdomain.js';
 import { onTimeZoneChanged } from '../sessions/sessions.service.js';
 
@@ -587,8 +588,9 @@ async function rejectRegistration(id, { adminId, adminUserId, reason }) {
 
 // The Platform Admin's list of Schools (governing-body ticket 05, owner 2026-10-24). It
 // reads Schools, not registrations: a Governing Body's School has none, so the queue
-// never shows it. Each row names its body (K11) and its registration, null for a body's,
-// since today's deactivation and appointment are keyed by the registration.
+// never shows it. Each row names its body (K11) and its registration, null for a body's.
+// Since ticket 06b the Platform Admin deactivates, reactivates and appoints through the
+// School's own id as well, and those routes answer with this row.
 const schoolListSelect = {
     id: true,
     npsn: true,
@@ -611,6 +613,13 @@ const schoolListView = ({ governingBody, registration, ...school }) => ({
     governingBody: governingBody ?? null,
     registrationId: registration?.id ?? null,
 });
+
+// One School by its id, as the list shows it (governing-body ticket 06b).
+async function loadListedSchool(id) {
+    const school = await prisma.school.findUnique({ where: { id }, select: schoolListSelect });
+    if (!school) throw notFound('School not found');
+    return school;
+}
 
 const SCHOOL_ORDER = {
     name: [{ name: 'asc' }, { id: 'asc' }],
@@ -663,8 +672,10 @@ async function listSchools(filters) {
 // Withdrawing a school's access - and giving it back
 // ---------------------------------------------------------------------------
 
-// Deactivation, keyed by the registration because that is the row the admin is
-// looking at. Only an APPROVED one has a school to switch off.
+// Deactivation. The Platform Admin reaches a School through its registration, the row
+// the queue holds, or through its own id, which every School has (governing-body ticket
+// 06b, the spec's K10': a Governing Body's School has no registration, and the brake
+// must reach it). Both come to withdrawAccess.
 //
 // What it does, and does not do:
 // - `School.deactivatedAt` is set, with the reason and the admin who decided.
@@ -682,9 +693,64 @@ async function listSchools(filters) {
 // - **Nothing is deleted, and no membership changes.** Ending memberships is
 //   leaving, which is ADR-0004 and ticket 06; a school that comes back should find
 //   its people still in it.
-async function deactivateSchool(id, { adminId, adminUserId, reason }) {
-    assertRejectionReason('DEACTIVATE', reason);
+//
+// Runs unscoped, opened by the caller: the sign-ins it cuts span schools.
+async function withdrawAccess(school, { adminId, adminUserId, reason }) {
+    if (school.deactivatedAt) throw conflict('This school is already deactivated');
+
     const trimmed = reason.trim();
+    const schoolId = school.id;
+    const now = new Date();
+
+    const cutSessions = await prisma.$transaction(async (tx) => {
+        // Claimed the same way a registration decision is: two admins clicking
+        // together both pass the read above, and only one moves the row.
+        const claimed = await tx.school.updateMany({
+            where: { id: schoolId, deactivatedAt: null },
+            data: {
+                deactivatedAt: now,
+                deactivationReason: trimmed,
+                deactivatedByAdminId: adminId,
+            },
+        });
+        if (claimed.count === 0) throw conflict('This school is already deactivated');
+
+        const members = await tx.schoolMembership.findMany({
+            where: { schoolId, status: 'ACTIVE' },
+            select: { userId: true },
+        });
+        const userIds = [...new Set(members.map((entry) => entry.userId))];
+
+        const revoked = await tx.refreshToken.updateMany({
+            where: {
+                revokedAt: null,
+                OR: [{ schoolId }, { schoolId: null, userId: { in: userIds } }],
+            },
+            data: { revokedAt: now },
+        });
+
+        await recordAudit({
+            schoolId,
+            subjectType: SCHOOL_SUBJECT,
+            subjectId: schoolId,
+            action: 'DEACTIVATE',
+            actorUserId: adminUserId,
+            reason: trimmed,
+            client: tx,
+        });
+
+        return revoked.count;
+    });
+
+    log.info(
+        `School deactivated: ${school.name} (${school.npsn}) - ` +
+            `${cutSessions} session(s) revoked. Reason: ${trimmed}`
+    );
+}
+
+// Keyed by the registration: only an APPROVED one has a school to switch off.
+async function deactivateSchool(id, reviewer) {
+    assertRejectionReason('DEACTIVATE', reviewer.reason);
 
     return runUnscoped('a platform admin withdrawing a whole school access', async () => {
         const registration = await loadRegistration(id);
@@ -694,59 +760,20 @@ async function deactivateSchool(id, { adminId, adminUserId, reason }) {
                 status: registration.status,
             });
         }
-        if (registration.createdSchool?.deactivatedAt) {
-            throw conflict('This school is already deactivated');
-        }
 
-        const schoolId = registration.createdSchoolId;
-        const now = new Date();
-
-        const cutSessions = await prisma.$transaction(async (tx) => {
-            // Claimed the same way a registration decision is: two admins clicking
-            // together both pass the read above, and only one moves the row.
-            const claimed = await tx.school.updateMany({
-                where: { id: schoolId, deactivatedAt: null },
-                data: {
-                    deactivatedAt: now,
-                    deactivationReason: trimmed,
-                    deactivatedByAdminId: adminId,
-                },
-            });
-            if (claimed.count === 0) throw conflict('This school is already deactivated');
-
-            const members = await tx.schoolMembership.findMany({
-                where: { schoolId, status: 'ACTIVE' },
-                select: { userId: true },
-            });
-            const userIds = [...new Set(members.map((entry) => entry.userId))];
-
-            const revoked = await tx.refreshToken.updateMany({
-                where: {
-                    revokedAt: null,
-                    OR: [{ schoolId }, { schoolId: null, userId: { in: userIds } }],
-                },
-                data: { revokedAt: now },
-            });
-
-            await recordAudit({
-                schoolId,
-                subjectType: SCHOOL_SUBJECT,
-                subjectId: schoolId,
-                action: 'DEACTIVATE',
-                actorUserId: adminUserId,
-                reason: trimmed,
-                client: tx,
-            });
-
-            return revoked.count;
-        });
-
-        log.info(
-            `School deactivated: ${registration.schoolName} (${registration.npsn}) - ` +
-                `${cutSessions} session(s) revoked. Reason: ${trimmed}`
-        );
-
+        await withdrawAccess(await loadListedSchool(registration.createdSchoolId), reviewer);
         return getRegistration(id);
+    });
+}
+
+// POST /api/admin/schools/:id/deactivate: keyed by the School, any School, a Governing
+// Body's included (governing-body ticket 06b). Answers the School as the list shows it.
+async function deactivateSchoolById(id, reviewer) {
+    assertRejectionReason('DEACTIVATE', reviewer.reason);
+
+    return runUnscoped('a platform admin withdrawing a whole school access', async () => {
+        await withdrawAccess(await loadListedSchool(id), reviewer);
+        return schoolListView(await loadListedSchool(id));
     });
 }
 
@@ -759,48 +786,57 @@ async function deactivateSchool(id, { adminId, adminUserId, reason }) {
 // the way out, and reactivating does not un-revoke them. That is deliberate. A revoked token
 // coming back to life is exactly the shape of a replay, and auth.service.js treats
 // it as theft.
-async function reactivateSchool(id, { adminUserId, reason }) {
-    const note = reason?.trim() ? reason.trim() : null;
+async function restoreAccess(school, { adminUserId, reason }) {
+    if (!school.deactivatedAt) throw conflict('This school is not deactivated');
 
+    const note = reason?.trim() ? reason.trim() : null;
+    const schoolId = school.id;
+
+    await prisma.$transaction(async (tx) => {
+        const claimed = await tx.school.updateMany({
+            where: { id: schoolId, deactivatedAt: { not: null } },
+            data: {
+                deactivatedAt: null,
+                deactivationReason: null,
+                deactivatedByAdminId: null,
+            },
+        });
+        if (claimed.count === 0) throw conflict('This school is not deactivated');
+
+        // The reason is cleared from the row, not from the record: why a school
+        // was switched off lives in ApprovalAudit, which is append-only
+        // (ADR-0003). Leaving a stale reason on a running school would be worse
+        // than losing it - it reads as current.
+        await recordAudit({
+            schoolId,
+            subjectType: SCHOOL_SUBJECT,
+            subjectId: schoolId,
+            action: 'REACTIVATE',
+            actorUserId: adminUserId,
+            reason: note,
+            client: tx,
+        });
+    });
+
+    log.success(`School reactivated: ${school.name} (${school.npsn})`);
+}
+
+// Keyed by the registration.
+async function reactivateSchool(id, reviewer) {
     return runUnscoped('a platform admin restoring a school access', async () => {
         const registration = await loadRegistration(id);
-
         if (!registration.createdSchoolId) throw notFound('This registration has no school');
-        if (!registration.createdSchool?.deactivatedAt) {
-            throw conflict('This school is not deactivated');
-        }
 
-        const schoolId = registration.createdSchoolId;
-
-        await prisma.$transaction(async (tx) => {
-            const claimed = await tx.school.updateMany({
-                where: { id: schoolId, deactivatedAt: { not: null } },
-                data: {
-                    deactivatedAt: null,
-                    deactivationReason: null,
-                    deactivatedByAdminId: null,
-                },
-            });
-            if (claimed.count === 0) throw conflict('This school is not deactivated');
-
-            // The reason is cleared from the row, not from the record: why a school
-            // was switched off lives in ApprovalAudit, which is append-only
-            // (ADR-0003). Leaving a stale reason on a running school would be worse
-            // than losing it - it reads as current.
-            await recordAudit({
-                schoolId,
-                subjectType: SCHOOL_SUBJECT,
-                subjectId: schoolId,
-                action: 'REACTIVATE',
-                actorUserId: adminUserId,
-                reason: note,
-                client: tx,
-            });
-        });
-
-        log.success(`School reactivated: ${registration.schoolName} (${registration.npsn})`);
-
+        await restoreAccess(await loadListedSchool(registration.createdSchoolId), reviewer);
         return getRegistration(id);
+    });
+}
+
+// POST /api/admin/schools/:id/reactivate: keyed by the School (governing-body ticket 06b).
+async function reactivateSchoolById(id, reviewer) {
+    return runUnscoped('a platform admin restoring a school access', async () => {
+        await restoreAccess(await loadListedSchool(id), reviewer);
+        return schoolListView(await loadListedSchool(id));
     });
 }
 
@@ -931,11 +967,46 @@ async function updateSchoolTimeZone(auth, { timeZone }) {
     return schoolView(school);
 }
 
-// A Platform Admin appointing a school's Principal (owner, 2026-09-27), keyed by
-// the registration like deactivation, because that is the row the admin screen
-// holds. Works on a deactivated school too: one restored without a Principal
+// A Platform Admin appointing a school's Principal (owner, 2026-09-27), through its
+// registration, the row the queue holds, or since governing-body ticket 06b through
+// its own id. Works on a deactivated school too: one restored without a Principal
 // needs this before anyone can run it.
-async function appointPrincipal(id, { adminUserId, email, reason }) {
+//
+// A Governing Body's School takes one only while its body is deactivated (the spec's
+// K10'). While the body runs, the body appoints, through a Principal Application
+// (ticket 06). The applications still waiting there close in the appointment's
+// transaction, as an approval closes them, and their KTPs go after the commit.
+const BODY_APPOINTS = 'Its governing body appoints its Principal';
+
+// What an appointment reads of its School: its name for the scope, and its body's state.
+const appointedSchoolSelect = { id: true, name: true, governingBody: { select: { deactivatedAt: true } } };
+
+async function appointPrincipalAt(school, { adminUserId, email, reason }) {
+    if (school.governingBody && !school.governingBody.deactivatedAt) throw conflict(BODY_APPOINTS);
+
+    let closedKeys = [];
+    const result = await runInSchool(school.id, school.name, () =>
+        membershipService.appointPrincipal({
+            schoolId: school.id,
+            email,
+            reason,
+            adminUserId,
+            alongside: async (tx, now) => {
+                closedKeys = await closeWaitingApplications(tx, { schoolId: school.id, actorUserId: adminUserId, now });
+            },
+        })
+    );
+
+    await discardKtps(closedKeys);
+    log.info(
+        `A Principal was appointed at ${school.name} by a platform admin; ` +
+            `${closedKeys.length} application(s) waiting there closed`
+    );
+    return result;
+}
+
+// Keyed by the registration.
+async function appointPrincipal(id, reviewer) {
     const registration = await runUnscoped('a platform admin appointing a Principal', async () =>
         await loadRegistration(id)
     );
@@ -947,15 +1018,22 @@ async function appointPrincipal(id, { adminUserId, email, reason }) {
 
     const school = await prisma.school.findUnique({
         where: { id: registration.createdSchoolId },
-        select: { id: true, name: true },
+        select: appointedSchoolSelect,
     });
 
-    const result = await runInSchool(school.id, school.name, () =>
-        membershipService.appointPrincipal({ schoolId: school.id, email, reason, adminUserId })
-    );
+    const result = await appointPrincipalAt(school, reviewer);
+    return { school: { id: school.id, name: school.name }, ...result };
+}
 
-    log.info(`A Principal was appointed at ${school.name} by a platform admin`);
-    return { school, ...result };
+// POST /api/admin/schools/:id/principal: keyed by the School, any School, a Governing
+// Body's included (governing-body ticket 06b). Answers the School as the list shows it,
+// with the Principal and the ones before.
+async function appointPrincipalById(id, reviewer) {
+    const school = await prisma.school.findUnique({ where: { id }, select: appointedSchoolSelect });
+    if (!school) throw notFound('School not found');
+
+    const result = await appointPrincipalAt(school, reviewer);
+    return { school: schoolListView(await loadListedSchool(id)), ...result };
 }
 
 export {
@@ -975,8 +1053,11 @@ export {
     approveRegistration,
     rejectRegistration,
     deactivateSchool,
+    deactivateSchoolById,
     reactivateSchool,
+    reactivateSchoolById,
     appointPrincipal,
+    appointPrincipalById,
     rotateSchoolCode,
     updateSchoolLocation,
     updateSchoolTimeZone,
