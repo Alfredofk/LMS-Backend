@@ -697,9 +697,14 @@ async function listSchools(filters) {
 // Runs unscoped, opened by the caller: the sign-ins it cuts span schools. Since
 // governing-body ticket 08 a Governing Body's admin switches off its own School through it
 // too, with adminId null: deactivatedByAdminId then says the body did, and only a
-// Platform Admin's deactivation is one the body may not undo.
+// Platform Admin's deactivation is one the body may not undo. A Platform Admin braking a
+// School its body has already switched off takes that deactivation over
+// (takeOverDeactivation).
 async function withdrawAccess(school, { adminId = null, adminUserId, reason }) {
-    if (school.deactivatedAt) throw conflict('This school is already deactivated');
+    if (school.deactivatedAt) {
+        if (adminId) return takeOverDeactivation(school, { adminId, adminUserId, reason });
+        throw conflict('This school is already deactivated');
+    }
 
     const trimmed = reason.trim();
     const schoolId = school.id;
@@ -751,6 +756,38 @@ async function withdrawAccess(school, { adminId = null, adminUserId, reason }) {
     );
 }
 
+// A Platform Admin deactivating a School its Governing Body has already switched off
+// (governing-body ticket 08, owner 2026-10-26, option B): the deactivation becomes the
+// Platform Admin's, deactivatedByAdminId and its reason, so the body can no longer undo
+// it. Before, the 409 "already deactivated" read as the brake being on when it was not,
+// and the way round - reactivate, then deactivate - left the School running between the
+// two. It stays off throughout: deactivatedAt keeps the body's moment, and its sign-ins
+// were cut then. The claim is the rule: one a Platform Admin already holds is the same
+// 409 as ever. The body's reason stays in ApprovalAudit.
+async function takeOverDeactivation(school, { adminId, adminUserId, reason }) {
+    const trimmed = reason.trim();
+
+    await prisma.$transaction(async (tx) => {
+        const claimed = await tx.school.updateMany({
+            where: { id: school.id, deactivatedAt: { not: null }, deactivatedByAdminId: null },
+            data: { deactivationReason: trimmed, deactivatedByAdminId: adminId },
+        });
+        if (claimed.count === 0) throw conflict('This school is already deactivated');
+
+        await recordAudit({
+            schoolId: school.id,
+            subjectType: SCHOOL_SUBJECT,
+            subjectId: school.id,
+            action: 'DEACTIVATE',
+            actorUserId: adminUserId,
+            reason: trimmed,
+            client: tx,
+        });
+    });
+
+    log.info(`School deactivation taken over by a platform admin: ${school.name} (${school.npsn}). Reason: ${trimmed}`);
+}
+
 // Keyed by the registration: only an APPROVED one has a school to switch off.
 async function deactivateSchool(id, reviewer) {
     assertRejectionReason('DEACTIVATE', reviewer.reason);
@@ -789,7 +826,11 @@ async function deactivateSchoolById(id, reviewer) {
 // the way out, and reactivating does not un-revoke them. That is deliberate. A revoked token
 // coming back to life is exactly the shape of a replay, and auth.service.js treats
 // it as theft.
-async function restoreAccess(school, { adminUserId, reason }) {
+//
+// onlyTheBodys (governing-body ticket 08): a Governing Body restores only what it switched
+// off, so its claim also wants deactivatedByAdminId empty. A Platform Admin taking the
+// deactivation over between the body's read and this claim leaves it off.
+async function restoreAccess(school, { adminUserId, reason, onlyTheBodys = false }) {
     if (!school.deactivatedAt) throw conflict('This school is not deactivated');
 
     const note = reason?.trim() ? reason.trim() : null;
@@ -797,14 +838,24 @@ async function restoreAccess(school, { adminUserId, reason }) {
 
     await prisma.$transaction(async (tx) => {
         const claimed = await tx.school.updateMany({
-            where: { id: schoolId, deactivatedAt: { not: null } },
+            where: {
+                id: schoolId,
+                deactivatedAt: { not: null },
+                ...(onlyTheBodys ? { deactivatedByAdminId: null } : {}),
+            },
             data: {
                 deactivatedAt: null,
                 deactivationReason: null,
                 deactivatedByAdminId: null,
             },
         });
-        if (claimed.count === 0) throw conflict('This school is not deactivated');
+        if (claimed.count === 0) {
+            throw conflict(
+                onlyTheBodys
+                    ? 'This school was reactivated, or deactivated by the Platform Admin, meanwhile'
+                    : 'This school is not deactivated'
+            );
+        }
 
         // The reason is cleared from the row, not from the record: why a school
         // was switched off lives in ApprovalAudit, which is append-only

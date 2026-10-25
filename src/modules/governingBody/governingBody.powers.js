@@ -90,7 +90,9 @@ async function deactivateSchool(auth, schoolId, { reason }) {
 }
 
 // POST /api/governing-body/schools/:id/reactivate, for any admin, the note optional. Only
-// what the body switched off: deactivatedByAdminId is set by a Platform Admin alone.
+// what the body switched off: deactivatedByAdminId is set by a Platform Admin alone, a
+// taken-over deactivation included. Read first for the answer, and claimed again by
+// restoreAccess, so a take-over at the same moment wins.
 async function reactivateSchool(auth, schoolId, { reason } = {}) {
     const school = await loadOwnSchool(auth, schoolId);
     const { deactivatedByAdminId } = await prisma.school.findUnique({
@@ -100,7 +102,7 @@ async function reactivateSchool(auth, schoolId, { reason } = {}) {
     if (deactivatedByAdminId) throw conflict(BRAKE);
 
     await runUnscoped('a governing body restoring its school access', () =>
-        restoreAccess(school, { adminUserId: auth.userId, reason })
+        restoreAccess(school, { adminUserId: auth.userId, reason, onlyTheBodys: true })
     );
     return getOwnSchool(auth, school.id);
 }
