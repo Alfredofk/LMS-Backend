@@ -30,6 +30,9 @@ const log = createLogger('GoverningBody');
 //   with what it was.
 // - A School of another body answers 404, as a missing one does. Whether a School has
 //   a Principal is read in its own scope, one School at a time (the spec's invariant 1).
+// - Each School says hasPrincipal, one sitting now, and hadPrincipal, one now or before
+//   (owner, 2026-10-25, from the frontend's note). The fix asks the second, so a School
+//   whose Principal's role ended shows no fix button rather than answering it with 409.
 
 const SCHOOL_SUBJECT = 'School';
 const MISSING = 'School not found';
@@ -58,7 +61,10 @@ const ownSchoolSelect = {
     updatedAt: true,
 };
 
-const ownSchoolView = (school, hasPrincipal) => ({
+// A School just created, or one a fix went through: neither has ever had a Principal.
+const NO_PRINCIPAL_EVER = { hasPrincipal: false, hadPrincipal: false };
+
+const ownSchoolView = (school, { hasPrincipal, hadPrincipal }) => ({
     id: school.id,
     npsn: school.npsn,
     name: school.name,
@@ -71,6 +77,7 @@ const ownSchoolView = (school, hasPrincipal) => ({
     subdomain: school.subdomain,
     schoolCode: school.schoolCode,
     hasPrincipal,
+    hadPrincipal,
     deactivatedAt: school.deactivatedAt,
     createdAt: school.createdAt,
 });
@@ -80,9 +87,14 @@ const rowsLabel = (rows) => (rows.length === 1 ? `Row ${rows[0]}` : `Rows ${rows
 
 const principalOf = (client, where) => client.membershipRole.findFirst({ where, select: { id: true } });
 
-// Whether a School has a Principal now, read in its own scope.
-const hasPrincipalAt = (school) =>
-    runInSchool(school.id, school.name, async () => Boolean(await principalOf(prisma, SITTING_PRINCIPAL)));
+// Whether a School has a Principal now and whether it has ever had one, read in its own
+// scope. One that never had one has none now, so it costs a single read.
+const principalStandingAt = (school) =>
+    runInSchool(school.id, school.name, async () => {
+        const hadPrincipal = Boolean(await principalOf(prisma, EVER_PRINCIPAL));
+        const hasPrincipal = hadPrincipal && Boolean(await principalOf(prisma, SITTING_PRINCIPAL));
+        return { hasPrincipal, hadPrincipal };
+    });
 
 // Whether a School has ever had one, read in its own scope.
 const hasHadPrincipalAt = (school) =>
@@ -162,23 +174,23 @@ async function createSchools(auth, { schools: rows }) {
     });
 
     log.info(`A governing body created ${created.length} school(s): ${created.map((s) => s.subdomain).join(', ')}`);
-    return created.map((school) => ownSchoolView(school, false));
+    return created.map((school) => ownSchoolView(school, NO_PRINCIPAL_EVER));
 }
 
 // ---------------------------------------------------------------------------
 // Reading
 // ---------------------------------------------------------------------------
 
-// GET /api/governing-body/schools: the body's Schools, by name, each with its code and
-// whether it has a Principal. Ticket 07 adds the numbers.
+// GET /api/governing-body/schools: the body's Schools, by name, each with its code,
+// whether it has a Principal and whether it ever had one. Ticket 07 adds the numbers.
 async function listOwnSchools(auth) {
     const schools = await prisma.school.findMany({
         where: { governingBodyId: auth.governingBodyId },
         select: ownSchoolSelect,
         orderBy: [{ name: 'asc' }, { id: 'asc' }],
     });
-    const principals = await Promise.all(schools.map(hasPrincipalAt));
-    return schools.map((school, index) => ownSchoolView(school, principals[index]));
+    const standings = await Promise.all(schools.map(principalStandingAt));
+    return schools.map((school, index) => ownSchoolView(school, standings[index]));
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +231,7 @@ async function fixSchool(auth, id, patch) {
         durationYears: durationAfter(school, patch),
     };
     if (Object.entries(next).every(([field, value]) => school[field] === value)) {
-        return ownSchoolView(school, false);
+        return ownSchoolView(school, NO_PRINCIPAL_EVER);
     }
     if (next.npsn !== school.npsn && (await npsnsTakenOf([next.npsn], { exceptSchoolId: id })).size) {
         throw conflict(NPSN_TAKEN);
@@ -256,7 +268,7 @@ async function fixSchool(auth, id, patch) {
     });
 
     log.info(`${next.name} (${next.npsn}) fixed by its governing body`);
-    return ownSchoolView(await loadOwnSchool(auth, id), false);
+    return ownSchoolView(await loadOwnSchool(auth, id), NO_PRINCIPAL_EVER);
 }
 
 export { createSchools, listOwnSchools, fixSchool };
