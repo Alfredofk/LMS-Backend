@@ -33,6 +33,11 @@ const log = createLogger('GoverningBody');
 // - Each School says hasPrincipal, one sitting now, and hadPrincipal, one now or before
 //   (owner, 2026-10-25, from the frontend's note). The fix asks the second, so a School
 //   whose Principal's role ended shows no fix button rather than answering it with 409.
+// - Ticket 07 (the spec's K4; the plan, owner 2026-10-26) puts the dashboard on these same
+//   rows, the list and GET /schools/:id: the Principal's and the Vice Principals' names,
+//   the counts of Students, Teachers, Principals and Vice Principals, and the Principal
+//   Applications waiting. One School at a time, each in its own scope, with no cache: a
+//   body holds tens of Schools. A Guardian is never counted or named to the body.
 
 const SCHOOL_SUBJECT = 'School';
 const MISSING = 'School not found';
@@ -61,10 +66,30 @@ const ownSchoolSelect = {
     updatedAt: true,
 };
 
-// A School just created, or one a fix went through: neither has ever had a Principal.
-const NO_PRINCIPAL_EVER = { hasPrincipal: false, hadPrincipal: false };
+// The roles a row counts, and the key each is counted under (ticket 07): one count per
+// role held, ACTIVE on an ACTIVE membership, so a Vice Principal who teaches counts twice.
+const COUNTED_ROLES = {
+    STUDENT: 'students',
+    TEACHER: 'teachers',
+    PRINCIPAL: 'principals',
+    VICE_PRINCIPAL: 'vicePrincipals',
+};
+const HELD = { status: 'ACTIVE', membership: { status: 'ACTIVE' } };
+// A Vice Principal sitting now, as SITTING_PRINCIPAL reads the Principal.
+const SITTING_VICE_PRINCIPAL = { role: 'VICE_PRINCIPAL', ...HELD };
+const holderNameSelect = { membership: { select: { user: { select: { fullName: true } } } } };
 
-const ownSchoolView = (school, { hasPrincipal, hadPrincipal }) => ({
+// A School just created: nobody in it, nobody ever its Principal, no application waiting.
+const NEW_SCHOOL_FIGURES = {
+    hasPrincipal: false,
+    hadPrincipal: false,
+    principal: null,
+    vicePrincipals: [],
+    counts: { students: 0, teachers: 0, principals: 0, vicePrincipals: 0 },
+    principalApplicationsWaiting: 0,
+};
+
+const ownSchoolView = (school, figures) => ({
     id: school.id,
     npsn: school.npsn,
     name: school.name,
@@ -76,8 +101,12 @@ const ownSchoolView = (school, { hasPrincipal, hadPrincipal }) => ({
     timeZone: school.timeZone,
     subdomain: school.subdomain,
     schoolCode: school.schoolCode,
-    hasPrincipal,
-    hadPrincipal,
+    hasPrincipal: figures.hasPrincipal,
+    hadPrincipal: figures.hadPrincipal,
+    principal: figures.principal,
+    vicePrincipals: figures.vicePrincipals,
+    counts: figures.counts,
+    principalApplicationsWaiting: figures.principalApplicationsWaiting,
     deactivatedAt: school.deactivatedAt,
     createdAt: school.createdAt,
 });
@@ -87,13 +116,38 @@ const rowsLabel = (rows) => (rows.length === 1 ? `Row ${rows[0]}` : `Rows ${rows
 
 const principalOf = (client, where) => client.membershipRole.findFirst({ where, select: { id: true } });
 
-// Whether a School has a Principal now and whether it has ever had one, read in its own
-// scope. One that never had one has none now, so it costs a single read.
-const principalStandingAt = (school) =>
+// What a School's row says of its people, read in its own scope: whether a Principal
+// sits and whether one ever sat, the Principal's and the Vice Principals' names, the
+// counts (ticket 07), and the Principal Applications waiting there.
+const figuresAt = (school) =>
     runInSchool(school.id, school.name, async () => {
-        const hadPrincipal = Boolean(await principalOf(prisma, EVER_PRINCIPAL));
-        const hasPrincipal = hadPrincipal && Boolean(await principalOf(prisma, SITTING_PRINCIPAL));
-        return { hasPrincipal, hadPrincipal };
+        const [principal, everPrincipal, vicePrincipals, held, waiting] = await Promise.all([
+            prisma.membershipRole.findFirst({ where: SITTING_PRINCIPAL, select: holderNameSelect }),
+            principalOf(prisma, EVER_PRINCIPAL),
+            prisma.membershipRole.findMany({
+                where: SITTING_VICE_PRINCIPAL,
+                select: holderNameSelect,
+                orderBy: { membership: { user: { fullName: 'asc' } } },
+            }),
+            prisma.membershipRole.groupBy({
+                by: ['role'],
+                where: { role: { in: Object.keys(COUNTED_ROLES) }, ...HELD },
+                _count: { _all: true },
+            }),
+            prisma.principalApplication.count({ where: { schoolId: school.id, status: 'PENDING' } }),
+        ]);
+
+        const counts = { ...NEW_SCHOOL_FIGURES.counts };
+        for (const row of held) counts[COUNTED_ROLES[row.role]] = row._count._all;
+
+        return {
+            hasPrincipal: Boolean(principal),
+            hadPrincipal: Boolean(everPrincipal),
+            principal: principal ? { fullName: principal.membership.user.fullName } : null,
+            vicePrincipals: vicePrincipals.map((holder) => ({ fullName: holder.membership.user.fullName })),
+            counts,
+            principalApplicationsWaiting: waiting,
+        };
     });
 
 // Whether a School has ever had one, read in its own scope.
@@ -174,23 +228,34 @@ async function createSchools(auth, { schools: rows }) {
     });
 
     log.info(`A governing body created ${created.length} school(s): ${created.map((s) => s.subdomain).join(', ')}`);
-    return created.map((school) => ownSchoolView(school, NO_PRINCIPAL_EVER));
+    return created.map((school) => ownSchoolView(school, NEW_SCHOOL_FIGURES));
 }
 
 // ---------------------------------------------------------------------------
 // Reading
 // ---------------------------------------------------------------------------
 
-// GET /api/governing-body/schools: the body's Schools, by name, each with its code,
-// whether it has a Principal and whether it ever had one. Ticket 07 adds the numbers.
+// GET /api/governing-body/schools: the body's Schools, by name, each with its code and
+// its figures - the dashboard (ticket 07). A deactivated one is listed, marked.
 async function listOwnSchools(auth) {
     const schools = await prisma.school.findMany({
         where: { governingBodyId: auth.governingBodyId },
         select: ownSchoolSelect,
         orderBy: [{ name: 'asc' }, { id: 'asc' }],
     });
-    const standings = await Promise.all(schools.map(principalStandingAt));
-    return schools.map((school, index) => ownSchoolView(school, standings[index]));
+
+    // One School at a time (the plan, owner 2026-10-26): each already reads five small
+    // queries at once, and a body holds tens of Schools.
+    const rows = [];
+    for (const school of schools) rows.push(ownSchoolView(school, await figuresAt(school)));
+    return rows;
+}
+
+// GET /api/governing-body/schools/:id: one of them, its row as the list gives it, the
+// city, point and time zone included (ticket 07).
+async function getOwnSchool(auth, id) {
+    const school = await loadOwnSchool(auth, id);
+    return ownSchoolView(school, await figuresAt(school));
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +296,7 @@ async function fixSchool(auth, id, patch) {
         durationYears: durationAfter(school, patch),
     };
     if (Object.entries(next).every(([field, value]) => school[field] === value)) {
-        return ownSchoolView(school, NO_PRINCIPAL_EVER);
+        return ownSchoolView(school, await figuresAt(school));
     }
     if (next.npsn !== school.npsn && (await npsnsTakenOf([next.npsn], { exceptSchoolId: id })).size) {
         throw conflict(NPSN_TAKEN);
@@ -268,7 +333,8 @@ async function fixSchool(auth, id, patch) {
     });
 
     log.info(`${next.name} (${next.npsn}) fixed by its governing body`);
-    return ownSchoolView(await loadOwnSchool(auth, id), NO_PRINCIPAL_EVER);
+    const fixed = await loadOwnSchool(auth, id);
+    return ownSchoolView(fixed, await figuresAt(fixed));
 }
 
-export { createSchools, listOwnSchools, fixSchool };
+export { loadOwnSchool, createSchools, listOwnSchools, getOwnSchool, fixSchool };

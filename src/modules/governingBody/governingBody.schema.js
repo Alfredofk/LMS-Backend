@@ -107,6 +107,17 @@ const principalApplicationsQuery = z.object({
     status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'CANCELLED', 'ALL']).default('PENDING'),
 });
 
+// ---- its reads (ticket 07) ----
+
+// A School's Students, a page at a time: one Class's, or found by a part of the name or
+// NISN (owner, 2026-10-26), paged as the Platform Admin's list of Schools is.
+const studentsQuery = z.object({
+    q: z.string().trim().min(1).max(100).optional(),
+    classId: z.string().min(1).optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    offset: z.coerce.number().int().min(0).default(0),
+});
+
 // A removal's reason is required and shown to the admin removed (K6).
 const removeBody = z.strictObject({
     reason: z.string().trim().min(3, 'Give the reason').max(500, 'Reason is too long'),
@@ -227,6 +238,7 @@ export {
     codeBody,
     principalApplicationBody,
     principalApplicationsQuery,
+    studentsQuery,
     removeBody,
     profileBody,
     listQuery,

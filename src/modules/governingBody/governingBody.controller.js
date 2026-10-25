@@ -3,6 +3,7 @@ import * as service from './governingBody.service.js';
 import * as admins from './governingBody.admins.js';
 import * as schools from './governingBody.schools.js';
 import * as principals from './governingBody.principals.js';
+import * as reads from './governingBody.reads.js';
 import { changeGoverningBodySubdomain } from '../school/school.subdomain.js';
 
 // Thin by design, like school.controller.js: read what validation produced, call the
@@ -223,6 +224,21 @@ async function fixSchool(req, res) {
     return ok(res, { school, message: 'Saved.' });
 }
 
+// ---- the seat: its reads (ticket 07) ------------------------------------------
+
+async function getSchool(req, res) {
+    return ok(res, { school: await schools.getOwnSchool(req.auth, req.validated.params.id) });
+}
+
+async function listSchoolTeachers(req, res) {
+    return ok(res, await reads.listTeachers(req.auth, req.validated.params.id));
+}
+
+async function listSchoolStudents(req, res) {
+    const { params, query } = req.validated;
+    return ok(res, await reads.listStudents(req.auth, params.id, query));
+}
+
 // ---- the seat: Principal applications (ticket 06) ---------------------------
 
 async function listPrincipalApplications(req, res) {
@@ -289,6 +305,9 @@ export {
     createSchools,
     listSchools,
     fixSchool,
+    getSchool,
+    listSchoolTeachers,
+    listSchoolStudents,
     listPrincipalApplications,
     getPrincipalApplication,
     principalApplicationKtp,

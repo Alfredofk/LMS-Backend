@@ -13,6 +13,7 @@ import {
     codeBody,
     principalApplicationBody,
     principalApplicationsQuery,
+    studentsQuery,
     removeBody,
     profileBody,
     listQuery,
@@ -51,7 +52,10 @@ import { subdomainBody } from '../school/school.schema.js';
 // service answers another body's School with 404, and a fix of one that has ever had a
 // Principal with 409. Since ticket 06 every admin, not only the senior, reads and
 // decides the Principal applications to the body's Schools, their own included; the
-// service answers another body's application with 404.
+// service answers another body's application with 404. Since ticket 07 every admin reads
+// the dashboard on the Schools' rows (the list and one School), and a School's Teachers
+// and Students; another body's School is 404, and an account with no seat 403 here, at
+// the guard, before any School is looked at (owner, 2026-10-26).
 //
 // The Principal applicant's, mounted at /api/principal-applications (ticket 06): any
 // signed-in account applies through a School's own code, with a KTP; the service refuses
@@ -190,7 +194,14 @@ seatRouter.post(
 seatRouter.post('/leave', controller.leave);
 seatRouter.get('/schools', controller.listSchools);
 seatRouter.post('/schools', validate({ body: createSchoolsBody }), controller.createSchools);
+seatRouter.get('/schools/:id', validate({ params: idParams }), controller.getSchool);
 seatRouter.patch('/schools/:id', validate({ params: idParams, body: schoolPatchBody }), controller.fixSchool);
+seatRouter.get('/schools/:id/teachers', validate({ params: idParams }), controller.listSchoolTeachers);
+seatRouter.get(
+    '/schools/:id/students',
+    validate({ params: idParams, query: studentsQuery }),
+    controller.listSchoolStudents
+);
 seatRouter.get(
     '/schools/:id/principal-applications',
     validate({ params: idParams, query: principalApplicationsQuery }),
