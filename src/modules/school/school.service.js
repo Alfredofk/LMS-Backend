@@ -694,8 +694,11 @@ async function listSchools(filters) {
 //   leaving, which is ADR-0004 and ticket 06; a school that comes back should find
 //   its people still in it.
 //
-// Runs unscoped, opened by the caller: the sign-ins it cuts span schools.
-async function withdrawAccess(school, { adminId, adminUserId, reason }) {
+// Runs unscoped, opened by the caller: the sign-ins it cuts span schools. Since
+// governing-body ticket 08 a Governing Body's admin switches off its own School through it
+// too, with adminId null: deactivatedByAdminId then says the body did, and only a
+// Platform Admin's deactivation is one the body may not undo.
+async function withdrawAccess(school, { adminId = null, adminUserId, reason }) {
     if (school.deactivatedAt) throw conflict('This school is already deactivated');
 
     const trimmed = reason.trim();
@@ -1052,6 +1055,8 @@ export {
     readKtp,
     approveRegistration,
     rejectRegistration,
+    withdrawAccess,
+    restoreAccess,
     deactivateSchool,
     deactivateSchoolById,
     reactivateSchool,

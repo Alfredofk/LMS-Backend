@@ -32,6 +32,11 @@ const UNSCOPED_MODELS = new Set([
     // applicant holds no membership there, as a School Registration's holds none. Its
     // schoolId names the School applied to; the body's admins read it by their seat.
     'PrincipalApplication',
+    // A School joining a Governing Body, and its time under each (governing-body ticket
+    // 08): between a School and a body, read by the body's admins through their seat, by
+    // the School's Principal for their own School, and by the Platform Admin.
+    'AffiliationRequest',
+    'SchoolAffiliation',
     'SchoolRegistration',
     'School',
     'NationalHoliday',

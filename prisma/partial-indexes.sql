@@ -109,3 +109,15 @@ CREATE UNIQUE INDEX "GoverningBodyAdmin_one_live_per_user_per_body"
 CREATE UNIQUE INDEX "PrincipalApplication_one_pending_per_user_per_school"
     ON "PrincipalApplication" ("userId", "schoolId")
     WHERE "status" = 'PENDING';
+
+-- One Affiliation Request waiting per School (governing-body ticket 08). A decided or
+-- cancelled one must repeat - added in 20261025175131_add_affiliations.
+CREATE UNIQUE INDEX "AffiliationRequest_one_pending_per_school"
+    ON "AffiliationRequest" ("schoolId")
+    WHERE "status" = 'PENDING';
+
+-- One open SchoolAffiliation per School (governing-body ticket 08): the body it is under now.
+-- Ended ones must repeat, one per body before - added in 20261025175131_add_affiliations.
+CREATE UNIQUE INDEX "SchoolAffiliation_one_open_per_school"
+    ON "SchoolAffiliation" ("schoolId")
+    WHERE "endedAt" IS NULL;

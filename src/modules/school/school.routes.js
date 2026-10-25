@@ -2,10 +2,10 @@ import { Router } from 'express';
 
 import { requireAuth, requireActiveMembership, requireRole } from '../../shared/auth.js';
 import { requirePlatformAdmin } from '../../shared/guards.js';
-import { registrationLimiter } from '../../shared/rateLimit.js';
+import { joinSchoolLimiter, registrationLimiter } from '../../shared/rateLimit.js';
 import { singleFile } from '../../shared/upload.js';
 import { validate } from '../../shared/validate.js';
-import { decisionBody, principalApplicationsQuery } from '../governingBody/governingBody.schema.js';
+import { codeBody, decisionBody, principalApplicationsQuery } from '../governingBody/governingBody.schema.js';
 import * as controller from './school.controller.js';
 import {
     registrationBody,
@@ -109,6 +109,21 @@ memberRouter.patch('/letterhead', validate({ body: letterheadBody }), controller
 memberRouter.get('/logo', controller.readLogo);
 memberRouter.put('/logo', logoUpload, controller.setLogo);
 memberRouter.delete('/logo', controller.removeLogo);
+// Asking to join a Governing Body (governing-body ticket 08, K12): the body's code, which
+// a wrong guess pays for as at a School Code's lookup. An independent School's Principal
+// only, the service says.
+memberRouter.post(
+    '/affiliation-requests',
+    joinSchoolLimiter,
+    validate({ body: codeBody }),
+    controller.requestAffiliation
+);
+memberRouter.get('/affiliation-requests', controller.listAffiliationRequests);
+memberRouter.post(
+    '/affiliation-requests/:id/cancel',
+    validate({ params: idParams }),
+    controller.cancelAffiliationRequest
+);
 
 // Two more for subdomains (governing-body ticket 02).
 //
@@ -174,6 +189,8 @@ adminSchoolRouter.post(
     validate({ params: applicationParams, body: decisionBody }),
     controller.rejectPrincipalApplication
 );
+// The bodies a School has been under, the latest first (governing-body ticket 08).
+adminSchoolRouter.get('/:id/affiliations', validate({ params: idParams }), controller.listAffiliations);
 
 export default router;
 export { adminRouter, memberRouter, placesRouter, adminSchoolRouter };

@@ -176,6 +176,12 @@ enum ApprovalAction {
     /// A Governing Body's admin fixing its School's name, NPSN or type while the School has
     /// no Principal (governing-body ticket 05, K10), with what they were.
     UPDATE_SCHOOL
+    /// An independent School joining a Governing Body, its Affiliation Request approved
+    /// (governing-body ticket 08, K12). The School is the subject.
+    JOIN
+    /// A Governing Body releasing one of its Schools, which is independent afterwards
+    /// (governing-body ticket 08, K12'). The School is the subject, the reason required.
+    RELEASE
 }
 
 /// Where an application stands (governing-body ticket 06): a one-shot request, decided once
@@ -187,6 +193,13 @@ enum ApplicationStatus {
     REJECTED
     /// Taken back by the applicant before a decision, or closed by their account's deletion.
     CANCELLED
+}
+
+/// How a School came under a Governing Body (governing-body ticket 08): the body created it
+/// (ticket 05), or it joined, independent before, through an Affiliation Request.
+enum AffiliationStart {
+    CREATED
+    JOINED
 }
 
 /// What a Governing Body is (governing-body spec, K1): UU Sisdiknas's *penyelenggara
@@ -235,6 +248,10 @@ model User {
     schoolRegistrations    SchoolRegistration[]     @relation("RegistrationApplicant")
     principalApplications  PrincipalApplication[]   @relation("PrincipalApplicant")
     principalApplicationsDecided PrincipalApplication[] @relation("PrincipalApplicationDecider")
+    affiliationRequests    AffiliationRequest[]     @relation("AffiliationRequester")
+    affiliationRequestsDecided AffiliationRequest[] @relation("AffiliationRequestDecider")
+    affiliationsStarted    SchoolAffiliation[]      @relation("AffiliationStarter")
+    affiliationsEnded      SchoolAffiliation[]      @relation("AffiliationEnder")
 
     @@index([deletedAt])
 }
@@ -448,6 +465,8 @@ model GoverningBody {
     schools       School[]
     refreshTokens RefreshToken[]
     handoffCodes  HandoffCode[]
+    affiliationRequests AffiliationRequest[]
+    affiliations  SchoolAffiliation[]
 
     @@index([deactivatedAt])
 }
@@ -685,6 +704,67 @@ model PrincipalApplication {
     @@index([userId])
 }
 
+/// An independent School asking to join a Governing Body (governing-body ticket 08, K12). Its
+/// Principal enters the body's code; any admin of the body approves or rejects, with a reason
+/// the Principal reads. Not a Join Request, which asks for a membership in a School.
+///
+/// The School's, not the person's: a Principal who hands over leaves it to the next. Above
+/// tenancy, as a Principal Application is: the body's admins read it through their seat, and
+/// schoolId is a plain column. One PENDING per School, by a partial index in
+/// partial-indexes.sql. Approval sets School.governingBodyId and opens a SchoolAffiliation.
+model AffiliationRequest {
+    id                String            @id @default(cuid())
+    schoolId          String
+    governingBodyId   String
+    requestedByUserId String
+    status            ApplicationStatus @default(PENDING)
+    decidedByUserId   String?
+    decidedAt         DateTime?
+    rejectionReason   String?
+    createdAt         DateTime          @default(now())
+    updatedAt         DateTime          @updatedAt
+
+    school        School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    governingBody GoverningBody      @relation(fields: [governingBodyId], references: [id], onDelete: Cascade)
+    requestedBy   User               @relation("AffiliationRequester", fields: [requestedByUserId], references: [id])
+    decidedBy     User?              @relation("AffiliationRequestDecider", fields: [decidedByUserId], references: [id])
+    affiliation   SchoolAffiliation?
+
+    @@index([governingBodyId, status])
+    @@index([schoolId])
+}
+
+/// A School's time under one Governing Body (governing-body ticket 08, owner 2026-10-26: a
+/// table of its history, so "which bodies has it been under" reads without the audit).
+/// School.governingBodyId names the body now; the row open for it (endedAt null) says since
+/// when and how, and the closed ones every body before. One open row per School, by a partial
+/// index in partial-indexes.sql. The rows of Schools created before it were filled in by its
+/// migration, started at the School's creation.
+model SchoolAffiliation {
+    id                   String           @id @default(cuid())
+    schoolId             String
+    governingBodyId      String
+    began                AffiliationStart
+    startedAt            DateTime         @default(now())
+    startedByUserId      String?
+    affiliationRequestId String?          @unique
+    /// When the body released it (K12'), by whom and why. Null while it lasts.
+    endedAt              DateTime?
+    endedByUserId        String?
+    endReason            String?
+    createdAt            DateTime         @default(now())
+    updatedAt            DateTime         @updatedAt
+
+    school             School              @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    governingBody      GoverningBody       @relation(fields: [governingBodyId], references: [id], onDelete: Cascade)
+    startedBy          User?               @relation("AffiliationStarter", fields: [startedByUserId], references: [id], onDelete: SetNull)
+    endedBy            User?               @relation("AffiliationEnder", fields: [endedByUserId], references: [id], onDelete: SetNull)
+    affiliationRequest AffiliationRequest? @relation(fields: [affiliationRequestId], references: [id], onDelete: SetNull)
+
+    @@index([schoolId, startedAt])
+    @@index([governingBodyId])
+}
+
 /// The tenancy boundary. Cannot be filtered by schoolId because it defines it.
 model School {
     id            String     @id @default(cuid())
@@ -745,6 +825,8 @@ model School {
     governingBody  GoverningBody?      @relation(fields: [governingBodyId], references: [id], onDelete: SetNull)
     registration   SchoolRegistration?
     principalApplications PrincipalApplication[]
+    affiliationRequests   AffiliationRequest[]
+    affiliations          SchoolAffiliation[]
     memberships    SchoolMembership[]
     membershipRoles MembershipRole[]
     studentProfiles StudentProfile[]

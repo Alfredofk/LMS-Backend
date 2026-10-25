@@ -4,6 +4,8 @@ import * as admins from './governingBody.admins.js';
 import * as schools from './governingBody.schools.js';
 import * as principals from './governingBody.principals.js';
 import * as reads from './governingBody.reads.js';
+import * as powers from './governingBody.powers.js';
+import * as affiliations from './governingBody.affiliations.js';
 import { changeGoverningBodySubdomain } from '../school/school.subdomain.js';
 
 // Thin by design, like school.controller.js: read what validation produced, call the
@@ -239,6 +241,55 @@ async function listSchoolStudents(req, res) {
     return ok(res, await reads.listStudents(req.auth, params.id, query));
 }
 
+// ---- the seat: its powers over its Schools (ticket 08) -------------------------
+
+async function appointPrincipal(req, res) {
+    const result = await powers.appointPrincipal(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, {
+        ...result,
+        message: `${result.principal.fullName} is the Principal of ${result.school.name} now.`,
+    });
+}
+
+async function endPrincipal(req, res) {
+    const result = await powers.endPrincipalRole(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, {
+        ...result,
+        message: 'The Principal’s role has ended. The school takes applications to be its Principal again.',
+    });
+}
+
+async function deactivateSchool(req, res) {
+    const school = await powers.deactivateSchool(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, { school, message: 'Deactivated. Every member has lost access; nothing was deleted.' });
+}
+
+async function reactivateSchool(req, res) {
+    const school = await powers.reactivateSchool(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, { school, message: 'Reactivated. Members have to sign in again.' });
+}
+
+async function releaseSchool(req, res) {
+    const result = await powers.releaseSchool(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, { ...result, message: `${result.school.name} is independent now.` });
+}
+
+// ---- the seat: Affiliation Requests (ticket 08) ---------------------------------
+
+async function listAffiliationRequests(req, res) {
+    return ok(res, { requests: await affiliations.listBodyRequests(req.auth, req.validated.query) });
+}
+
+async function approveAffiliationRequest(req, res) {
+    const request = await affiliations.approveRequest(req.auth, req.validated.params.id);
+    return ok(res, { request, message: `${request.school.name} has joined the governing body.` });
+}
+
+async function rejectAffiliationRequest(req, res) {
+    const request = await affiliations.rejectRequest(req.auth, req.validated.params.id, req.validated.body);
+    return ok(res, { request, message: 'Rejected.' });
+}
+
 // ---- the seat: Principal applications (ticket 06) ---------------------------
 
 async function listPrincipalApplications(req, res) {
@@ -308,6 +359,14 @@ export {
     getSchool,
     listSchoolTeachers,
     listSchoolStudents,
+    appointPrincipal,
+    endPrincipal,
+    deactivateSchool,
+    reactivateSchool,
+    releaseSchool,
+    listAffiliationRequests,
+    approveAffiliationRequest,
+    rejectAffiliationRequest,
     listPrincipalApplications,
     getPrincipalApplication,
     principalApplicationKtp,

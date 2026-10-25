@@ -121,6 +121,23 @@ async function assertPrincipalApplicationRetryAllowed({ userId, schoolId }) {
     }
 }
 
+// An Affiliation Request turned down three times by one Governing Body in a day waits for
+// tomorrow, as a join request does (governing-body ticket 08). A cancelled one never
+// counts. It is the School's, so the count is the School's at that body.
+async function assertAffiliationRetryAllowed({ schoolId, governingBodyId }) {
+    const since = new Date(Date.now() - RETRY_WINDOW_MS);
+    const attempts = await prisma.affiliationRequest.count({
+        where: { schoolId, governingBodyId, status: 'REJECTED', decidedAt: { gte: since } },
+    });
+
+    if (attempts >= MAX_ATTEMPTS_PER_WINDOW) {
+        throw conflict(
+            'Too many rejected requests to join this governing body recently. Try again tomorrow.',
+            { attempts, windowHours: RETRY_WINDOW_MS / 3_600_000 }
+        );
+    }
+}
+
 async function assertClassSubjectRetryAllowed({
     teacherMembershipId,
     classId,
@@ -226,6 +243,7 @@ export {
     assertSeatRetryAllowed,
     SCHOOL_HAS_PRINCIPAL,
     assertPrincipalApplicationRetryAllowed,
+    assertAffiliationRetryAllowed,
     assertClassSubjectRetryAllowed,
     assertSchoolRegistrationAllowed,
     assertGoverningBodyRegistrationAllowed,

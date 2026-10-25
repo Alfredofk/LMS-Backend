@@ -123,6 +123,17 @@ const removeBody = z.strictObject({
     reason: z.string().trim().min(3, 'Give the reason').max(500, 'Reason is too long'),
 });
 
+// ---- its powers over its Schools (ticket 08) ----
+
+// Ending the Principal's role, deactivating, releasing: a reason, required, as a removal's.
+const reasonBody = removeBody;
+
+// A Teacher made Principal, named by the membershipId the teacher list gives (ticket 07).
+const appointBody = z.strictObject({
+    membershipId: z.string().min(1),
+    reason: z.string().trim().min(3, 'Give the reason').max(500, 'Reason is too long'),
+});
+
 // An admin's change of the body's address and phone (the spec's defaults). The name,
 // the kind, the NPYP and the SK number are the Platform Admin's, so a key for them is
 // refused rather than ignored. The postal code and the phone clear to null.
@@ -240,6 +251,8 @@ export {
     principalApplicationsQuery,
     studentsQuery,
     removeBody,
+    reasonBody,
+    appointBody,
     profileBody,
     listQuery,
     decisionBody,

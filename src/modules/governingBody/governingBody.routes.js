@@ -14,6 +14,8 @@ import {
     principalApplicationBody,
     principalApplicationsQuery,
     studentsQuery,
+    reasonBody,
+    appointBody,
     removeBody,
     profileBody,
     listQuery,
@@ -55,7 +57,11 @@ import { subdomainBody } from '../school/school.schema.js';
 // service answers another body's application with 404. Since ticket 07 every admin reads
 // the dashboard on the Schools' rows (the list and one School), and a School's Teachers
 // and Students; another body's School is 404, and an account with no seat 403 here, at
-// the guard, before any School is looked at (owner, 2026-10-26).
+// the guard, before any School is looked at (owner, 2026-10-26). Since ticket 08 every
+// admin also makes a Teacher of its School the Principal or ends the role, deactivates and
+// reactivates it (never undoing the Platform Admin's deactivation: 409), releases it while
+// a Principal sits (409 otherwise), and decides the Affiliation Requests of independent
+// Schools asking to join; each with a reason where the service says so.
 //
 // The Principal applicant's, mounted at /api/principal-applications (ticket 06): any
 // signed-in account applies through a School's own code, with a KTP; the service refuses
@@ -201,6 +207,42 @@ seatRouter.get(
     '/schools/:id/students',
     validate({ params: idParams, query: studentsQuery }),
     controller.listSchoolStudents
+);
+seatRouter.post(
+    '/schools/:id/principal',
+    validate({ params: idParams, body: appointBody }),
+    controller.appointPrincipal
+);
+seatRouter.post(
+    '/schools/:id/principal/end',
+    validate({ params: idParams, body: reasonBody }),
+    controller.endPrincipal
+);
+seatRouter.post(
+    '/schools/:id/deactivate',
+    validate({ params: idParams, body: reasonBody }),
+    controller.deactivateSchool
+);
+seatRouter.post(
+    '/schools/:id/reactivate',
+    validate({ params: idParams, body: decisionBody }),
+    controller.reactivateSchool
+);
+seatRouter.post('/schools/:id/release', validate({ params: idParams, body: reasonBody }), controller.releaseSchool);
+seatRouter.get(
+    '/affiliation-requests',
+    validate({ query: principalApplicationsQuery }),
+    controller.listAffiliationRequests
+);
+seatRouter.post(
+    '/affiliation-requests/:id/approve',
+    validate({ params: idParams }),
+    controller.approveAffiliationRequest
+);
+seatRouter.post(
+    '/affiliation-requests/:id/reject',
+    validate({ params: idParams, body: decisionBody }),
+    controller.rejectAffiliationRequest
 );
 seatRouter.get(
     '/schools/:id/principal-applications',

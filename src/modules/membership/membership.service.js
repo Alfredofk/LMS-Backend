@@ -1620,51 +1620,79 @@ async function handOverPrincipal(auth, membershipId, { stay, teacher }) {
     };
 }
 
-// A Platform Admin appointing the Principal, inside the school's scope (the
-// caller opens it). For a Principal who cannot hand over - unreachable, gone, or
-// a school restored without one. Whoever held PRINCIPAL loses it; one holding
-// another role stays, one holding nothing else is removed with the admin's reason.
-// alongside, when given, is the caller's own work that must land in this transaction,
-// under the School's lock, given the transaction and the time: since governing-body
-// ticket 06b, closing the Principal Applications waiting there. Taking it as a
-// parameter keeps this module from importing the one that owns them.
-async function appointPrincipal({ schoolId, email, reason, adminUserId, alongside }) {
-    // User is above tenancy; the membership lookup below is this school's alone.
+// The Principals sitting at the school end, in the caller's transaction under the
+// School's lock (ADR-0008): each role ENDED; one holding another role stays, one holding
+// nothing else is removed with the reason. Returns who they were and what became of them.
+// The Platform Admin's appointment, a Governing Body's, and its ending of the role
+// (governing-body ticket 08) share it.
+async function endSittingPrincipals(tx, { schoolId, actorUserId, reason, now }) {
+    const holders = await tx.schoolMembership.findMany({
+        where: { status: 'ACTIVE', roles: { some: { role: 'PRINCIPAL', status: 'ACTIVE' } } },
+        select: { id: true, roles: { where: { status: 'ACTIVE' }, select: { role: true } } },
+    });
+
+    const previous = [];
+    for (const holder of holders) {
+        await tx.membershipRole.updateMany({
+            where: { membershipId: holder.id, role: 'PRINCIPAL', status: 'ACTIVE' },
+            data: { status: 'ENDED' },
+        });
+        const keeps = holder.roles.some((entry) => entry.role !== 'PRINCIPAL');
+        if (!keeps) {
+            await endMembership(tx, {
+                membershipId: holder.id,
+                schoolId,
+                action: 'REMOVE',
+                actorUserId,
+                reason,
+                now,
+            });
+        }
+        previous.push({ membershipId: holder.id, status: keeps ? 'ACTIVE' : 'LEFT' });
+    }
+    return previous;
+}
+
+// The successor a Governing Body names by their membership (governing-body ticket 08): an
+// ACTIVE member here holding an ACTIVE TEACHER role, from the teacher list it reads (ticket
+// 07). Anyone else - a Guardian, a Student, another School's Teacher - is the same 404: the
+// body never reads Guardians (K4), so it is not told the id is one.
+const NO_TEACHER_BY_ID = 'No active teacher of this school has that id';
+const teacherByMembership = (membershipId) =>
+    loadSuccessor(
+        { id: membershipId, roles: { some: { role: 'TEACHER', status: 'ACTIVE' } } },
+        NO_TEACHER_BY_ID
+    );
+
+// The successor a Platform Admin names by email: the admin sees no roster.
+async function teacherByEmail(email) {
+    // User is above tenancy; the membership lookup is this school's alone.
     const user = await prisma.user.findUnique({
         where: { email },
         select: { id: true, deletedAt: true },
     });
     if (!user || user.deletedAt) throw notFound(NO_SUCH_TEACHER);
-    const successor = await loadSuccessor({ userId: user.id }, NO_SUCH_TEACHER);
+    return loadSuccessor({ userId: user.id }, NO_SUCH_TEACHER);
+}
+
+// A Platform Admin appointing the Principal, named by email, or since governing-body
+// ticket 08 a Governing Body's admin, named by membershipId, inside the school's scope
+// (the caller opens it). For a Principal who cannot hand over - unreachable, gone, or a
+// school restored without one - and for a body replacing its School's Principal (K10).
+// Whoever held PRINCIPAL loses it (endSittingPrincipals).
+// alongside, when given, is the caller's own work that must land in this transaction,
+// under the School's lock, given the transaction and the time: since governing-body
+// ticket 06b, closing the Principal Applications waiting there. Taking it as a
+// parameter keeps this module from importing the one that owns them.
+async function appointPrincipal({ schoolId, email, membershipId, reason, adminUserId, alongside }) {
+    const successor = membershipId ? await teacherByMembership(membershipId) : await teacherByEmail(email);
 
     const now = new Date();
-    const previous = [];
+    let previous;
 
     await prisma.$transaction(async (tx) => {
         await lockSchool(tx, schoolId, now);
-
-        const holders = await tx.schoolMembership.findMany({
-            where: { status: 'ACTIVE', roles: { some: { role: 'PRINCIPAL', status: 'ACTIVE' } } },
-            select: { id: true, roles: { where: { status: 'ACTIVE' }, select: { role: true } } },
-        });
-        for (const holder of holders) {
-            await tx.membershipRole.updateMany({
-                where: { membershipId: holder.id, role: 'PRINCIPAL', status: 'ACTIVE' },
-                data: { status: 'ENDED' },
-            });
-            const keeps = holder.roles.some((entry) => entry.role !== 'PRINCIPAL');
-            if (!keeps) {
-                await endMembership(tx, {
-                    membershipId: holder.id,
-                    schoolId,
-                    action: 'REMOVE',
-                    actorUserId: adminUserId,
-                    reason,
-                    now,
-                });
-            }
-            previous.push({ membershipId: holder.id, status: keeps ? 'ACTIVE' : 'LEFT' });
-        }
+        previous = await endSittingPrincipals(tx, { schoolId, actorUserId: adminUserId, reason, now });
 
         await grantPrincipal(tx, { membershipId: successor.id, actorUserId: adminUserId, now });
         await recordAudit({
@@ -1680,6 +1708,34 @@ async function appointPrincipal({ schoolId, email, reason, adminUserId, alongsid
     });
 
     return { principal: { membershipId: successor.id, fullName: successor.user.fullName }, previous };
+}
+
+// A Governing Body ending its School's Principal's role, with no successor (governing-body
+// ticket 08, K10), inside the school's scope (the caller opens it). Under the School's
+// lock: none sitting is 409. The one ended stays if they hold another role, else is
+// removed with the reason (ADR-0008), audited END against their membership. The School
+// then wants a Principal again: its code takes Principal Applications (ticket 06).
+async function endPrincipal({ schoolId, reason, actorUserId }) {
+    const now = new Date();
+
+    return prisma.$transaction(async (tx) => {
+        await lockSchool(tx, schoolId, now);
+        const previous = await endSittingPrincipals(tx, { schoolId, actorUserId, reason, now });
+        if (previous.length === 0) throw conflict('This school has no Principal');
+
+        for (const ended of previous) {
+            await recordAudit({
+                schoolId,
+                subjectType: MEMBERSHIP_SUBJECT,
+                subjectId: ended.membershipId,
+                action: 'END',
+                actorUserId,
+                reason,
+                client: tx,
+            });
+        }
+        return { previous };
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -2651,6 +2707,7 @@ export {
     appointVicePrincipal,
     revokeVicePrincipal,
     appointPrincipal,
+    endPrincipal,
     submitLeaveRequest,
     listOwnLeaveRequests,
     cancelLeaveRequest,

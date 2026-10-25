@@ -212,6 +212,15 @@ async function createSchools(auth, { schools: rows }) {
                         actorUserId: auth.userId,
                         client: tx,
                     });
+                    // Its time under the body begins with it (ticket 08's history).
+                    await tx.schoolAffiliation.create({
+                        data: {
+                            schoolId: school.id,
+                            governingBodyId: auth.governingBodyId,
+                            began: 'CREATED',
+                            startedByUserId: auth.userId,
+                        },
+                    });
 
                     made.push(school);
                 }

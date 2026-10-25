@@ -1,4 +1,5 @@
 import { ok } from '../../shared/errors.js';
+import * as affiliations from '../governingBody/governingBody.affiliations.js';
 import * as principals from '../governingBody/governingBody.principals.js';
 import * as service from './school.service.js';
 import * as letterheads from './school.letterhead.js';
@@ -234,6 +235,32 @@ async function rejectPrincipalApplication(req, res) {
     return ok(res, { application, message: 'Rejected. The KTP was discarded.' });
 }
 
+// ---- Principal: asking to join a Governing Body (governing-body ticket 08) -------
+
+async function requestAffiliation(req, res) {
+    const request = await affiliations.requestAffiliation(req.auth, req.validated.body);
+    return ok(
+        res,
+        { request, message: `Request sent. An admin of ${request.governingBody.name} will decide it.` },
+        201
+    );
+}
+
+async function listAffiliationRequests(req, res) {
+    return ok(res, { requests: await affiliations.listSchoolRequests(req.auth) });
+}
+
+async function cancelAffiliationRequest(req, res) {
+    const request = await affiliations.cancelRequest(req.auth, req.validated.params.id);
+    return ok(res, { request, message: 'Request cancelled.' });
+}
+
+// ---- platform admin: the bodies a School has been under (ticket 08) ---------------
+
+async function listAffiliations(req, res) {
+    return ok(res, { affiliations: await affiliations.affiliationsOf(req.validated.params.id) });
+}
+
 export {
     resolvePlace,
     changeSubdomain,
@@ -245,6 +272,10 @@ export {
     principalApplicationKtp,
     approvePrincipalApplication,
     rejectPrincipalApplication,
+    requestAffiliation,
+    listAffiliationRequests,
+    cancelAffiliationRequest,
+    listAffiliations,
     submit,
     listMine,
     list,
