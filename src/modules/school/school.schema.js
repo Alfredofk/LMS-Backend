@@ -98,6 +98,10 @@ const schoolRow = z.strictObject(schoolFields).superRefine(checkDuration).transf
 
 const idParams = z.object({ id: z.string().min(1) });
 
+// A School and one Principal Application to it, for the Platform Admin's decision while
+// the School's body is deactivated (governing-body ticket 06c).
+const applicationParams = z.object({ id: z.string().min(1), applicationId: z.string().min(1) });
+
 // A yes-or-no filter, written as text because a query string carries text:
 // `z.coerce.boolean()` reads the string "false" as true, silently.
 const trueOrFalse = z
@@ -230,6 +234,7 @@ export {
     registrationBody,
     schoolRow,
     idParams,
+    applicationParams,
     listQuery,
     schoolListQuery,
     rejectBody,

@@ -45,6 +45,9 @@ const log = createLogger('GoverningBody');
 // - A Platform Admin's appointment at a body's School, allowed while the body is
 //   deactivated (ticket 06b, K10'), closes the applications waiting there too, in its
 //   own transaction (closeWaitingApplications, shared with the approval).
+// - While the body is deactivated, a Platform Admin reads and decides the applications
+//   to its Schools in its place (ticket 06c, owner 2026-10-26): through approveAs and
+//   rejectAs, the admins' own decisions, audited with the Platform Admin's user.
 // - A submission takes the same lock (owner, 2026-10-25, option A). Without it, one sent
 //   while another applicant was approved was left waiting at a School that has its
 //   Principal: 7 of 10 rounds in the probe. Now it lands before the approval, which closes
@@ -65,6 +68,11 @@ const log = createLogger('GoverningBody');
 const SUBJECT = 'PrincipalApplication';
 const KTP_FOLDER = 'principal-application-ktp';
 const MISSING = 'Principal application not found';
+const BODY_DECIDES = 'Its governing body decides the applications to be its Principal';
+
+// Who decided, for the log: the approval and the rejection are shared (ticket 06c).
+const BODY_ADMIN = 'a governing body admin';
+const PLATFORM_ADMIN = 'a platform admin';
 
 const NOT_GOVERNED = 'Only a school run by a governing body takes applications to be its Principal';
 const HAS_PRINCIPAL = 'This school has a Principal';
@@ -297,9 +305,28 @@ async function loadOwnApplication(auth, id) {
     return application;
 }
 
+// A School's applications, the waiting ones unless asked otherwise, oldest first, as a
+// queue is worked: the body's admins' list and the Platform Admin's (ticket 06c).
+async function applicationsAt(schoolId, status) {
+    const applications = await prisma.principalApplication.findMany({
+        where: { schoolId, ...(status === 'ALL' ? {} : { status }) },
+        include: adminInclude,
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    return applications.map(adminView);
+}
+
+// An application's KTP, while on file: until the decision.
+async function ktpOf(application) {
+    const key = application.ktpStoragePath;
+    if (!key) throw notFound('No KTP is on file for this application');
+
+    const buffer = await getStorage().read(key);
+    return { buffer, contentType: MIME[key.endsWith('.png') ? 'png' : 'jpg'] };
+}
+
 // GET /api/governing-body/schools/:id/principal-applications, for any admin: one of the
-// body's Schools' applications, the waiting ones by default, oldest first, as a queue is
-// worked. Another body's School is 404.
+// body's Schools' applications. Another body's School is 404.
 async function listForSchool(auth, schoolId, { status }) {
     const school = await prisma.school.findFirst({
         where: { id: schoolId, governingBodyId: auth.governingBodyId },
@@ -307,26 +334,14 @@ async function listForSchool(auth, schoolId, { status }) {
     });
     if (!school) throw notFound('School not found');
 
-    const applications = await prisma.principalApplication.findMany({
-        where: { schoolId: school.id, ...(status === 'ALL' ? {} : { status }) },
-        include: adminInclude,
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-    });
-    return applications.map(adminView);
+    return applicationsAt(school.id, status);
 }
 
 async function getApplication(auth, id) {
     return adminView(await loadOwnApplication(auth, id));
 }
 
-// The KTP, while on file: until the decision.
-async function readKtp(auth, id) {
-    const key = (await loadOwnApplication(auth, id)).ktpStoragePath;
-    if (!key) throw notFound('No KTP is on file for this application');
-
-    const buffer = await getStorage().read(key);
-    return { buffer, contentType: MIME[key.endsWith('.png') ? 'png' : 'jpg'] };
-}
+const readKtp = async (auth, id) => ktpOf(await loadOwnApplication(auth, id));
 
 // The applications still waiting for a School that has its Principal now, in the
 // transaction that made them one and under the School's lock: an admin's approval here,
@@ -368,14 +383,15 @@ async function closeWaitingApplications(tx, { schoolId, actorUserId, now }) {
     return keys;
 }
 
-// POST /api/governing-body/principal-applications/:id/approve, for any admin. In one
-// transaction in the School's scope, under the School's lock: no Principal sitting (409),
-// the claim out of PENDING, the applicant's ACTIVE membership with PRINCIPAL alone, the
-// other applications waiting there rejected on their own, and the audit rows. Every KTP
-// it closed is removed after the commit. Works on a deactivated School too, as a Platform
-// Admin's appointment does (ADR-0008): one restored needs its Principal.
-async function approveApplication(auth, id) {
-    const application = await loadOwnApplication(auth, id);
+// An approval, whoever decides: any admin of the body, or a Platform Admin while the
+// body is deactivated (ticket 06c), named by decider in the log. In one transaction in
+// the School's scope, under the School's lock: no Principal sitting (409), the claim out
+// of PENDING, the applicant's ACTIVE membership with PRINCIPAL alone, the other
+// applications waiting there rejected on their own, and the audit rows, all by
+// actorUserId. Every KTP it closed is removed after the commit. Works on a deactivated
+// School too, as a Platform Admin's appointment does (ADR-0008): one restored needs its
+// Principal.
+async function approveAs(application, actorUserId, decider) {
     assertDecidable(application.status, 'Principal application');
     if (application.applicant.deletedAt) throw conflict('The applicant account no longer exists');
     if (await isStudentAnywhere(application.userId)) {
@@ -398,7 +414,7 @@ async function approveApplication(auth, id) {
 
                 const claimed = await tx.principalApplication.updateMany({
                     where: { id: application.id, status: 'PENDING' },
-                    data: { status: 'APPROVED', decidedByUserId: auth.userId, decidedAt: now, ktpStoragePath: null },
+                    data: { status: 'APPROVED', decidedByUserId: actorUserId, decidedAt: now, ktpStoragePath: null },
                 });
                 if (claimed.count === 0) throw conflict('This Principal application has already been decided');
 
@@ -411,7 +427,7 @@ async function approveApplication(auth, id) {
                         membershipId: membership.id,
                         role: 'PRINCIPAL',
                         status: 'ACTIVE',
-                        approvedByUserId: auth.userId,
+                        approvedByUserId: actorUserId,
                         approvedAt: now,
                     },
                 });
@@ -426,16 +442,12 @@ async function approveApplication(auth, id) {
                     subjectType: SUBJECT,
                     subjectId: application.id,
                     action: 'APPROVE',
-                    actorUserId: auth.userId,
+                    actorUserId,
                     client: tx,
                 });
 
                 // The others waiting for this School; the approved one is out of PENDING.
-                const others = await closeWaitingApplications(tx, {
-                    schoolId: school.id,
-                    actorUserId: auth.userId,
-                    now,
-                });
+                const others = await closeWaitingApplications(tx, { schoolId: school.id, actorUserId, now });
                 return [application.ktpStoragePath, ...others];
             })
         );
@@ -450,30 +462,32 @@ async function approveApplication(auth, id) {
 
     await discardKtps(closedKeys);
     log.info(
-        `A Principal application was approved at ${school.name}; ` +
+        `A Principal application was approved at ${school.name} by ${decider}; ` +
             `${closedKeys.length - 1} other(s) waiting there closed`
     );
+}
+
+// POST /api/governing-body/principal-applications/:id/approve, for any admin.
+async function approveApplication(auth, id) {
+    const application = await loadOwnApplication(auth, id);
+    await approveAs(application, auth.userId, BODY_ADMIN);
     return adminView(await loadOwnApplication(auth, application.id));
 }
 
-// POST /api/governing-body/principal-applications/:id/reject, for any admin, with a
-// reason the applicant reads. The KTP goes after the commit.
-async function rejectApplication(auth, id, { reason } = {}) {
-    assertRejectionReason('REJECT', reason);
-    const trimmed = reason.trim();
-
-    const application = await loadOwnApplication(auth, id);
+// A rejection, whoever decides, with a reason the applicant reads; it counts toward the
+// applicant's cap at that School. The KTP goes after the commit.
+async function rejectAs(application, actorUserId, reason, decider) {
     assertDecidable(application.status, 'Principal application');
     const now = new Date();
 
-    await runUnscoped('a governing body admin rejecting a principal application', async () =>
+    await runUnscoped(`${decider} rejecting a principal application`, async () =>
         await prisma.$transaction(async (tx) => {
             const claimed = await tx.principalApplication.updateMany({
                 where: { id: application.id, status: 'PENDING' },
                 data: {
                     status: 'REJECTED',
-                    rejectionReason: trimmed,
-                    decidedByUserId: auth.userId,
+                    rejectionReason: reason,
+                    decidedByUserId: actorUserId,
                     decidedAt: now,
                     ktpStoragePath: null,
                 },
@@ -485,17 +499,91 @@ async function rejectApplication(auth, id, { reason } = {}) {
                 subjectType: SUBJECT,
                 subjectId: application.id,
                 action: 'REJECT',
-                actorUserId: auth.userId,
-                reason: trimmed,
+                actorUserId,
+                reason,
                 client: tx,
             });
         })
     );
 
     await discardKtps([application.ktpStoragePath]);
-    log.info(`A Principal application was rejected at ${application.school.name}`);
+    log.info(`A Principal application was rejected at ${application.school.name} by ${decider}`);
+}
+
+// POST /api/governing-body/principal-applications/:id/reject, for any admin.
+async function rejectApplication(auth, id, { reason } = {}) {
+    assertRejectionReason('REJECT', reason);
+    const application = await loadOwnApplication(auth, id);
+    await rejectAs(application, auth.userId, reason.trim(), BODY_ADMIN);
     return adminView(await loadOwnApplication(auth, application.id));
 }
+
+// ---------------------------------------------------------------------------
+// The Platform Admin, while the body is deactivated (governing-body ticket 06c)
+// ---------------------------------------------------------------------------
+
+// A deactivated body's admins hold no seat (K11), so the applications to its Schools
+// would wait for its return. A School that never had a Principal has no Teacher either,
+// so a Platform Admin's appointment (ticket 06b) cannot help it. One whose body never
+// returns would stay empty, its NPSN held. So while the body is deactivated the Platform
+// Admin reads and decides them in its place, as ticket 04 lets it decide a body's admin
+// applications while nobody sits (owner, 2026-10-26, option B). While the body runs, the
+// body decides: 409, the reads included, since a KTP is read only by whoever must decide.
+
+// One application to that School. One to another School, or none, is one 404.
+async function loadApplicationAt(schoolId, id) {
+    const application = await prisma.principalApplication.findFirst({
+        where: { id, schoolId },
+        include: adminInclude,
+    });
+    if (!application) throw notFound(MISSING);
+    return application;
+}
+
+// A School whose body is deactivated. An unknown School is 404; an independent one, or
+// one whose body runs, 409.
+async function loadSchoolOfDeactivatedBody(schoolId) {
+    const school = await prisma.school.findUnique({
+        where: { id: schoolId },
+        select: { id: true, governingBodyId: true, governingBody: { select: { deactivatedAt: true } } },
+    });
+    if (!school) throw notFound('School not found');
+    if (!school.governingBodyId) throw conflict(NOT_GOVERNED);
+    if (!school.governingBody.deactivatedAt) throw conflict(BODY_DECIDES);
+    return school;
+}
+
+// GET /api/admin/schools/:id/principal-applications.
+async function listAsPlatformAdmin(schoolId, { status }) {
+    const school = await loadSchoolOfDeactivatedBody(schoolId);
+    return applicationsAt(school.id, status);
+}
+
+// GET /api/admin/schools/:id/principal-applications/:applicationId/ktp.
+async function readKtpAsPlatformAdmin(schoolId, id) {
+    const school = await loadSchoolOfDeactivatedBody(schoolId);
+    return ktpOf(await loadApplicationAt(school.id, id));
+}
+
+// POST /api/admin/schools/:id/principal-applications/:applicationId/approve: as an admin's
+// approval, decided and audited by the Platform Admin's user.
+async function approveAsPlatformAdmin(adminUserId, schoolId, id) {
+    const school = await loadSchoolOfDeactivatedBody(schoolId);
+    const application = await loadApplicationAt(school.id, id);
+    await approveAs(application, adminUserId, PLATFORM_ADMIN);
+    return adminView(await loadApplicationAt(school.id, application.id));
+}
+
+// POST /api/admin/schools/:id/principal-applications/:applicationId/reject, a reason
+// required.
+async function rejectAsPlatformAdmin(adminUserId, schoolId, id, { reason } = {}) {
+    assertRejectionReason('REJECT', reason);
+    const school = await loadSchoolOfDeactivatedBody(schoolId);
+    const application = await loadApplicationAt(school.id, id);
+    await rejectAs(application, adminUserId, reason.trim(), PLATFORM_ADMIN);
+    return adminView(await loadApplicationAt(school.id, application.id));
+}
+
 
 // ---------------------------------------------------------------------------
 // Account deletion (ADR-0007)
@@ -543,6 +631,10 @@ export {
     readKtp,
     approveApplication,
     rejectApplication,
+    listAsPlatformAdmin,
+    readKtpAsPlatformAdmin,
+    approveAsPlatformAdmin,
+    rejectAsPlatformAdmin,
     closeWaitingApplications,
     cancelOnDeletion,
     discardKtps,

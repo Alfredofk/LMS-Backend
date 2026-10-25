@@ -1,4 +1,5 @@
 import { ok } from '../../shared/errors.js';
+import * as principals from '../governingBody/governingBody.principals.js';
 import * as service from './school.service.js';
 import * as letterheads from './school.letterhead.js';
 import * as subdomains from './school.subdomain.js';
@@ -203,6 +204,36 @@ async function appointPrincipalById(req, res) {
     });
 }
 
+// ---- platform admin: Principal Applications while the body is deactivated (06c) ----
+
+async function listPrincipalApplications(req, res) {
+    const { params, query } = req.validated;
+    return ok(res, { applications: await principals.listAsPlatformAdmin(params.id, query) });
+}
+
+// File bytes, the one answer outside the envelope.
+async function principalApplicationKtp(req, res) {
+    const { id, applicationId } = req.validated.params;
+    const { buffer, contentType } = await principals.readKtpAsPlatformAdmin(id, applicationId);
+    res.set({ 'Content-Type': contentType, 'Content-Disposition': 'inline', 'Cache-Control': 'no-store' });
+    return res.send(buffer);
+}
+
+async function approvePrincipalApplication(req, res) {
+    const { id, applicationId } = req.validated.params;
+    const application = await principals.approveAsPlatformAdmin(req.auth.userId, id, applicationId);
+    return ok(res, {
+        application,
+        message: 'Approved. They are the school’s Principal now; the others waiting were declined.',
+    });
+}
+
+async function rejectPrincipalApplication(req, res) {
+    const { id, applicationId } = req.validated.params;
+    const application = await principals.rejectAsPlatformAdmin(req.auth.userId, id, applicationId, req.validated.body);
+    return ok(res, { application, message: 'Rejected. The KTP was discarded.' });
+}
+
 export {
     resolvePlace,
     changeSubdomain,
@@ -210,6 +241,10 @@ export {
     deactivateById,
     reactivateById,
     appointPrincipalById,
+    listPrincipalApplications,
+    principalApplicationKtp,
+    approvePrincipalApplication,
+    rejectPrincipalApplication,
     submit,
     listMine,
     list,

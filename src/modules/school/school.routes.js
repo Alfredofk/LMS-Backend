@@ -5,10 +5,12 @@ import { requirePlatformAdmin } from '../../shared/guards.js';
 import { registrationLimiter } from '../../shared/rateLimit.js';
 import { singleFile } from '../../shared/upload.js';
 import { validate } from '../../shared/validate.js';
+import { decisionBody, principalApplicationsQuery } from '../governingBody/governingBody.schema.js';
 import * as controller from './school.controller.js';
 import {
     registrationBody,
     idParams,
+    applicationParams,
     listQuery,
     schoolListQuery,
     rejectBody,
@@ -119,7 +121,10 @@ memberRouter.delete('/logo', controller.removeLogo);
 // adds the list of every School, independent or a body's. Ticket 06b adds the brake
 // on any School (the spec's K10'): deactivating, reactivating, and appointing a
 // Principal - at a Governing Body's School only while its body is deactivated, which
-// the service answers with 409 otherwise.
+// the service answers with 409 otherwise. Ticket 06c adds, for that same while, the
+// Principal Applications to a body's School: read, the KTP opened, approved and
+// rejected by the Platform Admin in the body's place (409 while the body runs). Their
+// query and decision body are the seat router's.
 const placesRouter = Router();
 
 placesRouter.get('/:subdomain', validate({ params: subdomainParams }), controller.resolvePlace);
@@ -148,6 +153,26 @@ adminSchoolRouter.post(
     '/:id/principal',
     validate({ params: idParams, body: appointPrincipalBody }),
     controller.appointPrincipalById
+);
+adminSchoolRouter.get(
+    '/:id/principal-applications',
+    validate({ params: idParams, query: principalApplicationsQuery }),
+    controller.listPrincipalApplications
+);
+adminSchoolRouter.get(
+    '/:id/principal-applications/:applicationId/ktp',
+    validate({ params: applicationParams }),
+    controller.principalApplicationKtp
+);
+adminSchoolRouter.post(
+    '/:id/principal-applications/:applicationId/approve',
+    validate({ params: applicationParams }),
+    controller.approvePrincipalApplication
+);
+adminSchoolRouter.post(
+    '/:id/principal-applications/:applicationId/reject',
+    validate({ params: applicationParams, body: decisionBody }),
+    controller.rejectPrincipalApplication
 );
 
 export default router;
