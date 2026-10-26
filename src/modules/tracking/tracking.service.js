@@ -190,7 +190,8 @@ const latest = (a, b) => (!a || (b && b > a) ? b : a);
 // Each student's own row over a slot - Content opened and completed out of what is
 // published, attendance, the last activity - and, per Content, how many of these
 // students opened and completed it, which only the staff's view shows. The
-// guardian view (a later spec) reads a child's row through here too.
+// guardian view (a later spec) reads a child's row through here too, and the
+// teacher's dashboard sums its rows per slot (dashboard ticket 01).
 async function progressOf(classSubject, studentProfileIds) {
     const sessionWhere = slotSessionWhere(classSubject);
     const contents = await prisma.content.findMany({
@@ -368,4 +369,4 @@ async function ownProgress(auth) {
     return { class: placement.class, classSubjects };
 }
 
-export { recordClientEvents, classSubjectProgress, ownProgress, slotSessionWhere, rosterOf };
+export { recordClientEvents, classSubjectProgress, ownProgress, slotSessionWhere, rosterOf, progressOf };

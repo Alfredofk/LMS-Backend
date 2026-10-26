@@ -1,7 +1,6 @@
 import { prisma } from '../../shared/prisma.js';
 import { runInSchool } from '../../shared/tenantContext.js';
-import { toDay } from '../holidays/holidays.calendar.js';
-import { todayOf } from '../sessions/sessions.service.js';
+import { currentTermOf } from '../academics/academics.term.js';
 import { loadOwnSchool } from './governingBody.schools.js';
 
 // What a Governing Body's admins read of a School's people (governing-body ticket 07, the
@@ -77,35 +76,6 @@ const studentView = (student) => ({
 });
 
 // ---------------------------------------------------------------------------
-// The current year and Semester
-// ---------------------------------------------------------------------------
-
-// Of rows ordered by their start, the latest begun by today, else the first.
-const latestBegun = (rows, today) => rows.filter((row) => toDay(row.startDate) <= today).at(-1) ?? rows[0] ?? null;
-
-// The School's current year and Semester, read in its scope. Either may be null: a
-// School with no ACTIVE year, or a year with no Semester yet.
-async function currentTermOf(school) {
-    const [today, years] = await Promise.all([
-        todayOf(school.id),
-        prisma.academicYear.findMany({
-            where: { status: 'ACTIVE' },
-            select: { id: true, label: true, startDate: true },
-            orderBy: { startDate: 'asc' },
-        }),
-    ]);
-    const year = latestBegun(years, today);
-    if (!year) return { year: null, semester: null };
-
-    const semesters = await prisma.semester.findMany({
-        where: { academicYearId: year.id },
-        select: { id: true, ordinal: true, startDate: true },
-        orderBy: { startDate: 'asc' },
-    });
-    return { year, semester: latestBegun(semesters, today) };
-}
-
-// ---------------------------------------------------------------------------
 // Reading
 // ---------------------------------------------------------------------------
 
@@ -117,7 +87,7 @@ async function listTeachers(auth, schoolId) {
     const school = await loadOwnSchool(auth, schoolId);
 
     return runInSchool(school.id, school.name, async () => {
-        const term = await currentTermOf(school);
+        const term = await currentTermOf(school.id);
         const teachers = await prisma.schoolMembership.findMany({
             where: { status: 'ACTIVE', roles: { some: { role: 'TEACHER', status: 'ACTIVE' } } },
             select: {
@@ -199,7 +169,7 @@ async function listStudents(auth, schoolId, { q, classId, limit, offset }) {
     const where = buildStudentWhere({ q, classId });
 
     return runInSchool(school.id, school.name, async () => {
-        const term = await currentTermOf(school);
+        const term = await currentTermOf(school.id);
         const [students, total, classes] = await Promise.all([
             prisma.schoolMembership.findMany({
                 where,

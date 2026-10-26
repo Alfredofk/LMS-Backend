@@ -28,6 +28,7 @@ import contentRoutes from './modules/content/content.routes.js';
 import trackingRoutes from './modules/tracking/tracking.routes.js';
 import assessmentRoutes from './modules/assessment/assessment.routes.js';
 import gradingRoutes from './modules/grading/grading.routes.js';
+import dashboardRoutes from './modules/dashboard/dashboard.routes.js';
 import governingBodyRegistrationRoutes, {
     adminRegistrationRouter as adminGoverningBodyRegistrationRoutes,
     adminBodyRouter as adminGoverningBodyRoutes,
@@ -115,6 +116,7 @@ app.use('/api/content', contentRoutes);
 app.use('/api/tracking', trackingRoutes);
 app.use('/api/assessments', assessmentRoutes);
 app.use('/api/grading', gradingRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 
 // Catch 404
 app.use((_req, _res, next) => next(notFound('Route not found')));
