@@ -130,7 +130,7 @@ async function releaseSchool(auth, schoolId, { reason }) {
                 select: { deactivatedAt: true, deactivatedByAdminId: true },
             });
             if (state.deactivatedAt) {
-                throw conflict(state.deactivatedByAdminId ? RELEASE_UNDER_BRAKE : RELEASE_SWITCHED_OFF);
+                throw conflict(state.deactivatedByAdminId !== null ? RELEASE_UNDER_BRAKE : RELEASE_SWITCHED_OFF);
             }
 
             const claimed = await tx.school.updateMany({

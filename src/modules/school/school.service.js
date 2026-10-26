@@ -597,6 +597,10 @@ async function rejectRegistration(id, { adminId, adminUserId, reason }) {
 // Principal Applications (06c) wait for it, and deactivatedByPlatform, whether the
 // deactivation is the Platform Admin's own, which a second press refuses, or the body's,
 // which it takes over. The admin's id stays on the server.
+//
+// Whose it is reads `!== null`, as every claim on it does, never truthiness (2026-10-26): a
+// friend's database held a Platform Admin whose id was '', put in by hand, and truthiness
+// read their deactivation as the body's while the claims read it as theirs.
 const schoolListSelect = {
     id: true,
     npsn: true,
@@ -617,7 +621,7 @@ const schoolListSelect = {
 
 const schoolListView = ({ governingBody, registration, deactivatedByAdminId, ...school }) => ({
     ...school,
-    deactivatedByPlatform: Boolean(deactivatedByAdminId),
+    deactivatedByPlatform: deactivatedByAdminId !== null,
     governingBody: governingBody ?? null,
     registrationId: registration?.id ?? null,
 });
@@ -715,7 +719,7 @@ async function listSchools(filters) {
 // switched off by a body it had left, which only the Platform Admin could undo.
 async function withdrawAccess(school, { adminId = null, adminUserId, reason, governingBodyId = null }) {
     if (school.deactivatedAt) {
-        if (adminId) return takeOverDeactivation(school, { adminId, adminUserId, reason });
+        if (adminId !== null) return takeOverDeactivation(school, { adminId, adminUserId, reason });
         throw conflict('This school is already deactivated');
     }
 
@@ -848,7 +852,7 @@ async function restoreRefusalOf(tx, schoolId) {
         select: { deactivatedAt: true, deactivatedByAdminId: true },
     });
     if (!school.deactivatedAt) return NOT_DEACTIVATED;
-    if (school.deactivatedByAdminId) return BRAKE;
+    if (school.deactivatedByAdminId !== null) return BRAKE;
     return 'This school changed meanwhile';
 }
 

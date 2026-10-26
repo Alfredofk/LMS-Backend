@@ -353,6 +353,10 @@ model HandoffCode {
 
 /// The platform operator, above every school. Not a school role - no School has
 /// one. Seeded from env; no HTTP route creates one.
+///
+/// Its id is never empty: a CHECK appended by hand in _platform_admin_id_not_empty
+/// (2026-10-26). A row put in by hand with the id '' was taken for no admin at all,
+/// so the brake on a School read as the Governing Body's deactivation.
 model PlatformAdmin {
     id        String   @id @default(cuid())
     userId    String   @unique

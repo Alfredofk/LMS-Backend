@@ -116,7 +116,7 @@ const ownSchoolView = (school, figures) => ({
     principalApplicationsWaiting: figures.principalApplicationsWaiting,
     deactivatedAt: school.deactivatedAt,
     deactivationReason: school.deactivationReason,
-    deactivatedByPlatform: Boolean(school.deactivatedByAdminId),
+    deactivatedByPlatform: school.deactivatedByAdminId !== null,
     createdAt: school.createdAt,
 });
 
