@@ -5,6 +5,8 @@ import { standingsOf } from '../assessment/assessment.marking.js';
 import { assessmentSelect } from '../assessment/assessment.service.js';
 import { isPractice } from '../assessment/assessment.practice.js';
 import { SLOTS_AT_ONCE, mapAtMost } from '../grading/grading.finalising.js';
+import { thresholdsOf } from './dashboard.settings.js';
+import { signalFactsOf, signalWindowsOf, studentsNeedingSupportOf } from './dashboard.signals.js';
 
 // What a teacher sees first (dashboard ticket 01, the spec's D1, D4 and D8): their slots of
 // the current Semester, and what waits for them to mark or release. Read live: one
@@ -28,6 +30,8 @@ import { SLOTS_AT_ONCE, mapAtMost } from '../grading/grading.finalising.js';
 // - A LATIHAN is in the queue too (owner's pick): its ESSAYs wait for a comment, so it
 //   counts for marking, never for release.
 // - Oldest first, with oldestWaitingSince: what has waited longest is on top.
+// - Each slot names its Students placed now who need support (ticket 02,
+//   dashboard.signals.js), against the School's thresholds, which the answer carries.
 
 const slotSelect = {
     id: true,
@@ -81,11 +85,15 @@ const queueSlotView = (classSubject) => ({
 // Reading
 // ---------------------------------------------------------------------------
 
-// One slot's figures over its Students placed now.
-async function slotFiguresOf(auth, slot) {
+// One slot's figures over its Students placed now, and those of them who need support.
+async function slotFiguresOf(auth, slot, signalContext) {
     const roster = await rosterOf(auth, slot);
     const placed = roster.studentProfileIds.filter((studentProfileId) => roster.placedNow(studentProfileId));
-    const { contents, students } = await progressOf(slot, placed);
+    const [progress, facts] = await Promise.all([
+        progressOf(slot, placed),
+        signalFactsOf(auth, slot, placed, signalContext.windows),
+    ]);
+    const { contents, students } = progress;
 
     let completed = 0;
     let present = 0;
@@ -102,6 +110,7 @@ async function slotFiguresOf(auth, slot) {
         studentsPlacedNow: placed.length,
         content: { completed, possible, percent: percentOf(completed, possible) },
         attendance: { present, counted, percent: percentOf(present, counted) },
+        studentsNeedingSupport: studentsNeedingSupportOf({ roster, placed, progress, facts, ...signalContext }),
     };
 }
 
@@ -160,11 +169,13 @@ async function queueOf(auth, now) {
 }
 
 // GET /api/dashboard/teaching, for a member holding TEACHER: their slots of the current
-// Semester with their figures, and their marking queue. Read only, but reading attempts
-// closes one past its deadline, as every read of them does (assessment ticket 03).
+// Semester with their figures and Support Signals, the thresholds those were raised at,
+// and their marking queue. Read only, but reading attempts closes one past its deadline,
+// as every read of them does (assessment ticket 03).
 async function teachingDashboard(auth) {
     const now = new Date();
-    const term = await currentTermOf(auth.schoolId);
+    const [term, thresholds] = await Promise.all([currentTermOf(auth.schoolId), thresholdsOf()]);
+    const windows = await signalWindowsOf(auth.schoolId, thresholds, now);
     const slots = term.semester
         ? await prisma.classSubject.findMany({
             where: { teacherMembershipId: auth.membershipId, ...OWN_LIVE_ROW, semesterId: term.semester.id },
@@ -174,10 +185,10 @@ async function teachingDashboard(auth) {
         : [];
 
     const [figures, queue] = await Promise.all([
-        mapAtMost(slots, SLOTS_AT_ONCE, (slot) => slotFiguresOf(auth, slot)),
+        mapAtMost(slots, SLOTS_AT_ONCE, (slot) => slotFiguresOf(auth, slot, { thresholds, windows })),
         queueOf(auth, now),
     ]);
-    return { semester: semesterView(term), slots: figures, queue };
+    return { semester: semesterView(term), thresholds, slots: figures, queue };
 }
 
 export { teachingDashboard };

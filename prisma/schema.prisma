@@ -182,6 +182,9 @@ enum ApprovalAction {
     /// A Governing Body releasing one of its Schools, which is independent afterwards
     /// (governing-body ticket 08, K12'). The School is the subject, the reason required.
     RELEASE
+    /// The Principal or a Vice Principal changing the school's Support Signal thresholds
+    /// (dashboard ticket 02), against the school.
+    UPDATE_SIGNAL_SETTINGS
 }
 
 /// Where an application stands (governing-body ticket 06): a one-shot request, decided once
@@ -868,6 +871,7 @@ model School {
     scores            Score[]
     assessmentExceptions AssessmentException[]
     gradeSetting      SchoolGradeSetting?
+    signalSetting     SchoolSignalSetting?
     slotGradeSettings SlotGradeSetting[]
     slotDescriptions  SlotDescription[]
     homeroomNotes     HomeroomNote[]
@@ -2039,6 +2043,37 @@ model SlotGradeSetting {
 
     @@unique([classId, subjectId, semesterId])
     @@index([schoolId])
+}
+
+/// The school's own Support Signal thresholds (dashboard ticket 02, owner 2026-10-26 and
+/// 2026-10-27), set by the Principal or a Vice Principal. At most one row per school,
+/// written the first time one of them saves. A null value, and a school with no row, mean
+/// the built-in one (dashboard.settings.js): 3 absences in 14 days, under 50% of the
+/// Content once 4 are published, 2 graded Assessments not submitted, 7 days inactive. Below
+/// the KKTP has none of its own: it is the slot's KKTP. A change is audited
+/// UPDATE_SIGNAL_SETTINGS, against the school.
+model SchoolSignalSetting {
+    id                        String   @id @default(cuid())
+    schoolId                  String   @unique
+    /// Frequent absence: this many ABSENT, 1-30, at confirmed Sessions in the last
+    /// absenceWindowDays local days, 1-60.
+    absenceCount              Int?
+    absenceWindowDays         Int?
+    /// Content behind: completed under this percentage, 1-100, of a slot's published
+    /// Content, once contentBehindMinPublished, 1-50, are published.
+    contentBehindPercent      Int?
+    contentBehindMinPublished Int?
+    /// Not submitting: this many graded Assessments, 1-20, did not submit in the slot.
+    notSubmittedCount         Int?
+    /// Inactive: no activity in the slot for this many local days, 1-60, while its
+    /// Sessions were held.
+    inactiveDays              Int?
+    /// Who saved it last.
+    setByUserId               String
+    createdAt                 DateTime @default(now())
+    updatedAt                 DateTime @updatedAt
+
+    school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
 }
 
 /// The Answering Teacher's Description of one Student in one slot
