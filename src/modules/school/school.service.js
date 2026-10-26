@@ -591,6 +591,12 @@ async function rejectRegistration(id, { adminId, adminUserId, reason }) {
 // never shows it. Each row names its body (K11) and its registration, null for a body's.
 // Since ticket 06b the Platform Admin deactivates, reactivates and appoints through the
 // School's own id as well, and those routes answer with this row.
+//
+// Two more for the buttons (governing-body ticket 08's follow-up, 2026-10-26, from the
+// frontend's note): the body's deactivatedAt, since the appointment (06b) and the
+// Principal Applications (06c) wait for it, and deactivatedByPlatform, whether the
+// deactivation is the Platform Admin's own, which a second press refuses, or the body's,
+// which it takes over. The admin's id stays on the server.
 const schoolListSelect = {
     id: true,
     npsn: true,
@@ -601,15 +607,17 @@ const schoolListSelect = {
     subdomain: true,
     schoolCode: true,
     timeZone: true,
-    governingBody: { select: { id: true, name: true } },
+    governingBody: { select: { id: true, name: true, deactivatedAt: true } },
     registration: { select: { id: true } },
     deactivatedAt: true,
     deactivationReason: true,
+    deactivatedByAdminId: true,
     createdAt: true,
 };
 
-const schoolListView = ({ governingBody, registration, ...school }) => ({
+const schoolListView = ({ governingBody, registration, deactivatedByAdminId, ...school }) => ({
     ...school,
+    deactivatedByPlatform: Boolean(deactivatedByAdminId),
     governingBody: governingBody ?? null,
     registrationId: registration?.id ?? null,
 });
@@ -700,7 +708,12 @@ async function listSchools(filters) {
 // Platform Admin's deactivation is one the body may not undo. A Platform Admin braking a
 // School its body has already switched off takes that deactivation over
 // (takeOverDeactivation).
-async function withdrawAccess(school, { adminId = null, adminUserId, reason }) {
+//
+// The body's claim also names its governingBodyId (ticket 08's follow-up, 2026-10-26): a
+// release pressed at the same moment by another of its admins wins, and this one gets the
+// 404 a School no longer the body's gets. Before, the School could end up independent and
+// switched off by a body it had left, which only the Platform Admin could undo.
+async function withdrawAccess(school, { adminId = null, adminUserId, reason, governingBodyId = null }) {
     if (school.deactivatedAt) {
         if (adminId) return takeOverDeactivation(school, { adminId, adminUserId, reason });
         throw conflict('This school is already deactivated');
@@ -714,14 +727,19 @@ async function withdrawAccess(school, { adminId = null, adminUserId, reason }) {
         // Claimed the same way a registration decision is: two admins clicking
         // together both pass the read above, and only one moves the row.
         const claimed = await tx.school.updateMany({
-            where: { id: schoolId, deactivatedAt: null },
+            where: { id: schoolId, deactivatedAt: null, ...(governingBodyId ? { governingBodyId } : {}) },
             data: {
                 deactivatedAt: now,
                 deactivationReason: trimmed,
                 deactivatedByAdminId: adminId,
             },
         });
-        if (claimed.count === 0) throw conflict('This school is already deactivated');
+        if (claimed.count === 0) {
+            if (governingBodyId && !(await tx.school.count({ where: { id: schoolId, governingBodyId } }))) {
+                throw notFound('School not found');
+            }
+            throw conflict('This school is already deactivated');
+        }
 
         const members = await tx.schoolMembership.findMany({
             where: { schoolId, status: 'ACTIVE' },
@@ -817,6 +835,23 @@ async function deactivateSchoolById(id, reviewer) {
     });
 }
 
+const NOT_DEACTIVATED = 'This school is not deactivated';
+const BRAKE = 'The Platform Admin deactivated this school, so only the Platform Admin reactivates it';
+
+// Why a Governing Body's claim to reactivate found nothing, read after the claim so it
+// names what won (ticket 08's follow-up, 2026-10-26, from the frontend's note): the School
+// running already, as when the button was pressed twice, or the Platform Admin's brake.
+// Before, one message named both, and a second press read as the brake.
+async function restoreRefusalOf(tx, schoolId) {
+    const school = await tx.school.findUnique({
+        where: { id: schoolId },
+        select: { deactivatedAt: true, deactivatedByAdminId: true },
+    });
+    if (!school.deactivatedAt) return NOT_DEACTIVATED;
+    if (school.deactivatedByAdminId) return BRAKE;
+    return 'This school changed meanwhile';
+}
+
 // The way back. The frontend has no button for it yet, and it exists anyway: a
 // school switched off by a misclick would otherwise need the database edited by
 // hand. The note is optional - there is nobody waiting to be told why their access
@@ -828,10 +863,10 @@ async function deactivateSchoolById(id, reviewer) {
 // it as theft.
 //
 // onlyTheBodys (governing-body ticket 08): a Governing Body restores only what it switched
-// off, so its claim also wants deactivatedByAdminId empty. A Platform Admin taking the
-// deactivation over between the body's read and this claim leaves it off.
+// off, so its claim also wants deactivatedByAdminId empty. The claim is the whole rule,
+// the brake included; what it lost to is read after it (restoreRefusalOf).
 async function restoreAccess(school, { adminUserId, reason, onlyTheBodys = false }) {
-    if (!school.deactivatedAt) throw conflict('This school is not deactivated');
+    if (!school.deactivatedAt) throw conflict(NOT_DEACTIVATED);
 
     const note = reason?.trim() ? reason.trim() : null;
     const schoolId = school.id;
@@ -850,11 +885,7 @@ async function restoreAccess(school, { adminUserId, reason, onlyTheBodys = false
             },
         });
         if (claimed.count === 0) {
-            throw conflict(
-                onlyTheBodys
-                    ? 'This school was reactivated, or deactivated by the Platform Admin, meanwhile'
-                    : 'This school is not deactivated'
-            );
+            throw conflict(onlyTheBodys ? await restoreRefusalOf(tx, schoolId) : NOT_DEACTIVATED);
         }
 
         // The reason is cleared from the row, not from the record: why a school

@@ -50,6 +50,7 @@ const membershipSelect = {
             address: true,
             phone: true,
             logoStorageKey: true,
+            governingBody: { select: { name: true } },
         },
     },
     roles: {
@@ -107,6 +108,12 @@ const membershipSelect = {
 // every member's: the frontend shows the school's times in it (ticket 07).
 //
 // The School Code goes to whoever readsSchoolCode says, and is null for the rest.
+//
+// The Governing Body above it, by name, is every member's (governing-body ticket 08's
+// follow-up, 2026-10-26, from the frontend's note): it tells the Principal whether the
+// School may ask to join one. The Affiliation Requests cannot: a School the body created
+// has none, and a released one keeps its APPROVED request. The lookup by the School Code
+// names the body already.
 function schoolForMember(school, roles, { readsCode }) {
     const principal = roles.some((role) => role.role === 'PRINCIPAL' && role.status === 'ACTIVE');
     return {
@@ -115,6 +122,7 @@ function schoolForMember(school, roles, { readsCode }) {
         schoolCode: readsCode ? school.schoolCode : null,
         // Every member's, as the address they reach the School at (governing-body 02).
         subdomain: school.subdomain,
+        governingBody: school.governingBody ?? null,
         schoolType: school.schoolType,
         durationYears: school.durationYears,
         timeZone: school.timeZone,

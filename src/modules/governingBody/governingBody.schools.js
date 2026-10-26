@@ -38,6 +38,11 @@ const log = createLogger('GoverningBody');
 //   the counts of Students, Teachers, Principals and Vice Principals, and the Principal
 //   Applications waiting. One School at a time, each in its own scope, with no cache: a
 //   body holds tens of Schools. A Guardian is never counted or named to the body.
+// - A School switched off says why and whose deactivation it is (2026-10-26, from the
+//   frontend's note; ticket 08's follow-up): deactivationReason, and deactivatedByPlatform
+//   for the brake, which the body may not undo. Before, the button learnt it from the 409.
+//   The Platform Admin's reason is shown to the body as it is to the Principal on
+//   /users/me: the body runs the School above the Principal.
 
 const SCHOOL_SUBJECT = 'School';
 const MISSING = 'School not found';
@@ -62,6 +67,8 @@ const ownSchoolSelect = {
     subdomain: true,
     schoolCode: true,
     deactivatedAt: true,
+    deactivationReason: true,
+    deactivatedByAdminId: true,
     createdAt: true,
     updatedAt: true,
 };
@@ -108,6 +115,8 @@ const ownSchoolView = (school, figures) => ({
     counts: figures.counts,
     principalApplicationsWaiting: figures.principalApplicationsWaiting,
     deactivatedAt: school.deactivatedAt,
+    deactivationReason: school.deactivationReason,
+    deactivatedByPlatform: Boolean(school.deactivatedByAdminId),
     createdAt: school.createdAt,
 });
 

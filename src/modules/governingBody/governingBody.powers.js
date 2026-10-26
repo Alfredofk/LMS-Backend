@@ -35,11 +35,18 @@ const log = createLogger('GoverningBody');
 //   pick against the proposal), audited RELEASE against the School. The Platform Admin is
 //   its authority afterwards, through the School's own id (ticket 06b).
 // - The Principal's own handover (ADR-0008) still works inside a body's School.
+// - A School switched off is not released either (owner, 2026-10-26, a follow-up from the
+//   frontend's notes): its Principal sits but can open nothing, so it would be left
+//   independent and off, with only the Platform Admin to restore it. The body reactivates
+//   its own deactivation first; under the brake it waits for the Platform Admin. The body's
+//   deactivation claims the School as still its own, so a release at the same moment wins.
 
 const SCHOOL_SUBJECT = 'School';
-const BRAKE = 'The Platform Admin deactivated this school, so only the Platform Admin reactivates it';
 const RELEASE_NEEDS_PRINCIPAL =
     'A school is released only while it has a Principal: an independent school without one could approve nobody';
+const RELEASE_SWITCHED_OFF = 'This school is deactivated: reactivate it first, so it runs on its own once released';
+const RELEASE_UNDER_BRAKE =
+    'The Platform Admin deactivated this school, so it is released only once the Platform Admin reactivates it';
 
 // POST /api/governing-body/schools/:id/principal, for any admin: a Teacher of the School
 // made its Principal. The School's row comes back, with the Principal and the ones before.
@@ -81,26 +88,21 @@ async function endPrincipalRole(auth, schoolId, { reason }) {
 
 // POST /api/governing-body/schools/:id/deactivate, for any admin: its members' sign-ins
 // there cut, its code and subdomain unknown, nothing deleted (ticket 06b's withdrawAccess).
+// Claimed while the School is still this body's: one released meanwhile is 404.
 async function deactivateSchool(auth, schoolId, { reason }) {
     const school = await loadOwnSchool(auth, schoolId);
     await runUnscoped('a governing body withdrawing its school access', () =>
-        withdrawAccess(school, { adminUserId: auth.userId, reason })
+        withdrawAccess(school, { adminUserId: auth.userId, reason, governingBodyId: auth.governingBodyId })
     );
     return getOwnSchool(auth, school.id);
 }
 
 // POST /api/governing-body/schools/:id/reactivate, for any admin, the note optional. Only
 // what the body switched off: deactivatedByAdminId is set by a Platform Admin alone, a
-// taken-over deactivation included. Read first for the answer, and claimed again by
-// restoreAccess, so a take-over at the same moment wins.
+// taken-over deactivation included. restoreAccess's claim holds the rule and names the
+// brake when it loses to it (ticket 08's follow-up, 2026-10-26), so nothing is read first.
 async function reactivateSchool(auth, schoolId, { reason } = {}) {
     const school = await loadOwnSchool(auth, schoolId);
-    const { deactivatedByAdminId } = await prisma.school.findUnique({
-        where: { id: school.id },
-        select: { deactivatedByAdminId: true },
-    });
-    if (deactivatedByAdminId) throw conflict(BRAKE);
-
     await runUnscoped('a governing body restoring its school access', () =>
         restoreAccess(school, { adminUserId: auth.userId, reason, onlyTheBodys: true })
     );
@@ -108,8 +110,9 @@ async function reactivateSchool(auth, schoolId, { reason } = {}) {
 }
 
 // POST /api/governing-body/schools/:id/release, for any admin. Under the School's lock: a
-// Principal sitting (409 otherwise), the claim that it is still this body's, its
-// affiliation ended, the audit. The body reads it no more, so only its name comes back.
+// Principal sitting and the School running (409 otherwise), the claim that it is still
+// this body's, its affiliation ended, the audit. The body reads it no more, so only its
+// name comes back.
 async function releaseSchool(auth, schoolId, { reason }) {
     const school = await loadOwnSchool(auth, schoolId);
     const trimmed = reason.trim();
@@ -120,6 +123,14 @@ async function releaseSchool(auth, schoolId, { reason }) {
             await lockSchool(tx, school.id, now);
             if (!(await tx.membershipRole.findFirst({ where: SITTING_PRINCIPAL, select: { id: true } }))) {
                 throw conflict(RELEASE_NEEDS_PRINCIPAL);
+            }
+            // Read under the lock: a deactivation at the same moment waits for it.
+            const state = await tx.school.findUnique({
+                where: { id: school.id },
+                select: { deactivatedAt: true, deactivatedByAdminId: true },
+            });
+            if (state.deactivatedAt) {
+                throw conflict(state.deactivatedByAdminId ? RELEASE_UNDER_BRAKE : RELEASE_SWITCHED_OFF);
             }
 
             const claimed = await tx.school.updateMany({
