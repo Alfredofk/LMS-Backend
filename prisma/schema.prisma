@@ -872,6 +872,9 @@ model School {
     assessmentExceptions AssessmentException[]
     gradeSetting      SchoolGradeSetting?
     signalSetting     SchoolSignalSetting?
+    slotDailyRollups  SlotDailyRollup[]
+    classDailyRollups ClassDailyRollup[]
+    schoolDailyRollups SchoolDailyRollup[]
     slotGradeSettings SlotGradeSetting[]
     slotDescriptions  SlotDescription[]
     homeroomNotes     HomeroomNote[]
@@ -1126,6 +1129,9 @@ model Semester {
     slotFinalisations SlotFinalisation[]
     examWeeks        ExamWeek[]
     reportCards      ReportCard[]
+    slotDailyRollups  SlotDailyRollup[]
+    classDailyRollups ClassDailyRollup[]
+    schoolDailyRollups SchoolDailyRollup[]
 
     @@unique([academicYearId, ordinal])
     @@index([schoolId, status])
@@ -1150,6 +1156,7 @@ model Subject {
     slotDescriptions SlotDescription[]
     slotFinalisations SlotFinalisation[]
     reportCardSubjects ReportCardSubject[]
+    slotDailyRollups  SlotDailyRollup[]
 
     @@unique([schoolId, code])
     @@index([schoolId])
@@ -1202,6 +1209,8 @@ model Class {
     slotFinalisations SlotFinalisation[]
     reportCards      ReportCard[]
     reportCardSubjects ReportCardSubject[]
+    slotDailyRollups  SlotDailyRollup[]
+    classDailyRollups ClassDailyRollup[]
 
     @@unique([schoolId, academicYearId, name])
     @@index([schoolId, gradeLevel])
@@ -2074,6 +2083,107 @@ model SchoolSignalSetting {
     updatedAt                 DateTime @updatedAt
 
     school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+}
+
+/// One slot's numbers on one local day (dashboard ticket 05, owner 2026-10-27), taken by
+/// the nightly rollup (dashboard.rollup.js, their only writer), over the Students placed in
+/// the Class then. Summed into the Principal's list per Subject per grade level (ticket 06),
+/// never shown on its own: a Class x Subject cell is one teacher (handoff #25). Keyed by
+/// the slot, not the ClassSubject row, so a replaced teacher does not break the 7-day
+/// change. Counts, never percentages, so a list's percentage is never an average of
+/// averages. Kept a year, then pruned, but for each Semester's last day.
+model SlotDailyRollup {
+    id                String   @id @default(cuid())
+    schoolId          String
+    semesterId        String
+    classId           String
+    subjectId         String
+    /// The School's local date it was taken on.
+    localDate         DateTime @db.Date
+    /// The instant it was taken: the dashboards' asOf.
+    takenAt           DateTime
+    studentsPlacedNow Int
+    /// At confirmed Sessions only.
+    attendancePresent Int
+    attendanceCounted Int
+    /// Published Content completed, of published x the Students placed.
+    contentCompleted  Int
+    contentPossible   Int
+    /// The running final grades, rounded as printed, of the Students the slot reports.
+    gradeSum          Int
+    gradeCount        Int
+    belowKktp         Int
+    /// By the teacher's rule (dashboard.signals.js, ticket 02).
+    withSignal        Int
+    createdAt         DateTime @default(now())
+
+    school   School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    semester Semester @relation(fields: [semesterId], references: [id], onDelete: Cascade)
+    class    Class    @relation(fields: [classId], references: [id], onDelete: Cascade)
+    subject  Subject  @relation(fields: [subjectId], references: [id])
+
+    @@unique([classId, subjectId, localDate])
+    @@index([schoolId, semesterId, localDate])
+}
+
+/// One Class's numbers on one local day (dashboard ticket 05), for the Principal's list per
+/// Class (ticket 06). Attendance, content and grades are its slot rows' sums; the Students
+/// below the KKTP, with a signal and placed are counted once each, which no sum of slot
+/// rows can give. With a signal is the Homeroom Teacher's rule (classSignalsOf, owner
+/// 2026-10-27), so it equals what the Class's own view shows.
+model ClassDailyRollup {
+    id                String   @id @default(cuid())
+    schoolId          String
+    semesterId        String
+    classId           String
+    localDate         DateTime @db.Date
+    takenAt           DateTime
+    studentsPlacedNow Int
+    attendancePresent Int
+    attendanceCounted Int
+    contentCompleted  Int
+    contentPossible   Int
+    gradeSum          Int
+    gradeCount        Int
+    /// In at least one Subject.
+    belowKktp         Int
+    withSignal        Int
+    createdAt         DateTime @default(now())
+
+    school   School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    semester Semester @relation(fields: [semesterId], references: [id], onDelete: Cascade)
+    class    Class    @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+    @@unique([classId, localDate])
+    @@index([schoolId, semesterId, localDate])
+}
+
+/// One School's numbers on one local day (dashboard ticket 05), its Class rows' sums - a
+/// Student is placed in one Class at a time. The Governing Body's rows read it (ticket 07).
+/// Written first in the School's transaction, as its claim: its row is the mark that the
+/// School is done for the day, and its unique key keeps two processes to one.
+model SchoolDailyRollup {
+    id                String   @id @default(cuid())
+    schoolId          String
+    semesterId        String
+    localDate         DateTime @db.Date
+    takenAt           DateTime
+    studentsPlacedNow Int
+    attendancePresent Int
+    attendanceCounted Int
+    contentCompleted  Int
+    contentPossible   Int
+    gradeSum          Int
+    gradeCount        Int
+    belowKktp         Int
+    withSignal        Int
+    createdAt         DateTime @default(now())
+
+    school   School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+    semester Semester @relation(fields: [semesterId], references: [id], onDelete: Cascade)
+
+    @@unique([schoolId, localDate])
+    @@index([schoolId, semesterId, localDate])
 }
 
 /// The Answering Teacher's Description of one Student in one slot

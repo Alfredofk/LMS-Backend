@@ -29,6 +29,7 @@ import trackingRoutes from './modules/tracking/tracking.routes.js';
 import assessmentRoutes from './modules/assessment/assessment.routes.js';
 import gradingRoutes from './modules/grading/grading.routes.js';
 import dashboardRoutes from './modules/dashboard/dashboard.routes.js';
+import { startRollupTimer } from './modules/dashboard/dashboard.rollup.js';
 import governingBodyRegistrationRoutes, {
     adminRegistrationRouter as adminGoverningBodyRegistrationRoutes,
     adminBodyRouter as adminGoverningBodyRoutes,
@@ -187,6 +188,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         // never a reason to refuse to serve - resend-verification is the remedy
         // and it needs this process up (auth.service.js:44-51).
         void verifyTransport();
+
+        // The nightly rollup (dashboard ticket 05) runs only in the process that serves:
+        // a probe importing the app starts no timer, and calls the rollup itself.
+        startRollupTimer();
     });
 }
 

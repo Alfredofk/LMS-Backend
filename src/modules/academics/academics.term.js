@@ -15,10 +15,11 @@ import { todayOf } from '../sessions/sessions.service.js';
 const latestBegun = (rows, today) => rows.filter((row) => toDay(row.startDate) <= today).at(-1) ?? rows[0] ?? null;
 
 // The School's current year and Semester, read in its scope. Either may be null: a
-// School with no ACTIVE year, or a year with no Semester yet.
-async function currentTermOf(schoolId) {
+// School with no ACTIVE year, or a year with no Semester yet. The nightly rollup passes
+// the moment it rolls up at, so a probe can fix it (dashboard ticket 05).
+async function currentTermOf(schoolId, now = new Date()) {
     const [today, years] = await Promise.all([
-        todayOf(schoolId),
+        todayOf(schoolId, now),
         prisma.academicYear.findMany({
             where: { status: 'ACTIVE' },
             select: { id: true, label: true, startDate: true },

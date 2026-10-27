@@ -88,7 +88,8 @@ async function slotFactsOf(auth, slot, windows) {
     return { book, heldSessions };
 }
 
-// Each Student's ABSENT at the slot's Sessions in the window: the teacher's view.
+// Each Student's ABSENT at the slot's Sessions in the window: the teacher's view, and the
+// rollup's slot rows (ticket 05).
 async function absencesOf(slot, placed, windows) {
     const where = absentInWindow(windows);
     const rows = await prisma.attendance.groupBy({
@@ -250,6 +251,7 @@ function classSignalsOf(studentProfileId, { slots, absentDays, activeSince, thre
 export {
     signalWindowsOf,
     slotFactsOf,
+    absencesOf,
     absentDaysOf,
     activeSinceOf,
     signalFactsOf,
