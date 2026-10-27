@@ -185,6 +185,8 @@ const slotSessionWhere = (classSubject) => ({
 
 const semesterView = (semester) => ({ id: semester.id, ordinal: semester.ordinal });
 
+// The later of two instants, either of which may be null. The Homeroom Teacher's dashboard
+// takes a Student's last activity across the Class's slots with it (dashboard ticket 03).
 const latest = (a, b) => (!a || (b && b > a) ? b : a);
 
 // Each student's own row over a slot - Content opened and completed out of what is
@@ -369,4 +371,4 @@ async function ownProgress(auth) {
     return { class: placement.class, classSubjects };
 }
 
-export { recordClientEvents, classSubjectProgress, ownProgress, slotSessionWhere, rosterOf, progressOf };
+export { recordClientEvents, classSubjectProgress, ownProgress, slotSessionWhere, rosterOf, progressOf, latest };

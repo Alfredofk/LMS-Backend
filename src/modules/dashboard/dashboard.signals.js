@@ -1,7 +1,7 @@
 import { prisma } from '../../shared/prisma.js';
 import { todayOf, localDaysSpan, semesterSpan } from '../sessions/sessions.service.js';
 import { CONFIRMED_SESSION } from '../attendance/attendance.service.js';
-import { slotSessionWhere } from '../tracking/tracking.service.js';
+import { latest, slotSessionWhere } from '../tracking/tracking.service.js';
 import { byName } from '../assessment/assessment.marking.js';
 import { gradeBookOf } from '../grading/grading.grades.js';
 
@@ -216,8 +216,6 @@ function studentsNeedingSupportOf({ roster, placed, progress, facts, thresholds,
         .filter((student) => student.signals.length > 0)
         .sort(byName);
 }
-
-const latest = (a, b) => (!a || (b && b > a) ? b : a);
 
 // One Student's signals across the Class, the Homeroom Teacher's view (ticket 03): each
 // slot's content and grade signals, naming its Subject, and the Class's own
