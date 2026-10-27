@@ -1,11 +1,16 @@
 import { z } from 'zod';
 
 // The dashboards take one body, the School's Support Signal thresholds (dashboard ticket
-// 02), and one path id, a Class's (ticket 03). Only the shape is checked here: whole numbers
-// within their bounds (owner, 2026-10-27), null putting one back to the built-in value.
-// Who may set them, and who reads a Class, is the service's.
+// 02), one path id, a Class's (ticket 03), and one query, the Semester of the School's
+// aggregate (ticket 06). Only the shape is checked here: whole numbers within their bounds
+// (owner, 2026-10-27), null putting one back to the built-in value. Who may set them, who
+// reads a Class, and which Semesters may be chosen, is the service's.
 
 const idParams = z.object({ id: z.string().min(1) });
+
+// ---- the School's aggregate ----
+
+const schoolQuery = z.object({ semesterId: z.string().min(1).optional() });
 
 // ---- signal settings ----
 
@@ -36,4 +41,4 @@ const signalSettingsBody = z
     })
     .refine((value) => Object.keys(value).some((key) => key !== 'updatedAt'), 'Send at least one change');
 
-export { idParams, signalSettingsBody };
+export { idParams, schoolQuery, signalSettingsBody };

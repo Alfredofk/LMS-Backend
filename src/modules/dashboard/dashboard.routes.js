@@ -3,7 +3,7 @@ import { Router } from 'express';
 import { requireAuth, requireActiveMembership, requireRole, requireRoleHidden } from '../../shared/auth.js';
 import { validate } from '../../shared/validate.js';
 import * as controller from './dashboard.controller.js';
-import { idParams, signalSettingsBody } from './dashboard.schema.js';
+import { idParams, schoolQuery, signalSettingsBody } from './dashboard.schema.js';
 
 // Mounted at /api/dashboard (the dashboard spec, 2026-10-26): read-only views across the
 // other modules (handoff #25, #31).
@@ -23,6 +23,9 @@ import { idParams, signalSettingsBody } from './dashboard.schema.js';
 // - GET /marking-by-teacher (ticket 04), for the Principal or a Vice Principal (checked
 //   again in the service, ADR-0009): each teacher's totals waiting for marking and for
 //   release, and what waits in a slot nobody answers for.
+// - GET /school?semesterId= (ticket 06), for the Principal or a Vice Principal (checked
+//   again in the service): the School, its Classes and its Subjects per grade level, as of
+//   the nightly rollup, for the current Semester or a CLOSED one; another is 404.
 //
 // No Student or Guardian reads anything here (the spec's invariant 1).
 
@@ -37,6 +40,7 @@ router.use(requireAuth, requireActiveMembership);
 
 router.get('/teaching', teacher, controller.getTeaching);
 router.get('/marking-by-teacher', principalOrVice, controller.getMarkingByTeacher);
+router.get('/school', principalOrVice, validate({ query: schoolQuery }), controller.getSchool);
 
 router.get('/signal-settings', staff, controller.getSignalSettings);
 router.put('/signal-settings', principalOrVice, validate({ body: signalSettingsBody }), controller.setSignalSettings);
