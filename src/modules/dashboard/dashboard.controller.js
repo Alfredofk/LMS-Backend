@@ -9,6 +9,10 @@ async function getTeaching(req, res) {
     return ok(res, await service.teachingDashboard(req.auth));
 }
 
+async function getMarkingByTeacher(req, res) {
+    return ok(res, await service.markingByTeacher(req.auth));
+}
+
 async function getSignalSettings(req, res) {
     return ok(res, { settings: await settings.readSignalSettings() });
 }
@@ -22,4 +26,4 @@ async function getClass(req, res) {
     return ok(res, await homeroom.classDashboard(req.auth, req.validated.params.id));
 }
 
-export { getTeaching, getSignalSettings, setSignalSettings, getClass };
+export { getTeaching, getMarkingByTeacher, getSignalSettings, setSignalSettings, getClass };

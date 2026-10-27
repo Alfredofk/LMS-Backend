@@ -1,7 +1,8 @@
 import { prisma } from '../../shared/prisma.js';
+import { assertPrincipalOrVice } from '../../shared/guards.js';
 import { currentTermOf } from '../academics/academics.term.js';
 import { progressOf, rosterOf } from '../tracking/tracking.service.js';
-import { standingsOf } from '../assessment/assessment.marking.js';
+import { byName, standingsOf } from '../assessment/assessment.marking.js';
 import { assessmentSelect } from '../assessment/assessment.service.js';
 import { isPractice } from '../assessment/assessment.practice.js';
 import { SLOTS_AT_ONCE, mapAtMost } from '../grading/grading.finalising.js';
@@ -32,6 +33,19 @@ import { signalFactsOf, signalWindowsOf, studentsNeedingSupportOf } from './dash
 // - Oldest first, with oldestWaitingSince: what has waited longest is on top.
 // - Each slot names its Students placed now who need support (ticket 02,
 //   dashboard.signals.js), against the School's thresholds, which the answer carries.
+// - The count per teacher (ticket 04, the spec's D4; the plan, 2026-10-27, through the
+//   picker), for the Principal and the Vice Principals: each teacher's totals waiting for
+//   marking and for release, the sums of their own queue, read live through the same
+//   queueOfSlots, so the two never disagree. Measured at 3.3-3.6 s for 450 slots with every
+//   attempt waiting; one standingsOf over the whole School took 9.3-10.7 s
+//   (probes/04-marking-by-teacher-measure.mjs).
+//   - Every teacher answering for a slot of an ACTIVE year is listed, zeros included, by
+//     name: a list of the staff, not of the late.
+//   - No Assessment, no Student, no other number: the owner's exception to handoff #25,
+//     confined to the marking queue.
+//   - What waits in a slot nobody answers for now (its teacher left or the assignment
+//     ended, no successor yet) is one line beside the list, unanswered (owner's pick): a
+//     School's number, not a teacher's.
 
 const slotSelect = {
     id: true,
@@ -136,25 +150,19 @@ function queueEntryOf(row, standings, now) {
     };
 }
 
-// The Assessments waiting on the teacher, oldest first. Only those with an attempt neither
-// void nor released are read through standingsOf: the rest have nothing waiting.
-async function queueOf(auth, now) {
-    const taught = await prisma.classSubject.findMany({
-        where: {
-            teacherMembershipId: auth.membershipId,
-            ...OWN_LIVE_ROW,
-            class: { academicYear: { status: 'ACTIVE' } },
-        },
-        select: { classId: true, subjectId: true, semesterId: true },
-    });
-    if (taught.length === 0) return [];
+// The Assessments waiting on these slots, each { classId, subjectId, semesterId }, oldest
+// first: a teacher's queue, and the counts per teacher (ticket 04). Only those with an
+// attempt neither void nor released are read through standingsOf: the rest have nothing
+// waiting.
+async function queueOfSlots(slots, now) {
+    if (slots.length === 0) return [];
 
     const rows = await prisma.assessment.findMany({
         where: {
             deletedAt: null,
             cancelledAt: null,
             publishedAt: { not: null },
-            classSubject: { status: 'ACTIVE', OR: taught },
+            classSubject: { status: 'ACTIVE', OR: slots },
             submissions: { some: { voidedAt: null, releasedAt: null } },
         },
         select: assessmentSelect,
@@ -166,6 +174,20 @@ async function queueOf(auth, now) {
         .map((row) => queueEntryOf(row, standings.get(row.id), now))
         .filter((entry) => entry.marking + entry.release > 0)
         .sort((a, b) => a.oldestWaitingSince - b.oldestWaitingSince);
+}
+
+// The Assessments waiting on a teacher: those of every slot they answer for now, in the
+// ACTIVE years.
+async function queueOf(membershipId, now) {
+    const taught = await prisma.classSubject.findMany({
+        where: {
+            teacherMembershipId: membershipId,
+            ...OWN_LIVE_ROW,
+            class: { academicYear: { status: 'ACTIVE' } },
+        },
+        select: { classId: true, subjectId: true, semesterId: true },
+    });
+    return queueOfSlots(taught, now);
 }
 
 // GET /api/dashboard/teaching, for a member holding TEACHER: their slots of the current
@@ -186,9 +208,70 @@ async function teachingDashboard(auth) {
 
     const [figures, queue] = await Promise.all([
         mapAtMost(slots, SLOTS_AT_ONCE, (slot) => slotFiguresOf(auth, slot, { thresholds, windows })),
-        queueOf(auth, now),
+        queueOf(auth.membershipId, now),
     ]);
     return { semester: semesterView(term), thresholds, slots: figures, queue };
 }
 
-export { teachingDashboard, slotSelect, semesterView, percentOf };
+// A slot as queueOfSlots takes it, and as text, to tell slots apart.
+const slotKeyOf = ({ classId, subjectId, semesterId }) => ({ classId, subjectId, semesterId });
+const slotTextOf = (row) => `${row.classId}:${row.subjectId}:${row.semesterId}`;
+
+const totalsOf = (queue) => ({
+    marking: queue.reduce((sum, entry) => sum + entry.marking, 0),
+    release: queue.reduce((sum, entry) => sum + entry.release, 0),
+});
+
+// GET /api/dashboard/marking-by-teacher (ticket 04): each teacher's totals, the sums of their
+// own queue, by name, and what waits in a slot nobody answers for now. For the Principal and
+// a Vice Principal, checked against the database as the signal settings are (ADR-0009): 403
+// to anyone else. Read only, but reading attempts closes one past its deadline (assessment
+// ticket 03).
+async function markingByTeacher(auth) {
+    await assertPrincipalOrVice(auth);
+    const now = new Date();
+    const rows = await prisma.classSubject.findMany({
+        where: { status: 'ACTIVE', class: { academicYear: { status: 'ACTIVE' } } },
+        select: {
+            classId: true,
+            subjectId: true,
+            semesterId: true,
+            endedAt: true,
+            teacherMembershipId: true,
+            teacher: { select: { user: { select: { fullName: true } } } },
+        },
+    });
+
+    // A teacher's slots are their live rows, as queueOf reads them. A slot whose rows have
+    // all ended is nobody's until a successor takes it (answeringTeacherOf's rule).
+    const teachers = new Map();
+    const answered = new Set();
+    for (const row of rows.filter((found) => found.endedAt === null)) {
+        answered.add(slotTextOf(row));
+        if (!teachers.has(row.teacherMembershipId)) {
+            teachers.set(row.teacherMembershipId, {
+                membershipId: row.teacherMembershipId,
+                fullName: row.teacher.user.fullName,
+                slots: [],
+            });
+        }
+        teachers.get(row.teacherMembershipId).slots.push(slotKeyOf(row));
+    }
+    const unanswered = new Map(
+        rows.filter((row) => !answered.has(slotTextOf(row))).map((row) => [slotTextOf(row), slotKeyOf(row)])
+    );
+
+    // The slots nobody answers for are read as one more group, last.
+    const groups = [...teachers.values(), { slots: [...unanswered.values()] }];
+    const totals = await mapAtMost(groups, SLOTS_AT_ONCE, async (group) =>
+        totalsOf(await queueOfSlots(group.slots, now))
+    );
+    return {
+        teachers: [...teachers.values()]
+            .map(({ membershipId, fullName }, index) => ({ membershipId, fullName, ...totals[index] }))
+            .sort(byName),
+        unanswered: totals.at(-1),
+    };
+}
+
+export { teachingDashboard, markingByTeacher, slotSelect, semesterView, percentOf };

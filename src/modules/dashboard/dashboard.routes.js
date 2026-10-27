@@ -20,6 +20,9 @@ import { idParams, signalSettingsBody } from './dashboard.schema.js';
 // - GET /classes/:id (ticket 03): a Class across every Subject of the current Semester,
 //   for its Homeroom Teacher, the Principal and the Vice Principals; the service answers
 //   anyone else 404, and a Student is hidden here, as from the Notes.
+// - GET /marking-by-teacher (ticket 04), for the Principal or a Vice Principal (checked
+//   again in the service, ADR-0009): each teacher's totals waiting for marking and for
+//   release, and what waits in a slot nobody answers for.
 //
 // No Student or Guardian reads anything here (the spec's invariant 1).
 
@@ -33,6 +36,7 @@ const classReader = requireRoleHidden('PRINCIPAL', 'VICE_PRINCIPAL', 'TEACHER');
 router.use(requireAuth, requireActiveMembership);
 
 router.get('/teaching', teacher, controller.getTeaching);
+router.get('/marking-by-teacher', principalOrVice, controller.getMarkingByTeacher);
 
 router.get('/signal-settings', staff, controller.getSignalSettings);
 router.put('/signal-settings', principalOrVice, validate({ body: signalSettingsBody }), controller.setSignalSettings);
