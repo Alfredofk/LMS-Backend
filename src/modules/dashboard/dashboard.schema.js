@@ -1,9 +1,11 @@
 import { z } from 'zod';
 
-// The dashboards take one body: the School's Support Signal thresholds (dashboard ticket
-// 02). Only the shape is checked here: whole numbers within their bounds (owner,
-// 2026-10-27), null putting one back to the built-in value. Who may set them is the
-// service's.
+// The dashboards take one body, the School's Support Signal thresholds (dashboard ticket
+// 02), and one path id, a Class's (ticket 03). Only the shape is checked here: whole numbers
+// within their bounds (owner, 2026-10-27), null putting one back to the built-in value.
+// Who may set them, and who reads a Class, is the service's.
+
+const idParams = z.object({ id: z.string().min(1) });
 
 // ---- signal settings ----
 
@@ -34,4 +36,4 @@ const signalSettingsBody = z
     })
     .refine((value) => Object.keys(value).some((key) => key !== 'updatedAt'), 'Send at least one change');
 
-export { signalSettingsBody };
+export { idParams, signalSettingsBody };

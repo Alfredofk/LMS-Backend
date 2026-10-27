@@ -28,9 +28,10 @@ async function currentTermOf(schoolId) {
     const year = latestBegun(years, today);
     if (!year) return { year: null, semester: null };
 
+    // The end too, for the Semester's span (the Homeroom Teacher's dashboard, ticket 03).
     const semesters = await prisma.semester.findMany({
         where: { academicYearId: year.id },
-        select: { id: true, ordinal: true, startDate: true },
+        select: { id: true, ordinal: true, startDate: true, endDate: true },
         orderBy: { startDate: 'asc' },
     });
     return { year, semester: latestBegun(semesters, today) };

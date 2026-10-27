@@ -223,7 +223,7 @@ async function loadNotes(auth, classId, semesterId) {
 
 // The Students placed in the Class now, still in the School, by name: those whose
 // Notes it writes (owner, 2026-10-17), and whose missing Notes the readiness board
-// names (ticket 04).
+// names (ticket 04). The Homeroom Teacher's dashboard lists them too (dashboard 03).
 async function placedNowIn(classId) {
     const rows = await prisma.classMembership.findMany({
         where: { classId, endedAt: null, studentProfile: { endedAt: null } },
@@ -340,4 +340,4 @@ async function writeNotes(auth, classId, semesterId, { notes }) {
     return storedRowsOf('homeroomNote', { semesterId: semester.id }, notes);
 }
 
-export { descriptionsOf, writeDescriptions, loadNotes, notedIn, readNotes, writeNotes };
+export { descriptionsOf, writeDescriptions, loadNotes, placedNowIn, notedIn, readNotes, writeNotes };

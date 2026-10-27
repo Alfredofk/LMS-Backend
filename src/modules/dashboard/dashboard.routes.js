@@ -1,9 +1,9 @@
 import { Router } from 'express';
 
-import { requireAuth, requireActiveMembership, requireRole } from '../../shared/auth.js';
+import { requireAuth, requireActiveMembership, requireRole, requireRoleHidden } from '../../shared/auth.js';
 import { validate } from '../../shared/validate.js';
 import * as controller from './dashboard.controller.js';
-import { signalSettingsBody } from './dashboard.schema.js';
+import { idParams, signalSettingsBody } from './dashboard.schema.js';
 
 // Mounted at /api/dashboard (the dashboard spec, 2026-10-26): read-only views across the
 // other modules (handoff #25, #31).
@@ -17,6 +17,9 @@ import { signalSettingsBody } from './dashboard.schema.js';
 //   thresholds, each with its source. PUT /signal-settings, for the Principal or a Vice
 //   Principal (checked again in the service, ADR-0009), audited; null puts a value back
 //   to the built-in one.
+// - GET /classes/:id (ticket 03): a Class across every Subject of the current Semester,
+//   for its Homeroom Teacher, the Principal and the Vice Principals; the service answers
+//   anyone else 404, and a Student is hidden here, as from the Notes.
 //
 // No Student or Guardian reads anything here (the spec's invariant 1).
 
@@ -25,6 +28,7 @@ const router = Router();
 const teacher = requireRole('TEACHER');
 const staff = requireRole('PRINCIPAL', 'VICE_PRINCIPAL', 'TEACHER');
 const principalOrVice = requireRole('PRINCIPAL', 'VICE_PRINCIPAL');
+const classReader = requireRoleHidden('PRINCIPAL', 'VICE_PRINCIPAL', 'TEACHER');
 
 router.use(requireAuth, requireActiveMembership);
 
@@ -32,5 +36,7 @@ router.get('/teaching', teacher, controller.getTeaching);
 
 router.get('/signal-settings', staff, controller.getSignalSettings);
 router.put('/signal-settings', principalOrVice, validate({ body: signalSettingsBody }), controller.setSignalSettings);
+
+router.get('/classes/:id', classReader, validate({ params: idParams }), controller.getClass);
 
 export default router;

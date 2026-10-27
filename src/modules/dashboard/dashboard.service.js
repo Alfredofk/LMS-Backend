@@ -191,4 +191,4 @@ async function teachingDashboard(auth) {
     return { semester: semesterView(term), thresholds, slots: figures, queue };
 }
 
-export { teachingDashboard };
+export { teachingDashboard, slotSelect, semesterView, percentOf };

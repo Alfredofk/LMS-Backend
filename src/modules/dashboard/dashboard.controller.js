@@ -1,6 +1,7 @@
 import { ok } from '../../shared/errors.js';
 import * as service from './dashboard.service.js';
 import * as settings from './dashboard.settings.js';
+import * as homeroom from './dashboard.homeroom.js';
 
 // Thin, like the other controllers: the service shapes each dashboard whole.
 
@@ -17,4 +18,8 @@ async function setSignalSettings(req, res) {
     return ok(res, { settings: saved, message: 'Signal settings saved.' });
 }
 
-export { getTeaching, getSignalSettings, setSignalSettings };
+async function getClass(req, res) {
+    return ok(res, await homeroom.classDashboard(req.auth, req.validated.params.id));
+}
+
+export { getTeaching, getSignalSettings, setSignalSettings, getClass };
